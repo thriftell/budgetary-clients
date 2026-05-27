@@ -1,0 +1,90 @@
+name: publish
+
+on:
+  push:
+    tags:
+      - "sdk-ts-v*"
+      - "sdk-py-v*"
+      - "vscode-v*"
+      - "claude-code-v*"
+      - "codex-v*"
+
+jobs:
+  sdk-ts:
+    name: Publish @budgetary/sdk to npm
+    if: startsWith(github.ref, 'refs/tags/sdk-ts-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile=false
+      - run: pnpm --filter @budgetary/sdk build
+      - name: Publish (placeholder)
+        run: echo "publish placeholder"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  sdk-py:
+    name: Publish budgetary to PyPI
+    if: startsWith(github.ref, 'refs/tags/sdk-py-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist + wheel
+        working-directory: sdk/python
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+      - name: Publish (placeholder)
+        run: echo "publish placeholder"
+
+  vscode:
+    name: Publish VS Code extension
+    if: startsWith(github.ref, 'refs/tags/vscode-v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile=false
+      - run: pnpm --filter budgetary-vscode build
+      - name: Publish (placeholder)
+        run: echo "publish placeholder"
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+
+  claude-code:
+    name: Publish Claude Code plugin (placeholder)
+    if: startsWith(github.ref, 'refs/tags/claude-code-v')
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "publish placeholder"
+
+  codex:
+    name: Publish Codex plugin (placeholder)
+    if: startsWith(github.ref, 'refs/tags/codex-v')
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "publish placeholder"

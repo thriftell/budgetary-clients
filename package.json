@@ -1,0 +1,16 @@
+{
+  "name": "budgetary-clients",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Monorepo for Budgetary clients (SDKs and editor plugins).",
+  "license": "Apache-2.0",
+  "scripts": {
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test",
+    "build": "pnpm -r build"
+  },
+  "packageManager": "pnpm@10.23.0",
+  "engines": {
+    "node": ">=22"
+  }
+}
