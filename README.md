@@ -4,7 +4,7 @@
 
 **Budgetary tells you how many tokens an LLM query will cost — before you run it.**
 
-Budgetary is a hosted API at `https://api.budgetary.dev` that returns probabilistic pre-inference token-spend estimates for LLM queries. This repository holds the open-source clients that talk to it: language SDKs and editor plugins.
+Budgetary is a hosted API at `https://api.budgetary.tools` that returns probabilistic pre-inference token-spend estimates for LLM queries. This repository holds the open-source clients that talk to it: language SDKs and editor plugins.
 
 ## Quick example
 
@@ -29,7 +29,7 @@ See [docs/installation.md](docs/installation.md) for per-client setup:
 
 ## API
 
-Bearer-auth HTTP API at `https://api.budgetary.dev`. The wire contract is published at [docs/api-contract.md](docs/api-contract.md).
+Bearer-auth HTTP API at `https://api.budgetary.tools`. The wire contract is published at [docs/api-contract.md](docs/api-contract.md).
 
 ## Status
 

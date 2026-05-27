@@ -1,6 +1,6 @@
 # @budgetary/sdk
 
-TypeScript SDK for the [Budgetary](https://api.budgetary.dev) API — a hosted service that returns probabilistic pre-inference estimates of token spend for LLM queries. The SDK is a thin, typed HTTP wrapper with zero runtime dependencies; it speaks the v1 contract documented at [docs/api-contract.md](../../docs/api-contract.md).
+TypeScript SDK for the [Budgetary](https://api.budgetary.tools) API — a hosted service that returns probabilistic pre-inference estimates of token spend for LLM queries. The SDK is a thin, typed HTTP wrapper with zero runtime dependencies; it speaks the v1 contract documented at [docs/api-contract.md](../../docs/api-contract.md).
 
 ## Install
 
@@ -66,7 +66,7 @@ The full hierarchy:
 | Option | Type | Default | Notes |
 |---|---|---|---|
 | `apiKey` | `string` | _required_ | Sent as `Authorization: Bearer <apiKey>`. |
-| `baseUrl` | `string` | `https://api.budgetary.dev` | Override for staging or self-hosted endpoints. |
+| `baseUrl` | `string` | `https://api.budgetary.tools` | Override for staging or self-hosted endpoints. |
 | `timeoutMs` | `number` | `10_000` | Per-request timeout via `AbortSignal.timeout`. |
 | `maxRetries` | `number` | `5` | Maximum retries on `429` and `5xx`. Total attempts = `maxRetries + 1`. |
 | `fetchImpl` | `typeof fetch` | global `fetch` | Inject a mock fetch in tests. |
