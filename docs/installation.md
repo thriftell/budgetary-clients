@@ -1,0 +1,55 @@
+# Installation
+
+Every Budgetary client talks to the hosted API at `https://api.budgetary.dev` using a bearer key. Get one from the dashboard, then pick the client(s) you want.
+
+> **Status:** all clients in this repository are stubs in the bootstrap release. Install commands below will work once each package ships its first real version.
+
+## TypeScript / JavaScript SDK
+
+```bash
+pnpm add @budgetary/sdk
+# or
+npm install @budgetary/sdk
+```
+
+Configure the client with your API key (typically via environment variable):
+
+```ts
+import { BudgetaryClient } from "@budgetary/sdk";
+
+const budgetary = new BudgetaryClient({
+  apiKey: process.env.BUDGETARY_API_KEY!,
+});
+```
+
+## Python SDK
+
+```bash
+pip install budgetary
+```
+
+```python
+from budgetary import BudgetaryClient
+
+client = BudgetaryClient(api_key=os.environ["BUDGETARY_API_KEY"])
+```
+
+## VS Code extension
+
+Install **Budgetary** from the VS Code Marketplace (or Open VSX). After install, run the `Budgetary: Sign In` command and paste your API key when prompted.
+
+## Claude Code plugin
+
+Once published, install with:
+
+```bash
+claude plugins install budgetary
+```
+
+## Codex plugin
+
+Installation instructions will land alongside the first published Codex release.
+
+---
+
+For the wire-level contract, see [api-contract.md](./api-contract.md).
