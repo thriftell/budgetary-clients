@@ -1,3 +1,4 @@
 packages:
   - "sdk/typescript"
   - "clients/vscode"
+  - "clients/claude-code"

@@ -1,6 +1,0 @@
-{
-  "name": "budgetary",
-  "version": "0.0.0",
-  "description": "Budgetary client",
-  "entry": "src/index.ts"
-}

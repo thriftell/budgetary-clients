@@ -2,6 +2,22 @@
 
 All notable changes to the Budgetary clients are tracked here. Newest first.
 
+## 0004 — Claude Code plugin
+
+- New `@budgetary/claude-code` plugin: provides a `/estimate <task>` slash command
+  that calls Budgetary for a pre-flight token-spend estimate, and a session-end
+  hook that submits the realized actuals so future estimates calibrate.
+- Pending estimates persist under `~/.budgetary/pending.json` so the actuals
+  submission survives a Claude Code restart between estimate and execution.
+- API key resolution: `BUDGETARY_API_KEY` env var → `~/.budgetary/config.json` →
+  graceful "configure your key" hint if neither is set.
+- `project_id` is derived from a SHA-256 prefix of the working directory so
+  ledger entries group naturally per project without exposing filesystem paths.
+- This plugin is the first telemetry-producing client; calibration data starts
+  flowing once users install it and run `/estimate`.
+- Package version stays `0.0.0`; plugin-marketplace publishing wires up in a
+  later release.
+
 ## 0003 — Python SDK first implementation
 
 - `budgetary` (Python) now implements `estimate()`, `submit_actuals()`, and
