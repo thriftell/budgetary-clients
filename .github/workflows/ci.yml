@@ -18,8 +18,8 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile=false
       - run: pnpm -r lint
-      - run: pnpm -r test
       - run: pnpm -r build
+      - run: pnpm -r test
 
   py:
     name: Python SDK
