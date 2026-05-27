@@ -1,0 +1,29 @@
+{
+  "name": "@budgetary/codex",
+  "version": "0.0.0",
+  "description": "Codex CLI plugin for the Budgetary token-spend estimator.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "files": [
+    "dist",
+    "bin",
+    ".codex-plugin",
+    "skills",
+    "hooks",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "lint": "echo \"@budgetary/codex: lint placeholder\""
+  },
+  "dependencies": {
+    "@budgetary/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

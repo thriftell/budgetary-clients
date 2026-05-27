@@ -1,0 +1,16 @@
+{
+  "name": "budgetary",
+  "version": "0.0.0",
+  "description": "Pre-flight token-spend estimates and session-end calibration for Codex.",
+  "keywords": ["budgetary", "tokens", "estimate", "telemetry"],
+  "skills": "./skills",
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Budgetary",
+    "shortDescription": "Pre-flight LLM token-spend estimates.",
+    "longDescription": "Adds an `estimate` skill that returns a probabilistic token-spend estimate for a task before you run it, and a Stop hook that submits realized token totals so future estimates calibrate.",
+    "developerName": "Budgetary",
+    "category": "telemetry",
+    "websiteURL": "https://api.budgetary.tools"
+  }
+}

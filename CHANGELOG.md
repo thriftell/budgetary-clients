@@ -2,6 +2,18 @@
 
 All notable changes to the Budgetary clients are tracked here. Newest first.
 
+## 0006 — Codex plugin
+
+- New `@budgetary/codex` plugin: provides a `/estimate <task>` slash command
+  (or equivalent host surface) and a session-end hook, mirroring the
+  Claude Code plugin's behavior for Codex users.
+- Shares `~/.budgetary/pending.json` and the same API-key resolution chain
+  with the Claude Code plugin — a user with both installed configures once.
+- `context.host = "codex"` on outbound estimates so ledger entries
+  distinguish hosts.
+- Package version stays `0.0.0`; Codex extension marketplace publishing
+  wires up in a later release.
+
 ## 0005 — VS Code dashboard extension
 
 - New `@budgetary/vscode` extension: command `Budgetary: Show Dashboard`
