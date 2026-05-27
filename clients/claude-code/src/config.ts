@@ -2,6 +2,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+export const DEFAULT_BASE_URL = "https://api.budgetary.tools";
+
 export interface ConfigEnv {
   env: NodeJS.ProcessEnv;
   home?: string;
@@ -9,6 +11,7 @@ export interface ConfigEnv {
 
 export interface ResolvedKey {
   apiKey: string;
+  baseUrl: string;
   source: "env" | "config_file";
 }
 
@@ -29,7 +32,7 @@ export function resolveApiKey(
 ): ResolvedKey | null {
   const fromEnv = env.env.BUDGETARY_API_KEY;
   if (fromEnv && fromEnv.length > 0) {
-    return { apiKey: fromEnv, source: "env" };
+    return { apiKey: fromEnv, baseUrl: DEFAULT_BASE_URL, source: "env" };
   }
 
   const path = configFilePath(env);
@@ -37,10 +40,15 @@ export function resolveApiKey(
 
   try {
     const raw = readFileSync(path, "utf8");
-    const parsed = JSON.parse(raw) as { api_key?: unknown };
-    if (typeof parsed.api_key === "string" && parsed.api_key.length > 0) {
-      return { apiKey: parsed.api_key, source: "config_file" };
+    const parsed = JSON.parse(raw) as { api_key?: unknown; base_url?: unknown };
+    if (typeof parsed.api_key !== "string" || parsed.api_key.length === 0) {
+      return null;
     }
+    const baseUrl =
+      typeof parsed.base_url === "string" && parsed.base_url.length > 0
+        ? parsed.base_url
+        : DEFAULT_BASE_URL;
+    return { apiKey: parsed.api_key, baseUrl, source: "config_file" };
   } catch {
     // Treat unreadable / malformed config as "no key"; callers will print the hint.
   }

@@ -53,7 +53,10 @@ export async function runEstimate(args: EstimateInvocation): Promise<number> {
 
   const factory =
     args.clientFactory ?? ((opts: BudgetaryClientOptions) => new BudgetaryClient(opts));
-  const client = factory({ apiKey: resolved.apiKey });
+  const client = factory({
+    apiKey: resolved.apiKey,
+    baseUrl: resolved.baseUrl,
+  });
 
   const projectId = projectIdFromCwd(args.cwd);
   let response: EstimateResponse;

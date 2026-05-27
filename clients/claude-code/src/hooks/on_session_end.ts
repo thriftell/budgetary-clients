@@ -77,7 +77,10 @@ export async function runOnSessionEnd(args: SessionEndInvocation): Promise<numbe
 
   const factory =
     args.clientFactory ?? ((opts: BudgetaryClientOptions) => new BudgetaryClient(opts));
-  const client = factory({ apiKey: resolved.apiKey });
+  const client = factory({
+    apiKey: resolved.apiKey,
+    baseUrl: resolved.baseUrl,
+  });
 
   try {
     await client.submitActuals({
