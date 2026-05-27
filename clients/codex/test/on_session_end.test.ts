@@ -354,6 +354,55 @@ describe("runOnSessionEnd (Codex Stop hook)", () => {
   });
 });
 
+describe("runOnSessionEnd — baseUrl threading", () => {
+  it("constructs the SDK client with baseUrl from the resolved config", async () => {
+    mkdirSync(join(home, ".budgetary"), { recursive: true });
+    writeFileSync(
+      join(home, ".budgetary", "config.json"),
+      JSON.stringify({
+        api_key: "bg_test_dummy",
+        base_url: "https://my-staging.example",
+      }),
+      "utf8",
+    );
+    writePending(home, {
+      version: 1,
+      entries: [
+        {
+          estimate_id: "est_baseurl",
+          query: "q",
+          project_id: "p",
+          created_at: RECENT,
+          attempts: 0,
+        },
+      ],
+    });
+    const fake = makeFakeClient();
+    const stdout = captureStream();
+    const stderr = captureStream();
+    let capturedOpts: import("@budgetary/sdk").BudgetaryClientOptions | null = null;
+
+    await runOnSessionEnd({
+      payload: PAYLOAD,
+      env: {} as NodeJS.ProcessEnv, // force the config-file resolution path
+      cwd,
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      clientFactory: (opts) => {
+        capturedOpts = opts;
+        return fake as unknown as import("@budgetary/sdk").BudgetaryClient;
+      },
+      home,
+      now: () => NOW,
+      readTotals: () => ({ tokensIn: 1, tokensOut: 1 }),
+    });
+
+    expect(capturedOpts).not.toBeNull();
+    expect(capturedOpts!.apiKey).toBe("bg_test_dummy");
+    expect(capturedOpts!.baseUrl).toBe("https://my-staging.example");
+  });
+});
+
 // Sanity: file path the suite assumes is also where the hook writes back.
 describe("store path resolution", () => {
   it("uses ~/.budgetary/pending.json under the overridden home", () => {

@@ -232,3 +232,39 @@ describe("runEstimate — config file fallback", () => {
     expect(stderr.text()).not.toContain("bg_test_dummy");
   });
 });
+
+describe("runEstimate — baseUrl threading", () => {
+  it("constructs the SDK client with baseUrl from the resolved config", async () => {
+    mkdirSync(join(home, ".budgetary"), { recursive: true });
+    writeFileSync(
+      join(home, ".budgetary", "config.json"),
+      JSON.stringify({
+        api_key: "bg_test_dummy",
+        base_url: "https://my-staging.example",
+      }),
+      "utf8",
+    );
+
+    const stdout = captureStream();
+    const stderr = captureStream();
+    const fake = makeFakeClient(async () => happyEstimate());
+    let capturedOpts: import("@budgetary/sdk").BudgetaryClientOptions | null = null;
+
+    await runEstimate({
+      query: "with custom base url",
+      env: {} as NodeJS.ProcessEnv,
+      cwd,
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      clientFactory: (opts) => {
+        capturedOpts = opts;
+        return fake as unknown as import("@budgetary/sdk").BudgetaryClient;
+      },
+      home,
+    });
+
+    expect(capturedOpts).not.toBeNull();
+    expect(capturedOpts!.apiKey).toBe("bg_test_dummy");
+    expect(capturedOpts!.baseUrl).toBe("https://my-staging.example");
+  });
+});
