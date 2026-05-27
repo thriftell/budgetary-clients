@@ -11,7 +11,7 @@ import type {
 
 export interface BudgetaryClientOptions {
   apiKey: string;
-  /** Default `https://api.budgetary.dev`. */
+  /** Default `https://api.budgetary.tools`. */
   baseUrl?: string;
   /** Per-request timeout. Default 10 000 ms. */
   timeoutMs?: number;
@@ -35,7 +35,7 @@ export interface EstimateCallOptions {
   timeoutMs?: number;
 }
 
-const DEFAULT_BASE_URL = "https://api.budgetary.dev";
+const DEFAULT_BASE_URL = "https://api.budgetary.tools";
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_RETRIES = 5;
 

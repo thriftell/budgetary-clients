@@ -32,7 +32,7 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://api.budgetary.dev"
+Homepage = "https://api.budgetary.tools"
 Repository = "https://github.com/rickyjs1955/budgetary-clients"
 
 [tool.hatch.build.targets.wheel]

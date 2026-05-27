@@ -2,7 +2,7 @@ import { http, HttpResponse, type HttpHandler } from "msw";
 import { setupServer, type SetupServer } from "msw/node";
 
 export const TEST_API_KEY = "bg_test_dummy";
-export const TEST_BASE_URL = "https://api.test.budgetary.dev";
+export const TEST_BASE_URL = "https://api.test.budgetary.tools";
 
 export interface CapturedRequest {
   method: string;

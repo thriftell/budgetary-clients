@@ -1,6 +1,6 @@
 # Installation
 
-Every Budgetary client talks to the hosted API at `https://api.budgetary.dev` using a bearer key. Get one from the dashboard, then pick the client(s) you want.
+Every Budgetary client talks to the hosted API at `https://api.budgetary.tools` using a bearer key. Get one from the dashboard, then pick the client(s) you want.
 
 > **Status:** all clients in this repository are stubs in the bootstrap release. Install commands below will work once each package ships its first real version.
 

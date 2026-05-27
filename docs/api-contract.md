@@ -4,7 +4,7 @@
 
 The Budgetary API returns probabilistic pre-inference estimates of token spend for LLM queries, and accepts post-inference telemetry that improves future estimates.
 
-- **Base URL:** `https://api.budgetary.dev`
+- **Base URL:** `https://api.budgetary.tools`
 - **Protocol:** HTTPS only
 - **Content type:** `application/json; charset=utf-8` for both request and response bodies
 - **Versioning:** path-prefixed (`/v1/...`)

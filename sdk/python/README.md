@@ -1,6 +1,6 @@
 # budgetary
 
-Python SDK for the [Budgetary](https://api.budgetary.dev) API — a hosted service that returns probabilistic pre-inference estimates of token spend for LLM queries. The SDK is a thin, typed HTTP wrapper around the v1 contract documented at [docs/api-contract.md](../../docs/api-contract.md).
+Python SDK for the [Budgetary](https://api.budgetary.tools) API — a hosted service that returns probabilistic pre-inference estimates of token spend for LLM queries. The SDK is a thin, typed HTTP wrapper around the v1 contract documented at [docs/api-contract.md](../../docs/api-contract.md).
 
 ## Install
 
@@ -72,7 +72,7 @@ The full hierarchy:
 | Option | Type | Default | Notes |
 |---|---|---|---|
 | `api_key` | `str` | _required_ | Sent as `Authorization: Bearer <api_key>`. |
-| `base_url` | `str` | `"https://api.budgetary.dev"` | Override for staging or self-hosted endpoints. |
+| `base_url` | `str` | `"https://api.budgetary.tools"` | Override for staging or self-hosted endpoints. |
 | `timeout_ms` | `int` | `10_000` | Per-request timeout. |
 | `max_retries` | `int` | `5` | Max retries on `429` and `5xx`. Total attempts = `max_retries + 1`. |
 | `http_client` | `httpx.Client \| None` | a new one | Inject your own `httpx.Client` (mainly for tests or connection pooling). |

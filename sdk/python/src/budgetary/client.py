@@ -20,7 +20,7 @@ from budgetary.types import (
     LedgerQuery,
 )
 
-DEFAULT_BASE_URL = "https://api.budgetary.dev"
+DEFAULT_BASE_URL = "https://api.budgetary.tools"
 DEFAULT_TIMEOUT_MS = 10_000
 DEFAULT_MAX_RETRIES = 5
 
