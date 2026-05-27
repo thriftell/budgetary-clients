@@ -1,13 +1,31 @@
-export interface BudgetaryClientOptions {
-  apiKey: string;
-  baseUrl?: string; // default "https://api.budgetary.dev"
-}
+export { BudgetaryClient } from "./client.js";
+export type {
+  BudgetaryClientOptions,
+  EstimateCallOptions,
+} from "./client.js";
 
-export class BudgetaryClient {
-  constructor(private readonly opts: BudgetaryClientOptions) {}
+export {
+  BudgetaryError,
+  BudgetaryAuthError,
+  BudgetaryRateLimitError,
+  BudgetaryNotFoundError,
+  BudgetaryValidationError,
+  BudgetaryServerError,
+  BudgetaryNetworkError,
+} from "./errors.js";
 
-  // Methods land in a later release. This file exists so the package is importable.
-  async estimate(_query: string): Promise<never> {
-    throw new Error("not implemented in this release");
-  }
-}
+export type {
+  Scenario,
+  Distribution,
+  EstimateContext,
+  EstimateRequest,
+  EstimateResponse,
+  ActualsMetadata,
+  ActualsRequest,
+  ActualsResponse,
+  LedgerQuery,
+  LedgerPage,
+  LedgerEntry,
+  LedgerActual,
+  LedgerPredicted,
+} from "./types.js";
