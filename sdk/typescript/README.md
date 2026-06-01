@@ -7,7 +7,7 @@ TypeScript SDK for the [Budgetary](https://api.budgetary.tools) API — a hosted
 While the SDK is in 0.x it is not yet published to npm. Install directly from the repository:
 
 ```bash
-pnpm add github:budgetary/budgetary-clients#main --filter @budgetary/sdk
+pnpm add "github:rickyjs1955/budgetary-clients#main&path:sdk/typescript"
 ```
 
 Once 1.0 ships, `pnpm add @budgetary/sdk` will be the canonical install.
