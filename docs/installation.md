@@ -6,11 +6,14 @@ Every Budgetary client talks to the hosted API at `https://api.budgetary.tools` 
 
 ## TypeScript / JavaScript SDK
 
+Once published to npm at 1.0, the canonical install is the same for every package manager:
+
 ```bash
 pnpm add @budgetary/sdk
-# or
-npm install @budgetary/sdk
+# or: npm install @budgetary/sdk / yarn add @budgetary/sdk
 ```
+
+Before 1.0 the SDK is installed from this repository, and only **pnpm** can do that — npm and yarn cannot install from a git subdirectory and will silently install the wrong package. See [sdk/typescript/README.md](../sdk/typescript/README.md#install) for the exact pre-1.0 command.
 
 Configure the client with your API key (typically via environment variable):
 
