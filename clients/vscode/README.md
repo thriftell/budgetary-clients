@@ -10,7 +10,7 @@ A [VS Code](https://code.visualstudio.com/) extension that shows your Budgetary 
 The extension isn't yet on the Marketplace. For local development:
 
 ```bash
-git clone https://github.com/rickyjs1955/budgetary-clients
+git clone https://github.com/thriftell/budgetary-clients
 cd budgetary-clients
 pnpm install
 pnpm -r build

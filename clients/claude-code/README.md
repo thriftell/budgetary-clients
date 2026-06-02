@@ -12,7 +12,7 @@ Together they close the predicted-vs-actual loop on this host. Without the hook 
 The plugin isn't yet published to a marketplace. For local development:
 
 ```bash
-git clone https://github.com/rickyjs1955/budgetary-clients
+git clone https://github.com/thriftell/budgetary-clients
 cd budgetary-clients
 pnpm install
 pnpm --filter @budgetary/sdk build
