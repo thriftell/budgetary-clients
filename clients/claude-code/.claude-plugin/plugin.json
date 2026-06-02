@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "description": "Pre-flight token-spend estimates and session-end calibration for Claude Code.",
   "homepage": "https://api.budgetary.tools",
-  "repository": "https://github.com/rickyjs1955/budgetary-clients",
+  "repository": "https://github.com/thriftell/budgetary-clients",
   "skills": "./skills/",
   "hooks": "./hooks/hooks.json"
 }

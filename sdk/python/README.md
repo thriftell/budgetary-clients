@@ -7,7 +7,7 @@ Python SDK for the [Budgetary](https://api.budgetary.tools) API — a hosted ser
 While the SDK is in 0.x it is not yet published to PyPI. Install directly from the repository:
 
 ```bash
-pip install "git+https://github.com/rickyjs1955/budgetary-clients.git#subdirectory=sdk/python"
+pip install "git+https://github.com/thriftell/budgetary-clients.git#subdirectory=sdk/python"
 ```
 
 Once 1.0 ships, `pip install budgetary` will be the canonical install.

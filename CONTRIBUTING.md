@@ -3,7 +3,7 @@
 Thanks for your interest in Budgetary clients.
 
 We welcome **issues** — bug reports, ideas, and questions. File one at
-<https://github.com/rickyjs1955/budgetary-clients/issues>.
+<https://github.com/thriftell/budgetary-clients/issues>.
 
 Pull requests are reviewed **case-by-case** while the project is in early
 access. If you're planning a non-trivial change, please open an issue

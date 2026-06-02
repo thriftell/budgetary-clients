@@ -9,7 +9,7 @@ TypeScript SDK for the [Budgetary](https://api.budgetary.tools) API — a hosted
 **pnpm** (supported today):
 
 ```bash
-pnpm add "github:rickyjs1955/budgetary-clients#main&path:sdk/typescript"
+pnpm add "github:thriftell/budgetary-clients#main&path:sdk/typescript"
 ```
 
 Keep the quotes so your shell doesn't split on `&`, and use `#main` (not a feature branch).
