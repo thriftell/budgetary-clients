@@ -6,5 +6,6 @@
   "homepage": "https://api.budgetary.tools",
   "repository": "https://github.com/thriftell/budgetary-clients",
   "skills": "./skills/",
-  "hooks": "./hooks/hooks.json"
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./.mcp.json"
 }

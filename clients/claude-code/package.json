@@ -9,6 +9,7 @@
     "dist",
     "bin",
     ".claude-plugin",
+    ".mcp.json",
     "skills",
     "hooks",
     "README.md"
@@ -19,6 +20,7 @@
     "lint": "echo \"@budgetary/claude-code: lint placeholder\""
   },
   "dependencies": {
+    "@budgetary/mcp": "workspace:*",
     "@budgetary/sdk": "workspace:*"
   },
   "devDependencies": {

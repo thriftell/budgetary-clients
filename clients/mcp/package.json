@@ -1,0 +1,40 @@
+{
+  "name": "@budgetary/mcp",
+  "version": "0.0.0",
+  "description": "Model Context Protocol server for Budgetary: a portable pre-flight token-spend estimate tool for any MCP-capable host.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "budgetary-mcp": "bin/budgetary-mcp.mjs"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js"
+    },
+    "./actuals": {
+      "types": "./dist/actuals.d.ts",
+      "import": "./dist/actuals.js"
+    }
+  },
+  "files": [
+    "dist",
+    "bin",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "lint": "echo \"@budgetary/mcp: lint placeholder\""
+  },
+  "dependencies": {
+    "@budgetary/sdk": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.2.6"
+  }
+}

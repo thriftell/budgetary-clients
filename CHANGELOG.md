@@ -2,6 +2,22 @@
 
 All notable changes to the Budgetary clients are tracked here. Newest first.
 
+## 0012 — MCP client
+
+- New `@budgetary/mcp` server: an MCP `estimate` tool that returns a
+  pre-flight token-spend estimate for a coding task and stores it as
+  pending. One install wires it into Claude Code, Cursor, Copilot, Codex,
+  and other MCP-capable hosts — replacing the planned per-host extensions.
+- Actuals close automatically on Claude Code/Codex (real session usage) and
+  via a manual `report-actual` command elsewhere; token counts are never
+  fabricated by the model.
+- Shares `~/.budgetary/` config and `pending.json` with the existing
+  first-party clients — configure once across all hosts.
+- `context.host` (from BUDGETARY_HOST) tags each estimate by host.
+- Handles subscription-gated keys (403) and rate limits (429) gracefully.
+- For the dashboard, install `@budgetary/vscode` from Open VSX (unchanged).
+- Package version stays `0.0.0`; publishing wires up in 0014.
+
 ## 0006 — Codex plugin
 
 - New `@budgetary/codex` plugin: provides a `/estimate <task>` slash command
