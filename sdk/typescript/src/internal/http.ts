@@ -42,6 +42,21 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
+/**
+ * Remove trailing slashes from a base URL with a single linear scan.
+ *
+ * The obvious `value.replace(/\/+$/, "")` is quadratic: the start of `\/+` is
+ * unanchored, so on input like `"…" + "/".repeat(n) + "x"` the engine retries
+ * the greedy slash run from each of the n slash positions (O(n^2)) — the
+ * "polynomial regular expression" ReDoS class. This loop is O(n) and carries
+ * no backtracking, regardless of how the base URL was supplied.
+ */
+function stripTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 0x2f /* "/" */) end--;
+  return value.slice(0, end);
+}
+
 export function toSnakeCase(value: unknown): unknown {
   if (Array.isArray(value)) {
     return value.map(toSnakeCase);
@@ -172,7 +187,7 @@ export class HttpClient {
 
   private async attempt(req: HttpRequest): Promise<unknown> {
     const url =
-      this.config.baseUrl.replace(/\/+$/, "") +
+      stripTrailingSlashes(this.config.baseUrl) +
       req.path +
       buildQueryString(req.query);
 
