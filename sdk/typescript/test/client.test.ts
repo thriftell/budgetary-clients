@@ -172,3 +172,34 @@ describe("BudgetaryClient.getLedger", () => {
     expect(url.searchParams.get("include_orphans")).toBe("true");
   });
 });
+
+describe("BudgetaryClient base URL normalization", () => {
+  it("strips trailing slashes from baseUrl without doubling the path", async () => {
+    handle.use(
+      jsonOk("/v1/estimate", {
+        estimate_id: "est_slash",
+        scenario: "confident",
+        void: false,
+        distribution: { p10: 1, p50: 2, p90: 3, unit: "tokens" },
+        confidence: 0.5,
+        model: "claude-opus-4-7",
+        expires_at: "2026-05-27T10:14:00Z",
+      }),
+    );
+
+    // A baseUrl with many trailing slashes is the ReDoS worst-case shape for
+    // the old `/\/+$/`. With onUnhandledRequest:"error", a non-normalized URL
+    // (e.g. ".../////v1/estimate") would fail to match the handler and throw.
+    const client = new BudgetaryClient({
+      apiKey: TEST_API_KEY,
+      baseUrl: `${TEST_BASE_URL}/////`,
+      maxRetries: 0,
+    });
+
+    const res = await client.estimate("normalize me");
+    expect(res.estimateId).toBe("est_slash");
+
+    expect(handle.requests).toHaveLength(1);
+    expect(handle.requests[0]!.url).toBe(`${TEST_BASE_URL}/v1/estimate`);
+  });
+});
