@@ -3,3 +3,4 @@ packages:
   - "clients/vscode"
   - "clients/claude-code"
   - "clients/codex"
+  - "clients/mcp"

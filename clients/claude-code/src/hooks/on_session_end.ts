@@ -2,9 +2,11 @@ import { Writable } from "node:stream";
 
 import {
   BudgetaryClient,
-  BudgetaryError,
   type BudgetaryClientOptions,
 } from "@budgetary/sdk";
+// The submit/retry/cap logic is shared with the MCP client so every host
+// closes actuals through one code path that never accepts model-supplied counts.
+import { submitActuals } from "@budgetary/mcp/actuals";
 
 import {
   pendingFilePath,
@@ -36,7 +38,6 @@ export interface SessionEndInvocation {
 }
 
 const PENDING_TTL_MS = 24 * 60 * 60 * 1000;
-const MAX_ATTEMPTS = 5;
 
 export async function runOnSessionEnd(args: SessionEndInvocation): Promise<number> {
   const configEnv: ConfigEnv = { env: args.env, home: args.home };
@@ -82,32 +83,23 @@ export async function runOnSessionEnd(args: SessionEndInvocation): Promise<numbe
     baseUrl: resolved.baseUrl,
   });
 
-  try {
-    await client.submitActuals({
-      estimateId: newest.estimate_id,
+  // Real, transcript-derived counts only — routed through the shared submit
+  // helper in @budgetary/mcp so the on-success removal, attempts increment,
+  // and drop-after-5 behavior is identical across every Budgetary host.
+  await submitActuals({
+    store,
+    file,
+    client,
+    entry: newest,
+    counts: {
       tokensIn: totals.tokensIn,
       tokensOut: totals.tokensOut,
       success,
       durationMs,
-    });
-    file.entries.pop();
-    store.write(file);
-    return 0;
-  } catch (err) {
-    const updated: PendingEntry = { ...newest, attempts: newest.attempts + 1 };
-    if (updated.attempts >= MAX_ATTEMPTS) {
-      file.entries.pop();
-      store.write(file);
-      const detail = err instanceof BudgetaryError ? err.message : String(err);
-      args.stderr.write(
-        `Budgetary: giving up on actuals for ${newest.estimate_id} after ${MAX_ATTEMPTS} attempts (${detail}).\n`,
-      );
-      return 0;
-    }
-    file.entries[file.entries.length - 1] = updated;
-    store.write(file);
-    return 0;
-  }
+    },
+    logger: { warn: (m) => args.stderr.write(`${m}\n`) },
+  });
+  return 0;
 }
 
 function isSuccessReason(reason: unknown): boolean {
