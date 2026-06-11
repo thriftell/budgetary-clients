@@ -1,9 +1,13 @@
 {
   "name": "@budgetary/mcp",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Model Context Protocol server for Budgetary: a portable pre-flight token-spend estimate tool for any MCP-capable host.",
   "license": "Apache-2.0",
-  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thriftell/budgetary-clients.git",
+    "directory": "clients/mcp"
+  },
   "type": "module",
   "bin": {
     "budgetary-mcp": "bin/budgetary-mcp.mjs"
@@ -36,5 +40,9 @@
     "@types/node": "^22.7.0",
     "typescript": "^5.6.0",
     "vitest": "^3.2.6"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   }
 }
