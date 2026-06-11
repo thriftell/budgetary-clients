@@ -117,7 +117,7 @@ A pre-flight estimate is only half the loop; calibration needs the **realized** 
 
 ## Dashboard
 
-For the predicted-vs-actual calibration dashboard, install **`@budgetary/vscode`** from [Open VSX](https://open-vsx.org) — it runs in Cursor and other VS Code forks unchanged. This server does not re-implement it.
+For the predicted-vs-actual calibration dashboard, install **Budgetary** (`budgetary.budgetary-vscode`) from [Open VSX](https://open-vsx.org) — it runs in Cursor and other VS Code forks unchanged. This server does not re-implement it.
 
 ## Privacy
 

@@ -18,8 +18,42 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm -r lint
+      # Build deps-first (sdk before mcp), THEN test — never test before build.
       - run: pnpm -r build
       - run: pnpm -r test
+      # Prove every PR is release-ready without publishing anything.
+      # Use `pnpm pack` (the same tool `changeset publish` uses) rather than
+      # `npm pack`: npm leaves `workspace:*` unresolved in the tarball, which
+      # would publish broken. pnpm rewrites it to the real version — so we pack
+      # for real and assert no `workspace:` specifier survives.
+      - name: Pack (pnpm) — tarball contents + workspace:* fully resolved
+        run: |
+          set -euo pipefail
+          TMP="$(mktemp -d)"
+          ( cd sdk/typescript && pnpm pack --pack-destination "$TMP" )
+          ( cd clients/mcp && pnpm pack --pack-destination "$TMP" )
+          for tgz in "$TMP"/*.tgz; do
+            echo "== $(basename "$tgz") =="
+            tar -tzf "$tgz" | sed 's/^/  /'
+            tar -xzO -f "$tgz" package/package.json \
+              | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const p=JSON.parse(d);for(const [k,v] of Object.entries(p.dependencies||{})){if(String(v).startsWith("workspace:")){console.error("  UNRESOLVED workspace dep in published "+p.name+": "+k+"="+v);process.exit(1);}}console.log("  -> "+p.name+"@"+p.version+": no unresolved workspace deps");});'
+          done
+      - name: Dual-bundle smoke — CJS require + ESM import from packed sdk tarball
+        run: |
+          set -euo pipefail
+          TMP="$(mktemp -d)"
+          ( cd sdk/typescript && pnpm pack --pack-destination "$TMP" )
+          TARBALL="$(ls "$TMP"/budgetary-sdk-*.tgz)"
+          cd "$TMP"
+          node -e "require('fs').writeFileSync('package.json', JSON.stringify({name:'sdk-smoke',private:true,version:'1.0.0'}))"
+          npm install "$TARBALL" >/dev/null
+          echo "CJS require():"
+          node -e "const m=require('@budgetary/sdk'); if(typeof m.BudgetaryClient!=='function'||typeof m.BudgetaryError!=='function'){throw new Error('CJS require did not resolve the public API');} console.log('  OK ->', require.resolve('@budgetary/sdk'));"
+          echo "ESM import:"
+          node --input-type=module -e "import {BudgetaryClient, BudgetaryError} from '@budgetary/sdk'; if(typeof BudgetaryClient!=='function'||typeof BudgetaryError!=='function'){throw new Error('ESM import did not resolve the public API');} console.log('  OK');"
+      - name: VS Code extension manifest sanity (unscoped name + publisher + engine)
+        run: |
+          node -e "const p=require('./clients/vscode/package.json'); if(!/^[a-z0-9][a-z0-9-]*\$/.test(p.name)){console.error('vscode name must be unscoped for vsce/ovsx:',p.name);process.exit(1);} if(!p.publisher){console.error('vscode publisher missing');process.exit(1);} if(!p.engines||!p.engines.vscode){console.error('vscode engines.vscode missing');process.exit(1);} console.log('vscode manifest OK:',p.publisher+'.'+p.name,p.engines.vscode);"
 
   py:
     name: Python SDK

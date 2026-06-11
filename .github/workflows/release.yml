@@ -1,0 +1,119 @@
+name: release
+
+# Changesets-driven, publish-on-merge.
+#
+# Push to main with pending changesets -> the action opens/updates a
+# "Version Packages" PR. Merging that PR pushes to main again with no pending
+# changesets -> the action runs `changeset publish`, sending @budgetary/sdk and
+# @budgetary/mcp to npm with provenance. budgetary-vscode is private (never
+# npm-published) but is version-bumped by changesets; the separate, gated
+# `openvsx` job publishes it to Open VSX.
+on:
+  push:
+    branches: [main]
+
+# Never run two releases at once; do NOT cancel an in-flight publish.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Version / publish (changesets -> npm)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # commit the Version PR, push tags, create GitHub Releases
+      pull-requests: write # open/update the Version Packages PR
+      id-token: write # OIDC identity for npm provenance
+    outputs:
+      published: ${{ steps.changesets.outputs.published }}
+      publishedPackages: ${{ steps.changesets.outputs.publishedPackages }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # changesets needs full history vs baseBranch
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org" # writes .npmrc for NODE_AUTH_TOKEN
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Build workspace deps BEFORE tests and BEFORE publish.
+      # @budgetary/mcp depends on @budgetary/sdk; `pnpm -r build` builds in
+      # dependency order (sdk first), so the mcp tarball is never stale.
+      - run: pnpm -r build
+      - run: pnpm -r test
+      - name: Version PR or publish to npm
+        id: changesets
+        uses: changesets/action@v1
+        with:
+          version: pnpm run version-packages
+          publish: pnpm run release
+          commit: "ci: version packages"
+          title: "Version Packages"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Auth for npm (classic automation token). Provenance still requires
+          # id-token: write above. Omit once npm OIDC trusted publishing is set up.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # Emit provenance for every package changeset publish pushes.
+          NPM_CONFIG_PROVENANCE: "true"
+
+  openvsx:
+    name: Publish budgetary-vscode to Open VSX
+    needs: release
+    # Deliberately NOT gated on `needs.release.outputs.published`: budgetary-vscode
+    # is private, so changeset publish never reports it in publishedPackages even
+    # when it was version-bumped — gating on that output would miss a vscode-only
+    # release. Instead this job runs after any successful release and self-gates
+    # below on whether this exact version is already on Open VSX (so it publishes
+    # ONLY when the version actually changed, and is safe to re-run). The npm
+    # packages already published in the `release` job, so a failure here can
+    # neither roll back nor double-publish npm.
+    if: needs.release.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Gate — is budgetary-vscode@<version> already on Open VSX?
+        id: gate
+        run: |
+          VERSION=$(node -p "require('./clients/vscode/package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if curl -fsSL "https://open-vsx.org/api/budgetary/budgetary-vscode/$VERSION" >/dev/null 2>&1; then
+            echo "budgetary-vscode@$VERSION already on Open VSX — nothing to do."
+            echo "needs_publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "budgetary-vscode@$VERSION not found on Open VSX — will publish."
+            echo "needs_publish=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build extension (sdk first, then bundle)
+        if: steps.gate.outputs.needs_publish == 'true'
+        run: pnpm -r build
+      - name: Package + publish to Open VSX (idempotent)
+        if: steps.gate.outputs.needs_publish == 'true'
+        working-directory: clients/vscode
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          # Ensure the publisher namespace exists. No-op if already created
+          # (one-time: the Eclipse Open VSX Publisher Agreement must be signed
+          # by the token owner before the first publish).
+          pnpm dlx ovsx@1.0.1 create-namespace budgetary -p "$OVSX_PAT" || true
+          # Extension is esbuild-bundled (sdk inlined), so skip dependency
+          # traversal of the pnpm workspace (`workspace:*`). LICENSE lives at
+          # repo root, so packaging non-interactively needs --skip-license.
+          pnpm dlx @vscode/vsce@3.9.2 package --no-dependencies --skip-license -o budgetary-vscode.vsix
+          # --skip-duplicate makes a re-run a no-op instead of a hard failure.
+          pnpm dlx ovsx@1.0.1 publish budgetary-vscode.vsix --skip-duplicate -p "$OVSX_PAT"
