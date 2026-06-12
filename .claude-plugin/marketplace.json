@@ -1,0 +1,16 @@
+{
+  "name": "budgetary",
+  "owner": {
+    "name": "Thriftell"
+  },
+  "description": "Budgetary client integrations for Claude Code.",
+  "plugins": [
+    {
+      "name": "budgetary",
+      "source": "./clients/claude-code/",
+      "description": "Pre-flight token-spend estimate for coding tasks.",
+      "category": "productivity",
+      "keywords": ["budgetary", "tokens", "estimate", "telemetry"]
+    }
+  ]
+}

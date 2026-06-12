@@ -2,10 +2,20 @@
   "name": "budgetary",
   "displayName": "Budgetary",
   "version": "0.0.0",
-  "description": "Pre-flight token-spend estimates and session-end calibration for Claude Code.",
+  "description": "Pre-flight, probabilistic token-spend estimate (range, scenario, confidence) for a coding task.",
+  "author": {
+    "name": "Thriftell",
+    "url": "https://github.com/thriftell"
+  },
+  "license": "Apache-2.0",
   "homepage": "https://api.budgetary.tools",
   "repository": "https://github.com/thriftell/budgetary-clients",
-  "skills": "./skills/",
-  "hooks": "./hooks/hooks.json",
-  "mcpServers": "./.mcp.json"
+  "userConfig": {
+    "api_key": {
+      "type": "string",
+      "title": "Budgetary API key",
+      "description": "API key used to authenticate the Budgetary estimate tool and the session-end actuals submission. Starts with bg_live_ or bg_test_.",
+      "sensitive": true
+    }
+  }
 }

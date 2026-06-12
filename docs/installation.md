@@ -43,11 +43,19 @@ Install **Budgetary** from the VS Code Marketplace (or Open VSX). After install,
 
 ## Claude Code plugin
 
-Once published, install with:
+Install from this repository's marketplace, inside Claude Code:
 
-```bash
-claude plugins install budgetary
+```text
+/plugin marketplace add thriftell/budgetary-clients
+/plugin install budgetary@budgetary
+/reload-plugins
 ```
+
+Claude Code prompts for your API key during install (stored in your system
+keychain). See [../clients/claude-code/README.md](../clients/claude-code/README.md)
+for configuration and how the predicted-vs-actual loop works, and
+[claude-code-plugin-runbook.md](./claude-code-plugin-runbook.md) for community-directory
+submission.
 
 ## Codex plugin
 
