@@ -1,0 +1,37 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.thriftell/budgetary",
+  "title": "Budgetary: estimate token spend",
+  "description": "Pre-flight, probabilistic token-spend estimate (range, scenario, confidence) for a coding task.",
+  "version": "0.1.1",
+  "websiteUrl": "https://budgetary.tools",
+  "repository": {
+    "url": "https://github.com/thriftell/budgetary-clients",
+    "source": "github",
+    "subfolder": "clients/mcp"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "@budgetary/mcp",
+      "version": "0.1.1",
+      "transport": { "type": "stdio" },
+      "environmentVariables": [
+        {
+          "name": "BUDGETARY_API_KEY",
+          "description": "Budgetary API key (bg_live_ or bg_test_ prefix). Get one at https://budgetary.tools.",
+          "format": "string",
+          "isRequired": true,
+          "isSecret": true
+        }
+      ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://api.budgetary.tools/mcp"
+    }
+  ]
+}
