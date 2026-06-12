@@ -120,6 +120,47 @@ describe("BudgetaryClient.submitActuals", () => {
       metadata: { tool_calls: 47 },
     });
   });
+
+  it("forwards the additive trace array verbatim on the wire", async () => {
+    handle.use(
+      http.post(`${TEST_BASE_URL}/v1/actuals`, () =>
+        HttpResponse.json(
+          { received: true, ledger_entry_id: "led_trace" },
+          { status: 202 },
+        ),
+      ),
+    );
+
+    const client = newClient();
+    await client.submitActuals({
+      estimateId: "est_01ABC",
+      tokensIn: 100,
+      tokensOut: 200,
+      success: true,
+      durationMs: 1000,
+      trace: [
+        { tool: "Read", tokens: 60 },
+        { tool: "Bash", tokens: 20, kind: "turn-split" },
+        { tool: "Edit", tokens: 20, kind: "turn-split" },
+      ],
+    });
+
+    const req = handle.requests[0]!;
+    // Step keys are already lowercase single words, so snake-casing is a no-op;
+    // the trace must reach the server unchanged.
+    expect(req.body).toEqual({
+      estimate_id: "est_01ABC",
+      tokens_in: 100,
+      tokens_out: 200,
+      success: true,
+      duration_ms: 1000,
+      trace: [
+        { tool: "Read", tokens: 60 },
+        { tool: "Bash", tokens: 20, kind: "turn-split" },
+        { tool: "Edit", tokens: 20, kind: "turn-split" },
+      ],
+    });
+  });
 });
 
 describe("BudgetaryClient.getLedger", () => {

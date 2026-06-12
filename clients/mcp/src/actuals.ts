@@ -6,7 +6,12 @@ import {
 
 import { noKeyGuidance, pendingFilePath, resolveConfig } from "./config.js";
 import { PendingStore, type PendingEntry, type PendingStoreFile } from "./store.js";
-import { readTranscriptTotals, type TranscriptTotals } from "./transcript.js";
+import {
+  capTrace,
+  readTranscriptUsage,
+  type TraceStep,
+  type TranscriptUsage,
+} from "./transcript.js";
 
 export const MAX_ATTEMPTS = 5;
 const PENDING_TTL_MS = 24 * 60 * 60 * 1000;
@@ -23,6 +28,13 @@ export interface ActualCounts {
   tokensOut: number;
   success: boolean;
   durationMs: number;
+  /**
+   * Optional measured execution trace, forwarded additively on the same POST.
+   * Populated ONLY by the auto path from a real transcript (already capped and
+   * fail-closed). The manual path leaves it undefined — there is no transcript
+   * to measure, and a model never supplies it.
+   */
+  trace?: TraceStep[];
 }
 
 /**
@@ -65,6 +77,10 @@ export async function submitActuals(args: SubmitActualsArgs): Promise<void> {
       tokensOut: counts.tokensOut,
       success: counts.success,
       durationMs: counts.durationMs,
+      // Additive: only sent when the caller measured a non-empty trace.
+      ...(counts.trace && counts.trace.length > 0
+        ? { trace: counts.trace }
+        : {}),
     });
     file.entries.pop();
     store.write(file);
@@ -102,8 +118,8 @@ export interface AutoActualsArgs {
   now?: () => Date;
   stderr: { write(s: string): void };
   clientFactory?: (opts: BudgetaryClientOptions) => BudgetaryClient;
-  /** Override transcript-totals reader (tests). */
-  readTotals?: (path: string) => TranscriptTotals | null;
+  /** Override transcript-usage reader (tests). */
+  readUsage?: (path: string) => TranscriptUsage | null;
 }
 
 /**
@@ -136,8 +152,8 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
       : null;
   if (transcriptPath === null) return 0;
 
-  const totals = (args.readTotals ?? readTranscriptTotals)(transcriptPath);
-  if (totals === null) return 0; // no real counts → submit nothing
+  const usage = (args.readUsage ?? readTranscriptUsage)(transcriptPath);
+  if (usage === null) return 0; // no real counts → submit nothing
 
   const resolved = resolveConfig(args.env, args.home);
   if (resolved === null) return 0; // leave the entry for a later session with a key
@@ -147,16 +163,21 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
     ((opts: BudgetaryClientOptions) => new BudgetaryClient(opts));
   const client = factory({ apiKey: resolved.apiKey, baseUrl: resolved.baseUrl });
 
+  // Fail-closed: an over-cap or empty trace becomes `undefined`, so the total
+  // still submits with no `trace` rather than failing or shipping invented steps.
+  const trace = capTrace(usage.trace) ?? undefined;
+
   await submitActuals({
     store,
     file,
     client,
     entry: newest,
     counts: {
-      tokensIn: totals.tokensIn,
-      tokensOut: totals.tokensOut,
+      tokensIn: usage.tokensIn,
+      tokensOut: usage.tokensOut,
       success: isSuccessReason(args.payload.reason),
       durationMs: inferDurationMs(args.payload, newest, now),
+      ...(trace ? { trace } : {}),
     },
     logger: { warn: (m) => args.stderr.write(`${m}\n`) },
   });

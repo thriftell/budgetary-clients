@@ -100,6 +100,11 @@ Submits the realized token spend for a previously estimated query.
   "tokens_out": 36210,
   "success": true,
   "duration_ms": 420000,
+  "trace": [
+    { "tool": "Read", "tokens": 1820 },
+    { "tool": "Edit", "tokens": 910, "kind": "turn-split" },
+    { "tool": "Bash", "tokens": 910, "kind": "turn-split" }
+  ],
   "metadata": {
     "error": null,
     "tool_calls": 47
@@ -114,7 +119,16 @@ Submits the realized token spend for a previously estimated query.
 | `tokens_out` | integer | yes | Total output tokens across all model calls in the run. |
 | `success` | boolean | yes | Whether the agent run completed its objective. |
 | `duration_ms` | integer | yes | Wall-clock duration in milliseconds. |
+| `trace` | array | no | Optional per-step execution trace (see below). |
 | `metadata` | object | no | Free-form, max 2 KB serialized. |
+
+**`trace` — additive execution trace.** An ordered array of measured steps, each `{ "tool": string, "tokens": integer, "kind"?: string }`:
+
+- `tool` — the raw host tool name the step used (e.g. `Read`, `Edit`, `Bash`). Behavior only; no classification.
+- `tokens` — realized token usage attributed to that step, on the **same cache-read-excluded basis** as `tokens_in`/`tokens_out`. Never model-supplied.
+- `kind` — `"turn-split"` when the host reports usage per turn rather than per tool call and a single turn's measured tokens were split evenly across the several tool calls it contained. Absent for a one-tool turn (exact attribution).
+
+The trace is **optional and lossy-safe**: the server uses it for server-side execution-phase classification but never requires it. Any breakdown the server derives is returned additively on `GET /v1/ledger` under the §3 forward-compatibility rule (clients ignore response fields they don't recognize); this contract does not yet pin those response fields. Limits are **≤ 512 steps** and **≤ 16 KB** serialized; a `trace` that exceeds either, or is otherwise malformed, is **silently dropped** — the actuals are still recorded as if no trace were sent. Clients that cannot measure a reliable per-step trace omit the field and submit totals alone.
 
 **Response — 202 Accepted**
 

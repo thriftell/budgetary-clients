@@ -89,11 +89,12 @@ When the Claude Code session ends, the bundled hook runs `npx -y @budgetary/mcp 
 
 1. Reads the most recent pending entry.
 2. Drops it silently if it's older than **24 hours**.
-3. Parses the session transcript and totals `tokens_in + tokens_out` across all model calls. **Cached reads (`cache_read_input_tokens`) are excluded** — folding them back in would inflate realized spend and corrupt calibration.
-4. Submits an actuals payload to Budgetary; on success removes the entry; on failure leaves it and increments `attempts`.
-5. After 5 failed attempts the entry is dropped and a single warning is logged to stderr.
+3. Parses the session transcript per turn and totals `tokens_in + tokens_out` across all model calls. **Cached reads (`cache_read_input_tokens`) are excluded** — folding them back in would inflate realized spend and corrupt calibration.
+4. Also builds a **behavior trace** on the same basis: which tools the run used (`Read`, `Edit`, `Bash`, …) and how many tokens each. Claude Code reports usage per turn, not per individual tool call, so a turn that ran several tools has its measured tokens split evenly across them (each such step marked `kind: "turn-split"`) — an honest measurement-granularity approximation, not invented precision. The trace forwards additively on the same submission; it is capped (≤ 512 steps / 16 KB) and dropped if over-cap or unreadable, in which case the totals still submit.
+5. Submits an actuals payload to Budgetary; on success removes the entry; on failure leaves it and increments `attempts`.
+6. After 5 failed attempts the entry is dropped and a single warning is logged to stderr.
 
-The hook submits **only real, transcript-derived token counts** — never a model-supplied number. If the transcript yields no token totals, or the payload can't be parsed, the hook submits nothing and exits cleanly. There is deliberately no tool or code path that lets a model report token usage.
+The hook submits **only real, transcript-derived token counts and trace steps** — never a model-supplied number. The trace carries host tool names and token counts only; it never classifies the run (phase labeling and any assessment are computed server-side). If the transcript yields no token totals, or the payload can't be parsed, the hook submits nothing and exits cleanly. There is deliberately no tool or code path that lets a model report token usage or write a trace.
 
 ## Privacy
 
@@ -101,7 +102,7 @@ Only these values cross the network, and only to `https://api.budgetary.tools`:
 
 - The task description you pass to `/estimate`.
 - A SHA-256 prefix of your working-directory absolute path (groups estimates by project; reveals nothing about the path).
-- After the session: `tokens_in`, `tokens_out`, `duration_ms`, and a `success` flag.
+- After the session: `tokens_in`, `tokens_out`, `duration_ms`, a `success` flag, and a behavior trace — the host tool names the run invoked and a token count for each. No file contents, paths, arguments, or tool output.
 
 Nothing else leaves the machine. The API key is never logged.
 

@@ -21,6 +21,7 @@ export type {
   EstimateRequest,
   EstimateResponse,
   ActualsMetadata,
+  ActualsTraceStep,
   ActualsRequest,
   ActualsResponse,
   LedgerQuery,
