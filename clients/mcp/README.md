@@ -104,7 +104,7 @@ The API key never appears in a tool result, in `pending.json`, or in any log lin
 
 A pre-flight estimate is only half the loop; calibration needs the **realized** token counts after the run. How those are recorded depends on what the host exposes:
 
-- **Claude Code — automatic.** This host writes a real session transcript. The session-end hook reads the true `tokens_in + tokens_out` (cache-read tokens **excluded**) and submits them — together with a short **behavior trace**: which tools the run used (`Read`, `Edit`, `Bash`, …) and roughly how many tokens each. The trace is measured from the transcript, never model-supplied, and dropped if it can't be read reliably; the total still submits. No human action needed. (Codex deferred: it exposes no session-end event, so there is no auto path yet — trace forwarding is wired for Claude Code only.)
+- **Claude Code — automatic.** This host writes a real session transcript. The session-end hook reads the true `tokens_in + tokens_out` (cache-read tokens **excluded**) and submits them — together with a short **behavior trace**: which tools the run used (`Read`, `Edit`, `Bash`, …), roughly how many tokens each, and now two raw measurements per step — *which command it ran* (a **redacted** descriptor: the program name such as `pytest` or `go test`, plus a non-reversible digest of the rest — never a raw path, argument, or command) and *whether it succeeded*. The trace is measured from the transcript, never model-supplied, and any field that can't be read reliably is simply omitted; the total still submits. No human action needed. (Codex deferred: it exposes no session-end event, so there is no auto path yet — trace forwarding is wired for Claude Code only.)
 - **Cursor / Copilot / other hosts — manual.** These hosts do **not** hand a third-party server the token totals of a completed agent run, and the language model does not know them either. So you record them yourself when you have a moment:
 
   ```bash
@@ -125,9 +125,9 @@ Only these things leave your machine, and only to `https://api.budgetary.tools`:
 
 - The **task description** you pass to `estimate`.
 - After a run, the **token counts** (`tokens_in`, `tokens_out`), a `success` flag, and a duration.
-- On Claude Code, a **behavior trace**: the host tool names the run invoked (e.g. `Read`, `Bash`) and the token count for each. No file contents, paths, arguments, or output — just which tools ran and how many tokens each.
+- On Claude Code, a **behavior trace**: per step, the host tool name (e.g. `Read`, `Bash`), its token count, a **redacted descriptor** of what it acted on, and whether it succeeded. The descriptor is the *program name in the clear* (e.g. `pytest`, `npm run`) plus a **non-reversible digest** of the rest of the command — or, for a file tool, a bare digest of the path. **No file contents, absolute paths, command arguments, or output ever leave the machine** — only the program name and an opaque key. Set `BUDGETARY_TRACE_TARGET=off` to drop the descriptor entirely (the trace falls back to tool names + token counts).
 
-Nothing else is transmitted. The `project_id` attached to each estimate is a **non-reversible SHA-256 hash** of your working-directory path — it groups estimates by project without revealing the path. The pending store lives at `~/.budgetary/pending.json`, shared byte-for-byte with the first-party Claude Code and Codex clients, so configuring once covers every host.
+Nothing else is transmitted. The descriptor's digest and the `project_id` attached to each estimate are both **non-reversible SHA-256 hashes** — they give the server a stable key without revealing the underlying command or path. The pending store lives at `~/.budgetary/pending.json`, shared byte-for-byte with the first-party Claude Code and Codex clients, so configuring once covers every host.
 
 ## Reference
 

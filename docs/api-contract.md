@@ -101,9 +101,9 @@ Submits the realized token spend for a previously estimated query.
   "success": true,
   "duration_ms": 420000,
   "trace": [
-    { "tool": "Read", "tokens": 1820 },
-    { "tool": "Edit", "tokens": 910, "kind": "turn-split" },
-    { "tool": "Bash", "tokens": 910, "kind": "turn-split" }
+    { "tool": "Read", "tokens": 1820, "target": "9f3a0b1c2d4e" },
+    { "tool": "Edit", "tokens": 910, "kind": "turn-split", "target": "9f3a0b1c2d4e" },
+    { "tool": "Bash", "tokens": 910, "kind": "turn-split", "target": "pytest a1b2c3d4e5f6", "ok": false }
   ],
   "metadata": {
     "error": null,
@@ -122,13 +122,17 @@ Submits the realized token spend for a previously estimated query.
 | `trace` | array | no | Optional per-step execution trace (see below). |
 | `metadata` | object | no | Free-form, max 2 KB serialized. |
 
-**`trace` — additive execution trace.** An ordered array of measured steps, each `{ "tool": string, "tokens": integer, "kind"?: string }`:
+**`trace` — additive execution trace.** An ordered array of measured steps, each `{ "tool": string, "tokens": integer, "kind"?: string, "target"?: string, "ok"?: boolean }`:
 
 - `tool` — the raw host tool name the step used (e.g. `Read`, `Edit`, `Bash`). Behavior only; no classification.
 - `tokens` — realized token usage attributed to that step, on the **same cache-read-excluded basis** as `tokens_in`/`tokens_out`. Never model-supplied.
 - `kind` — `"turn-split"` when the host reports usage per turn rather than per tool call and a single turn's measured tokens were split evenly across the several tool calls it contained. Absent for a one-tool turn (exact attribution).
+- `target` — *optional, additive.* A **redacted** descriptor of what the step acted on. For a shell step it is `"<program> [<subcommand>] <digest>"` — the program name in the clear (the leading command token, e.g. `pytest`, `go`, `npm`; for a known driver the subcommand too, e.g. `go test`, `npm run`) followed by a **non-reversible** digest of the rest of the command. For a file tool it is a bare digest of the path. The `target` **never** carries a raw command, absolute path, file contents, or any argument — only the program name and an opaque equality key (two identical operations produce the same `target`, so the server can detect a repeated step). It is measured from the transcript, never model-supplied, and omitted when it cannot be derived safely or when the client opts out of trace detail.
+- `ok` — *optional, additive.* The measured outcome of the step: `false` exactly when the host flagged the tool result an error, `true` when it flagged success. Omitted when the host flagged no outcome (e.g. a successful file read whose result carries no error flag). Measured, never assumed, never model-supplied.
 
-The trace is **optional and lossy-safe**: the server uses it for server-side execution-phase classification but never requires it. Any breakdown the server derives is returned additively on `GET /v1/ledger` under the §3 forward-compatibility rule (clients ignore response fields they don't recognize); this contract does not yet pin those response fields. Limits are **≤ 512 steps** and **≤ 16 KB** serialized; a `trace` that exceeds either, or is otherwise malformed, is **silently dropped** — the actuals are still recorded as if no trace were sent. Clients that cannot measure a reliable per-step trace omit the field and submit totals alone.
+The server uses `target` (program name) and `ok` to decompose more of the run — for example to lift test/build commands out of the generic-shell bucket and to recognize a failed step repeated as a retry. **The client still classifies nothing**: it forwards a program name, a digest, and an error flag; every phase label and verdict is computed server-side.
+
+The trace is **optional and lossy-safe**: the server uses it for server-side execution-phase classification but never requires it. Any breakdown the server derives is returned additively on `GET /v1/ledger` under the §3 forward-compatibility rule (clients ignore response fields they don't recognize); this contract does not yet pin those response fields. Limits are **≤ 512 steps** and **≤ 16 KB** serialized; a `trace` that exceeds either, or is otherwise malformed, is **silently dropped** — the actuals are still recorded as if no trace were sent. `target`/`ok` are independently optional within a step: a client that can measure tokens but not a safe target (or an outcome) omits just those fields. Clients that cannot measure a reliable per-step trace omit the field and submit totals alone.
 
 **Response — 202 Accepted**
 
