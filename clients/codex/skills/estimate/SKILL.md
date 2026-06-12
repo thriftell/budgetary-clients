@@ -3,14 +3,10 @@ name: estimate
 description: Get a Budgetary pre-flight token-spend estimate for a task before running it. Use whenever the user wants to know how many tokens a task is likely to consume before doing it.
 ---
 
-The user has asked for a Budgetary estimate. The task description should come from the user's surrounding prompt.
+The user has asked for a Budgetary estimate. The task description should come from the user's surrounding prompt; if it is missing, ask what they want estimated before doing anything else.
 
-Run the bundled Node CLI to fetch the estimate and print it verbatim. Use the shell with this exact command (substituting the user's task description for `<TASK>`):
+Call the Budgetary **`estimate`** tool — provided by the bundled `budgetary` MCP server — passing the task description as the `query` argument. Show the tool's result to the user verbatim: do not rewrite it, summarize it, or add commentary.
 
-```
-node "${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/bin/estimate.mjs" -- <TASK>
-```
+The tool returns a pre-flight token-spend estimate (a token range, a scenario label, and a confidence score) and records the estimate locally. If no API key is configured, the tool returns a short configure-your-key hint instead — show that verbatim too.
 
-`PLUGIN_ROOT` is set by Codex to this plugin's install directory; `CLAUDE_PLUGIN_ROOT` is the compatibility alias. The CLI prints a human-readable block describing the estimate (or a configuration hint if the API key is not set). Show the CLI's stdout to the user without modification — do not rewrite it, summarize it, or add commentary.
-
-If the CLI exits non-zero, show stderr verbatim. Do not retry — the SDK has already retried internally.
+Do not call the tool with an empty query, and do not invent a token number yourself: the estimate must come from the tool.
