@@ -59,6 +59,25 @@ export function resolveConfig(
   return null;
 }
 
+/**
+ * Whether the auto path may attach the redacted `target` descriptor to trace
+ * steps. Defaults to ON — `target` is a redacted descriptor (program name +
+ * non-reversible digest, or a bare path digest) that carries no raw path,
+ * argument, or command. A privacy-conscious operator opts out by setting
+ * `BUDGETARY_TRACE_TARGET` to `0` / `false` / `off` / `no`, which suppresses
+ * `target` entirely: the trace degrades to the prior `{ tool, tokens, kind? }`
+ * shape plus the leak-free `ok` flag, and the realized total is unaffected.
+ *
+ * Fail-safe: only the explicit opt-out values disable it; any other or absent
+ * value leaves the default ON.
+ */
+export function traceTargetEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const v = env.BUDGETARY_TRACE_TARGET;
+  if (typeof v !== "string") return true;
+  const norm = v.trim().toLowerCase();
+  return !(norm === "0" || norm === "false" || norm === "off" || norm === "no");
+}
+
 /** Guidance returned when no API key is configured. Never echoes any value. */
 export function noKeyGuidance(): string {
   return [

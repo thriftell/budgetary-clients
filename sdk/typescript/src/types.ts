@@ -53,13 +53,39 @@ export interface ActualsMetadata {
  * `"turn-split"` when a single measured turn covered several tool calls and its
  * tokens were split evenly across them (per-tool usage is not in the data).
  *
- * The trace carries host tool names and token counts only — behavior, not
- * classification. Phase labeling and any verdict are computed server-side.
+ * `target` and `ok` are additive raw measurements that let the server decompose
+ * more of a run — still behavior, never classification:
+ *  - `target` is a **redacted** descriptor of what the step acted on: for a
+ *    shell step, the program name in the clear plus a non-reversible digest of
+ *    the rest of the command (`"pytest a1b2c3d4e5f6"`, `"go test 0f1e…"`); for a
+ *    file tool, a bare digest of the path. It never carries a raw command,
+ *    absolute path, file contents, or any argument — only the program name and
+ *    an opaque equality key. Omitted when it cannot be extracted safely, or when
+ *    the operator opts out of trace detail.
+ *  - `ok` is the measured outcome: `false` exactly when the host flagged the
+ *    tool result an error (`is_error`), `true` when it flagged success. Omitted
+ *    when the host did not flag an outcome (never assumed).
+ *
+ * The trace carries host tool names, token counts, redacted targets, and
+ * outcomes only. Phase labeling, retry detection, and any verdict are computed
+ * server-side; the client classifies nothing.
  */
 export interface ActualsTraceStep {
   tool: string;
   tokens: number;
   kind?: "turn-split";
+  /**
+   * Redacted descriptor of what the step acted on. Program name + non-reversible
+   * digest for shell steps; bare path digest for file tools. Never a raw
+   * path/argument/command. Optional and additive.
+   */
+  target?: string;
+  /**
+   * Measured outcome: `false` iff the host flagged the tool result an error,
+   * `true` iff it flagged success. Omitted when no outcome was flagged. Never
+   * model-supplied. Optional and additive.
+   */
+  ok?: boolean;
 }
 
 export interface ActualsRequest {

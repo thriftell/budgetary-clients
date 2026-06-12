@@ -9,6 +9,9 @@ import {
   capTrace,
   readTranscriptTotals,
   readTranscriptUsage,
+  redactBashTarget,
+  redactFileTarget,
+  redactTarget,
   type TraceStep,
 } from "../src/transcript.js";
 
@@ -31,12 +34,35 @@ function write(lines: unknown[]): string {
 const thinking = { type: "thinking", thinking: "…" };
 const text = { type: "text", text: "…" };
 const toolUse = (name: string) => ({ type: "tool_use", id: "tu", name, input: {} });
+// A tool_use with a real id + input, so target/ok enrichment has something to read.
+const use = (name: string, id: string, input: Record<string, unknown>) => ({
+  type: "tool_use",
+  id,
+  name,
+  input,
+});
 function line(id: string, block: unknown, usage: Record<string, number>) {
   return {
     type: "assistant",
     message: { id, role: "assistant", content: [block], usage },
   };
 }
+// A user line carrying a tool_result outcome (the shape Claude Code writes —
+// `is_error` present on shell results, often absent on a successful file read).
+function resultLine(
+  toolUseId: string,
+  isError?: boolean,
+): Record<string, unknown> {
+  const block: Record<string, unknown> = {
+    type: "tool_result",
+    tool_use_id: toolUseId,
+    content: "…",
+  };
+  if (isError !== undefined) block.is_error = isError;
+  return { type: "user", message: { role: "user", content: [block] } };
+}
+// Strip the trailing 12-hex digest, leaving only what a target exposes in clear.
+const clearOf = (target: string) => target.replace(/\s[0-9a-f]{12}$/, "");
 
 describe("readTranscriptUsage — per-turn granularity (the crux)", () => {
   it("dedupes repeated per-content-block usage by message.id", () => {
@@ -210,5 +236,293 @@ describe("capTrace — cap + fail-closed", () => {
     expect(trace.length).toBeLessThanOrEqual(TRACE_MAX_STEPS);
     expect(Buffer.byteLength(JSON.stringify(trace), "utf8")).toBeGreaterThan(TRACE_MAX_BYTES);
     expect(capTrace(trace)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Target redaction — the crux: utility (program in the clear + a stable key)
+// WITHOUT leakage (no raw path / argument / command / secret).
+// ---------------------------------------------------------------------------
+
+const DIGEST = /^[0-9a-f]{12}$/;
+
+describe("redactBashTarget", () => {
+  it("exposes the leading program and hides everything else in a digest", () => {
+    const t = redactBashTarget("pytest -x tests/test_secret_paths.py")!;
+    expect(t).toMatch(/^pytest [0-9a-f]{12}$/);
+    expect(t).not.toContain("/");
+    expect(t).not.toContain("test_secret_paths");
+  });
+
+  it("keeps an allowlisted subcommand for a known driver (server second-token rule)", () => {
+    expect(redactBashTarget("go test ./...")!).toMatch(/^go test [0-9a-f]{12}$/);
+    expect(redactBashTarget("npm run build:prod")!).toMatch(/^npm run [0-9a-f]{12}$/);
+    expect(redactBashTarget("pip install requests")!).toMatch(/^pip install [0-9a-f]{12}$/);
+  });
+
+  it("does NOT expose a free-form driver argument (script / target / file name)", () => {
+    // The second token is exposed only when it is an allowlisted KEYWORD, never a
+    // free-form script/target/module name — otherwise it would leak an argument.
+    expect(redactBashTarget("node run.js")!).toMatch(/^node [0-9a-f]{12}$/);
+    expect(redactBashTarget("python app_secret.py")!).toMatch(/^python [0-9a-f]{12}$/);
+    expect(redactBashTarget("make deploy-prod-secrets")!).toMatch(/^make [0-9a-f]{12}$/);
+    expect(redactBashTarget("rake db:migrate:prod")!).toMatch(/^rake [0-9a-f]{12}$/);
+    // git's verbs are not in the build/test/package allowlist → program only.
+    expect(redactBashTarget('git commit -m "ship it"')!).toMatch(/^git [0-9a-f]{12}$/);
+  });
+
+  it("surfaces only an allowlisted `python -m <module>` runner", () => {
+    expect(redactBashTarget("python -m pytest -q")!).toMatch(/^python pytest [0-9a-f]{12}$/);
+    expect(redactBashTarget("python3 -m unittest")!).toMatch(/^python3 unittest [0-9a-f]{12}$/);
+    // A private/free-form module is never exposed.
+    expect(redactBashTarget("python -m mycompany.secret_runner")!).toMatch(/^python [0-9a-f]{12}$/);
+  });
+
+  it("peels a leading `cd <dir> &&` preamble without leaking the path", () => {
+    const t = redactBashTarget("cd /Users/alice/secret-repo && pytest -q")!;
+    expect(t).toMatch(/^pytest [0-9a-f]{12}$/);
+    expect(t).not.toContain("secret-repo");
+    expect(t).not.toContain("/");
+  });
+
+  it("peels a leading `source <file> &&` preamble", () => {
+    expect(
+      redactBashTarget("source .venv/bin/activate && python -m pytest")!,
+    ).toMatch(/^python pytest [0-9a-f]{12}$/);
+  });
+
+  it("strips a leading secret env-assignment — the value never appears", () => {
+    const t = redactBashTarget("API_KEY=sk-live-supersecret pytest tests/")!;
+    expect(t).toMatch(/^pytest [0-9a-f]{12}$/);
+    expect(t).not.toContain("sk-live-supersecret");
+    expect(t).not.toContain("API_KEY");
+    expect(t).not.toContain("=");
+  });
+
+  it("keeps a balanced quoted env value but never leaks one with interior spaces", () => {
+    // Balanced, space-free quoted value → safely consumed, program still found.
+    expect(
+      redactBashTarget('NODE_OPTIONS="--max-old-space-size=4096" npm test')!,
+    ).toMatch(/^npm test [0-9a-f]{12}$/);
+    // Quoted value WITH interior spaces would split across tokens → fail closed,
+    // so no interior word of the secret can surface as the program.
+    const t = redactBashTarget('PGPASSWORD="prod db hunter2 secret" psql -h h');
+    expect(t).toBeNull();
+  });
+
+  it("never reads past the first logical line (heredoc / multi-line bodies)", () => {
+    // The classic leak: a `cd`/`source` first line, then a later line whose text
+    // (heredoc body, pasted PR/commit prose, a secret) must never become the program.
+    const heredoc =
+      "cd /home/me/proj\n" +
+      "gh pr create --body \"$(cat <<'EOF'\n" +
+      "per-neighbor weight is kernel(distance) only\n" +
+      "SUPERSECRETtoken_abc123\n" +
+      "EOF\n)\"";
+    const t = redactBashTarget(heredoc)!;
+    expect(t).toMatch(/^cd [0-9a-f]{12}$/); // program = the first-line builtin only
+    expect(t).not.toContain("per-neighbor");
+    expect(t).not.toContain("SUPERSECRETtoken_abc123");
+    // A semicolon on a LATER line must not be reached either.
+    const later = redactBashTarget("cd /a/b\necho hi ; INJECTEDsecret_abc123")!;
+    expect(later).toMatch(/^cd [0-9a-f]{12}$/);
+    expect(later).not.toContain("INJECTEDsecret_abc123");
+  });
+
+  it("basenames an absolute path to the program binary", () => {
+    expect(redactBashTarget("/usr/local/bin/pytest -q")!).toMatch(/^pytest [0-9a-f]{12}$/);
+    expect(redactBashTarget(".venv/bin/pytest -q")!).toMatch(/^pytest [0-9a-f]{12}$/);
+  });
+
+  it("is stable for identical operations and distinct for different args", () => {
+    expect(redactBashTarget("pytest -q tests/")).toBe(redactBashTarget("pytest -q  tests/"));
+    expect(redactBashTarget("pytest tests/a.py")).not.toBe(redactBashTarget("pytest tests/b.py"));
+  });
+
+  it("fails closed when no clean program name is available", () => {
+    expect(redactBashTarget("")).toBeNull();
+    expect(redactBashTarget("   ")).toBeNull();
+    expect(redactBashTarget('"quoted prog" --flag')).toBeNull();
+    expect(redactBashTarget("$RUNNER --x")).toBeNull();
+  });
+
+  it("never leaks a path/arg/secret across a battery of adversarial commands", () => {
+    const secrets = ["sk-LEAKME", "/Users/bob/private", "PASSWORD=hunter2", "topsecret.key"];
+    const cmds = [
+      "pytest /Users/bob/private/tests --token sk-LEAKME",
+      "cd /Users/bob/private && PASSWORD=hunter2 go test ./pkg/topsecret.key",
+      "AWS_SECRET=sk-LEAKME aws s3 cp topsecret.key s3://b",
+      "grep -rn sk-LEAKME /Users/bob/private",
+      "node /Users/bob/private/run.js --password hunter2",
+      "docker run -e PASSWORD=hunter2 img topsecret.key",
+      "source /Users/bob/private/.env && pytest",
+    ];
+    for (const cmd of cmds) {
+      const t = redactBashTarget(cmd);
+      if (t === null) continue;
+      const clear = clearOf(t);
+      // The cleartext is only "<program>" or "<program> <subcommand>".
+      expect(clear.split(" ").length).toBeLessThanOrEqual(2);
+      expect(clear).not.toMatch(/[\/=]/);
+      for (const s of secrets) expect(t).not.toContain(s);
+    }
+  });
+});
+
+describe("redactFileTarget", () => {
+  it("returns an opaque digest, never the path", () => {
+    const t = redactFileTarget("/Users/alice/secret/creds.env")!;
+    expect(t).toMatch(DIGEST);
+    expect(t).not.toContain("creds");
+    expect(t).not.toContain("/");
+  });
+
+  it("is stable per path (a retry key) and distinct across files", () => {
+    expect(redactFileTarget("/a/b/c.ts")).toBe(redactFileTarget("/a/b/c.ts"));
+    expect(redactFileTarget("/a/b/c.ts")).not.toBe(redactFileTarget("/a/b/d.ts"));
+  });
+
+  it("fails closed on an empty path", () => {
+    expect(redactFileTarget("")).toBeNull();
+    expect(redactFileTarget("   ")).toBeNull();
+  });
+});
+
+describe("redactTarget — per-tool dispatch", () => {
+  it("redacts Bash via the command", () => {
+    expect(redactTarget("Bash", { command: "pytest -q" })!).toMatch(/^pytest [0-9a-f]{12}$/);
+    expect(redactTarget("Bash", {})).toBeNull();
+  });
+
+  it("redacts any path-bearing file tool to a bare digest", () => {
+    expect(redactTarget("Read", { file_path: "/x/y.ts" })!).toMatch(DIGEST);
+    expect(redactTarget("Edit", { file_path: "/x/y.ts" })!).toMatch(DIGEST);
+    expect(redactTarget("NotebookEdit", { notebook_path: "/x/y.ipynb" })!).toMatch(DIGEST);
+    expect(redactTarget("Grep", { path: "/x", pattern: "needle" })!).toMatch(DIGEST);
+  });
+
+  it("omits a target for a tool with no command and no path", () => {
+    expect(redactTarget("TodoWrite", { todos: [] })).toBeNull();
+    expect(redactTarget("WebFetch", { url: "https://x" })).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Trace enrichment end-to-end: target + ok measured off the transcript.
+// ---------------------------------------------------------------------------
+
+describe("readTranscriptUsage — target + ok enrichment", () => {
+  it("attaches target and ok=false to a failed shell step", () => {
+    const u = { input_tokens: 100, output_tokens: 49 };
+    const path = write([
+      line("m1", use("Bash", "b1", { command: "python -m pytest -q" }), u),
+      resultLine("b1", true), // shell failure
+    ]);
+    const [step] = readTranscriptUsage(path)!.trace;
+    expect(step!.tool).toBe("Bash");
+    expect(step!.target).toMatch(/^python pytest [0-9a-f]{12}$/);
+    expect(step!.ok).toBe(false);
+  });
+
+  it("attaches ok=true to a succeeded shell step", () => {
+    const path = write([
+      line("m1", use("Bash", "b1", { command: "npm test" }), { input_tokens: 1, output_tokens: 1 }),
+      resultLine("b1", false),
+    ]);
+    expect(readTranscriptUsage(path)!.trace[0]).toMatchObject({
+      tool: "Bash",
+      ok: true,
+    });
+  });
+
+  it("omits ok when the host flagged no outcome (successful file read)", () => {
+    const path = write([
+      line("m1", use("Read", "r1", { file_path: "/repo/src/a.ts" }), { input_tokens: 5, output_tokens: 5 }),
+      resultLine("r1"), // no is_error written → success, but unknown to us
+    ]);
+    const step = readTranscriptUsage(path)!.trace[0]!;
+    expect(step.target).toMatch(DIGEST); // still a retry key
+    expect("ok" in step).toBe(false); // never fabricated
+  });
+
+  it("omits ok when no tool_result is present at all", () => {
+    const path = write([
+      line("m1", use("Edit", "e1", { file_path: "/repo/a.ts" }), { input_tokens: 5, output_tokens: 5 }),
+    ]);
+    const step = readTranscriptUsage(path)!.trace[0]!;
+    expect("ok" in step).toBe(false);
+  });
+
+  it("enriches each tool of a multi-tool turn independently (token split unchanged)", () => {
+    const u = { input_tokens: 100, output_tokens: 20 }; // 120 across 2 tools
+    const path = write([
+      {
+        type: "assistant",
+        message: {
+          id: "m1",
+          content: [
+            use("Read", "r1", { file_path: "/repo/a.ts" }),
+            use("Bash", "b1", { command: "go test ./..." }),
+          ],
+          usage: u,
+        },
+      },
+      resultLine("r1"), // file read: no is_error → no ok
+      resultLine("b1", false), // shell success → ok true
+    ]);
+    const trace = readTranscriptUsage(path)!.trace;
+    expect(trace[0]).toMatchObject({ tool: "Read", tokens: 60, kind: "turn-split" });
+    expect(trace[0]!.target).toMatch(DIGEST);
+    expect("ok" in trace[0]!).toBe(false);
+    expect(trace[1]).toMatchObject({ tool: "Bash", tokens: 60, kind: "turn-split", ok: true });
+    expect(trace[1]!.target).toMatch(/^go test [0-9a-f]{12}$/);
+  });
+
+  it("repeated failed operations share a target (server-side retry key)", () => {
+    const path = write([
+      line("m1", use("Bash", "b1", { command: "pytest -q" }), { input_tokens: 5, output_tokens: 5 }),
+      resultLine("b1", true),
+      line("m2", use("Bash", "b2", { command: "pytest -q" }), { input_tokens: 5, output_tokens: 5 }),
+      resultLine("b2", true),
+    ]);
+    const trace = readTranscriptUsage(path)!.trace;
+    expect(trace[0]!.target).toBe(trace[1]!.target);
+    expect(trace[0]!.ok).toBe(false);
+    expect(trace[1]!.ok).toBe(false);
+  });
+
+  it("omits target for a tool_use with empty input (back-compat)", () => {
+    const path = write([
+      line("m1", toolUse("Bash"), { input_tokens: 5, output_tokens: 5 }),
+    ]);
+    const step = readTranscriptUsage(path)!.trace[0]!;
+    expect("target" in step).toBe(false);
+  });
+});
+
+describe("readTranscriptUsage — opt-out suppresses target", () => {
+  it("drops every target but keeps tokens/kind/ok and the realized total", () => {
+    const path = write([
+      line("m1", use("Bash", "b1", { command: "pytest -q" }), { input_tokens: 100, output_tokens: 20 }),
+      resultLine("b1", true),
+    ]);
+    const on = readTranscriptUsage(path, { target: true })!;
+    const off = readTranscriptUsage(path, { target: false })!;
+
+    expect(on.trace[0]!.target).toMatch(/^pytest /);
+    expect("target" in off.trace[0]!).toBe(false); // suppressed
+    expect(off.trace[0]!.ok).toBe(false); // ok retained — it carries no path/arg
+    expect(off.trace[0]).toMatchObject({ tool: "Bash", tokens: 120 });
+    expect({ tokensIn: off.tokensIn, tokensOut: off.tokensOut }).toEqual({
+      tokensIn: 100,
+      tokensOut: 20,
+    });
+  });
+
+  it("defaults to including target when no option is given", () => {
+    const path = write([
+      line("m1", use("Bash", "b1", { command: "pytest" }), { input_tokens: 1, output_tokens: 1 }),
+    ]);
+    expect(readTranscriptUsage(path)!.trace[0]!.target).toMatch(/^pytest /);
   });
 });

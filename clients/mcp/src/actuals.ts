@@ -4,11 +4,17 @@ import {
   type BudgetaryClientOptions,
 } from "@budgetary/sdk";
 
-import { noKeyGuidance, pendingFilePath, resolveConfig } from "./config.js";
+import {
+  noKeyGuidance,
+  pendingFilePath,
+  resolveConfig,
+  traceTargetEnabled,
+} from "./config.js";
 import { PendingStore, type PendingEntry, type PendingStoreFile } from "./store.js";
 import {
   capTrace,
   readTranscriptUsage,
+  type ReadUsageOptions,
   type TraceStep,
   type TranscriptUsage,
 } from "./transcript.js";
@@ -119,7 +125,7 @@ export interface AutoActualsArgs {
   stderr: { write(s: string): void };
   clientFactory?: (opts: BudgetaryClientOptions) => BudgetaryClient;
   /** Override transcript-usage reader (tests). */
-  readUsage?: (path: string) => TranscriptUsage | null;
+  readUsage?: (path: string, options?: ReadUsageOptions) => TranscriptUsage | null;
 }
 
 /**
@@ -152,7 +158,12 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
       : null;
   if (transcriptPath === null) return 0;
 
-  const usage = (args.readUsage ?? readTranscriptUsage)(transcriptPath);
+  // Honor the privacy opt-out: when trace detail is suppressed, the redacted
+  // `target` is omitted (the trace keeps tool/tokens/kind and the leak-free
+  // `ok`); the realized total is unaffected either way.
+  const usage = (args.readUsage ?? readTranscriptUsage)(transcriptPath, {
+    target: traceTargetEnabled(args.env),
+  });
   if (usage === null) return 0; // no real counts → submit nothing
 
   const resolved = resolveConfig(args.env, args.home);

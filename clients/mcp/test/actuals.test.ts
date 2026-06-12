@@ -406,6 +406,84 @@ describe("runAutoActuals", () => {
     expect(readPending(home).entries).toEqual([]);
   });
 
+  it("threads the trace-target opt-out through to the usage reader", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_optout", query: "q", project_id: "p", created_at: RECENT, attempts: 0 },
+      ],
+    });
+
+    // Opt-out env → reader asked to omit target.
+    const offClient = makeFakeClient();
+    let offOpts: { target?: boolean } | undefined;
+    await runAutoActuals({
+      payload: PAYLOAD,
+      env: { ...ENV, BUDGETARY_TRACE_TARGET: "off" } as NodeJS.ProcessEnv,
+      home,
+      now: () => NOW,
+      stderr: { write: () => {} },
+      clientFactory: () => asClient(offClient),
+      readUsage: (_p, opts) => {
+        offOpts = opts;
+        return { tokensIn: 1, tokensOut: 1, trace: [{ tool: "Bash", tokens: 2, ok: true }] };
+      },
+    });
+    expect(offOpts).toEqual({ target: false });
+    // ok survives the opt-out; total is still submitted.
+    const offSent = offClient.submitActuals.mock.calls[0]![0];
+    expect(offSent.trace).toEqual([{ tool: "Bash", tokens: 2, ok: true }]);
+
+    // Default env → reader asked to include target.
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_opton", query: "q", project_id: "p", created_at: RECENT, attempts: 0 },
+      ],
+    });
+    let onOpts: { target?: boolean } | undefined;
+    await runAutoActuals({
+      payload: PAYLOAD,
+      env: ENV,
+      home,
+      now: () => NOW,
+      stderr: { write: () => {} },
+      clientFactory: () => asClient(makeFakeClient()),
+      readUsage: (_p, opts) => {
+        onOpts = opts;
+        return { tokensIn: 1, tokensOut: 1, trace: [] };
+      },
+    });
+    expect(onOpts).toEqual({ target: true });
+  });
+
+  it("forwards target + ok on the same POST when present", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_enriched", query: "q", project_id: "p", created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient();
+    await runAutoActuals({
+      payload: PAYLOAD,
+      env: ENV,
+      home,
+      now: () => NOW,
+      stderr: { write: () => {} },
+      clientFactory: () => asClient(fake),
+      readUsage: () => ({
+        tokensIn: 100,
+        tokensOut: 49,
+        trace: [{ tool: "Bash", tokens: 149, target: "pytest abc123def456", ok: false }],
+      }),
+    });
+    const sent = fake.submitActuals.mock.calls[0]![0];
+    expect(sent.trace).toEqual([
+      { tool: "Bash", tokens: 149, target: "pytest abc123def456", ok: false },
+    ]);
+  });
+
   it("excludes cache_read_input_tokens from the realized total", () => {
     const transcript = join(home, "transcript.jsonl");
     writeFileSync(
