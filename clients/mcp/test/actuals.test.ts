@@ -309,7 +309,7 @@ describe("runAutoActuals", () => {
       now: () => NOW,
       stderr: { write: () => {} },
       clientFactory: () => asClient(fake),
-      readTotals: () => ({ tokensIn: 12340, tokensOut: 36210 }),
+      readUsage: () => ({ tokensIn: 12340, tokensOut: 36210, trace: [] }),
     });
 
     expect(code).toBe(0);
@@ -318,6 +318,8 @@ describe("runAutoActuals", () => {
     expect(sent.tokensIn).toBe(12340);
     expect(sent.tokensOut).toBe(36210);
     expect(sent.success).toBe(true);
+    // An empty trace is never attached.
+    expect(sent.trace).toBeUndefined();
     expect(readPending(home).entries).toEqual([]);
   });
 
@@ -337,11 +339,71 @@ describe("runAutoActuals", () => {
       now: () => NOW,
       stderr: { write: () => {} },
       clientFactory: () => asClient(fake),
-      readTotals: () => null,
+      readUsage: () => null,
     });
 
     expect(fake.submitActuals).not.toHaveBeenCalled();
     expect(readPending(home).entries).toHaveLength(1);
+  });
+
+  it("forwards a measured trace and omits an over-cap one (still submits total)", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_trace", query: "q", project_id: "p", created_at: RECENT, attempts: 0 },
+      ],
+    });
+
+    // Within caps → trace is forwarded verbatim on the same POST.
+    const okClient = makeFakeClient();
+    await runAutoActuals({
+      payload: PAYLOAD,
+      env: ENV,
+      home,
+      now: () => NOW,
+      stderr: { write: () => {} },
+      clientFactory: () => asClient(okClient),
+      readUsage: () => ({
+        tokensIn: 100,
+        tokensOut: 200,
+        trace: [
+          { tool: "Read", tokens: 50 },
+          { tool: "Bash", tokens: 25, kind: "turn-split" },
+          { tool: "Edit", tokens: 25, kind: "turn-split" },
+        ],
+      }),
+    });
+    const okSent = okClient.submitActuals.mock.calls[0]![0];
+    expect(okSent.tokensIn).toBe(100);
+    expect(okSent.trace).toEqual([
+      { tool: "Read", tokens: 50 },
+      { tool: "Bash", tokens: 25, kind: "turn-split" },
+      { tool: "Edit", tokens: 25, kind: "turn-split" },
+    ]);
+
+    // Over the step cap → trace dropped, but the total is still submitted.
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_overcap", query: "q", project_id: "p", created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const overClient = makeFakeClient();
+    const huge = Array.from({ length: 513 }, () => ({ tool: "Read", tokens: 1 }));
+    await runAutoActuals({
+      payload: PAYLOAD,
+      env: ENV,
+      home,
+      now: () => NOW,
+      stderr: { write: () => {} },
+      clientFactory: () => asClient(overClient),
+      readUsage: () => ({ tokensIn: 5, tokensOut: 7, trace: huge }),
+    });
+    const overSent = overClient.submitActuals.mock.calls[0]![0];
+    expect(overSent.tokensIn).toBe(5);
+    expect(overSent.tokensOut).toBe(7);
+    expect(overSent.trace).toBeUndefined();
+    expect(readPending(home).entries).toEqual([]);
   });
 
   it("excludes cache_read_input_tokens from the realized total", () => {

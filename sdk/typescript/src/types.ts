@@ -46,12 +46,33 @@ export interface ActualsMetadata {
   [key: string]: unknown;
 }
 
+/**
+ * One measured step of a run's execution trace. The `tokens` count is realized
+ * usage on the same cache-read-excluded basis as {@link ActualsRequest.tokensIn}
+ * / {@link ActualsRequest.tokensOut} — never model-supplied. `kind` is set to
+ * `"turn-split"` when a single measured turn covered several tool calls and its
+ * tokens were split evenly across them (per-tool usage is not in the data).
+ *
+ * The trace carries host tool names and token counts only — behavior, not
+ * classification. Phase labeling and any verdict are computed server-side.
+ */
+export interface ActualsTraceStep {
+  tool: string;
+  tokens: number;
+  kind?: "turn-split";
+}
+
 export interface ActualsRequest {
   estimateId: string;
   tokensIn: number;
   tokensOut: number;
   success: boolean;
   durationMs: number;
+  /**
+   * Optional additive execution trace. The server classifies it into phases
+   * and drops it (without failing the call) if it is over-cap or malformed.
+   */
+  trace?: ActualsTraceStep[];
   metadata?: ActualsMetadata;
 }
 
