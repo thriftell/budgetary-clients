@@ -4,7 +4,8 @@
       "command": "npx",
       "args": ["-y", "@budgetary/mcp"],
       "env": {
-        "BUDGETARY_HOST": "claude-code"
+        "BUDGETARY_HOST": "claude-code",
+        "BUDGETARY_API_KEY": "${user_config.api_key}"
       }
     }
   }

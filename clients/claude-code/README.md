@@ -2,49 +2,45 @@
 
 A [Claude Code](https://claude.com/claude-code) plugin that adds:
 
-- **`/estimate <task>`** — get a pre-flight token-spend estimate before running the work.
-- **A session-end hook** — after the session finishes, submit realized token totals so future estimates calibrate.
+- **An `estimate` tool** (and a `/estimate <task>` slash command) — a pre-flight, probabilistic token-spend estimate for a coding task: a token range (p10–p90), a scenario label, and a confidence score.
+- **A session-end hook** — after the session finishes, it submits the realized token totals so future estimates calibrate.
 
 Together they close the predicted-vs-actual loop on this host. Without the hook the API has no feedback signal.
 
-## Install (development)
+Everything executable runs through the published [`@budgetary/mcp`](https://www.npmjs.com/package/@budgetary/mcp) package via `npx`, so the plugin needs no build artifacts: Claude Code loads only the manifests (`plugin.json`, `.mcp.json`, `hooks/hooks.json`, the skill), and there is no `dist/` or `node_modules` to build or bundle at install time. (The TypeScript under `src/` is the package's tested reference implementation; it is not on the plugin's runtime path.)
 
-The plugin isn't yet published to a marketplace. For local development:
+## Install
 
-```bash
-git clone https://github.com/thriftell/budgetary-clients
-cd budgetary-clients
-pnpm install
-pnpm --filter @budgetary/sdk build
-pnpm --filter @budgetary/claude-code build
+```text
+/plugin marketplace add thriftell/budgetary-clients
+/plugin install budgetary@budgetary
 ```
 
-Then point Claude Code at the plugin directory. The exact CLI flag depends on your Claude Code version; the current published surface uses:
+Claude Code prompts for your Budgetary API key during install (the value is masked and stored in your system keychain). Then activate it in the running session:
 
-```bash
-claude --plugin-dir /absolute/path/to/budgetary-clients/clients/claude-code
+```text
+/reload-plugins
 ```
 
-The manifest lives at `.claude-plugin/plugin.json`; Claude Code auto-discovers `skills/` and the `hooks/hooks.json` file.
+Non-interactive / scripted equivalent:
+
+```bash
+claude plugin marketplace add thriftell/budgetary-clients
+claude plugin install budgetary@budgetary --config api_key=bg_live_...
+```
+
+> The plugin shells out to `npx -y @budgetary/mcp`, so Node.js and npm must be available on your `PATH` (the same requirement as any npx-launched MCP server). The package is downloaded and cached on first use.
 
 ## Configure the API key
 
-The plugin reads the API key, in order, from:
+The install-time prompt — the `api_key` user-config option declared in [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json) — is the simplest path. The value is masked, stored in your system keychain, and injected into both the estimate tool and the session-end hook.
 
-1. `BUDGETARY_API_KEY` environment variable.
+You can instead (or additionally) provide the key via:
+
+1. the `BUDGETARY_API_KEY` environment variable (set in the shell that launched Claude Code), or
 2. `~/.budgetary/config.json` → `{ "api_key": "bg_..." }`.
 
-If neither is set, `/estimate` prints a configure-your-key hint and short-circuits — it does not call the API and does not crash Claude Code.
-
-```bash
-export BUDGETARY_API_KEY=bg_live_...
-
-# or, persistently:
-mkdir -p ~/.budgetary
-echo '{ "api_key": "bg_live_..." }' > ~/.budgetary/config.json
-```
-
-The API key never appears in `pending.json`, in stdout, or in any error message.
+If no key is configured, `/estimate` prints a configure-your-key hint and the session-end hook quietly does nothing — it never calls the API and never crashes the session. The API key never appears in `pending.json`, in stdout, or in any error message.
 
 ## Commands
 
@@ -68,9 +64,11 @@ Budgetary cannot confidently estimate this query (out of domain).
 No charge — proceed at your own risk.
 ```
 
+The slash command and the model-invokable `estimate` tool are the same path: both call the Budgetary API, print the estimate verbatim, and append a pending entry to `~/.budgetary/pending.json`.
+
 ## How telemetry works
 
-When you run `/estimate`, the plugin appends a small entry to `~/.budgetary/pending.json`:
+When an estimate is produced, the `estimate` tool appends a small entry to `~/.budgetary/pending.json`:
 
 ```json
 {
@@ -87,15 +85,15 @@ When you run `/estimate`, the plugin appends a small entry to `~/.budgetary/pend
 }
 ```
 
-When the Claude Code session ends, the bundled hook:
+When the Claude Code session ends, the bundled hook runs `npx -y @budgetary/mcp on-session-end` (the same `@budgetary/mcp` package, invoked with the session payload on stdin). It:
 
 1. Reads the most recent pending entry.
 2. Drops it silently if it's older than **24 hours**.
-3. Parses the session transcript to total `tokens_in` and `tokens_out` across all model calls.
-4. Submits an actuals payload to Budgetary; on success removes the entry from the store; on failure leaves it and increments `attempts`.
+3. Parses the session transcript and totals `tokens_in + tokens_out` across all model calls. **Cached reads (`cache_read_input_tokens`) are excluded** — folding them back in would inflate realized spend and corrupt calibration.
+4. Submits an actuals payload to Budgetary; on success removes the entry; on failure leaves it and increments `attempts`.
 5. After 5 failed attempts the entry is dropped and a single warning is logged to stderr.
 
-If token totals cannot be extracted from the transcript the hook does nothing — submitting actuals without real token counts would corrupt calibration data.
+The hook submits **only real, transcript-derived token counts** — never a model-supplied number. If the transcript yields no token totals, or the payload can't be parsed, the hook submits nothing and exits cleanly. There is deliberately no tool or code path that lets a model report token usage.
 
 ## Privacy
 
@@ -113,9 +111,14 @@ Nothing else leaves the machine. The API key is never logged.
 |---|---|
 | Where is the pending store? | `~/.budgetary/pending.json` |
 | How do I clear it? | `rm ~/.budgetary/pending.json` (the plugin recreates an empty store on the next call). |
-| The hook isn't firing. | Confirm Claude Code loaded the plugin: it should appear in `/plugins`. Check `hooks/hooks.json` is present and that `${CLAUDE_PLUGIN_ROOT}` resolves (your Claude Code version may use a different variable). |
-| The hook fires but no actuals submit. | Token totals couldn't be extracted from the transcript. See "How telemetry works" — the plugin no-ops rather than submit garbage. |
-| The plugin says "no API key configured" even after I set `BUDGETARY_API_KEY`. | The hook subprocess inherits Claude Code's environment; make sure the variable is set in the shell that launched Claude Code, not just the current shell. |
+| The plugin shows "failed to load". | Run `claude plugin validate ./clients/claude-code` (or check the `/plugin` **Errors** tab). Only `plugin.json` may live under `.claude-plugin/`; `hooks/`, `skills/`, and `.mcp.json` are auto-loaded from the plugin root and must **not** also be declared in `plugin.json`. |
+| The estimate tool isn't available. | Confirm `npx -y @budgetary/mcp` runs in your shell, and that the `budgetary` MCP server is listed in `claude plugin details budgetary`. |
+| The hook fires but no actuals submit. | Either the transcript yielded no token totals (the hook no-ops rather than submit garbage) or no API key is configured for the hook subprocess. |
+| The plugin says "no API key configured". | Set it via the install prompt (`/plugin configure budgetary@budgetary`), `BUDGETARY_API_KEY`, or `~/.budgetary/config.json`. |
+
+## Submitting to the community marketplace
+
+The repo-root [`.claude-plugin/marketplace.json`](../../.claude-plugin/marketplace.json) makes this plugin installable directly from this repository. To list it in Anthropic's community plugin directory for discovery, see the runbook: [docs/claude-code-plugin-runbook.md](../../docs/claude-code-plugin-runbook.md).
 
 ## Reference
 

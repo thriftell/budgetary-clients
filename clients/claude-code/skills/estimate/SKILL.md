@@ -7,12 +7,8 @@ disable-model-invocation: false
 
 The user invoked `/estimate` with the argument: `$ARGUMENTS`.
 
-Run the bundled Node CLI to fetch a Budgetary estimate and print it verbatim. Use the `Bash` tool with this exact command (substituting the argument for `<ARGS>`):
+Call the Budgetary **`estimate`** tool (provided by the bundled `budgetary` MCP server) with the task description as the `query` argument. Show the tool's result to the user verbatim — do not rewrite it, summarize it, or add commentary.
 
-```
-node "${CLAUDE_PLUGIN_ROOT}/bin/estimate.mjs" -- <ARGS>
-```
+The tool returns a pre-flight token-spend estimate (a token range, a scenario label, and a confidence score) and records the estimate so the realized cost can be reconciled automatically when the session ends. If no API key is configured, the tool returns a short configure-your-key hint instead — show that verbatim too.
 
-`${CLAUDE_PLUGIN_ROOT}` is set by Claude Code to this plugin's install directory. The CLI prints a human-readable block describing the estimate (or a configuration hint if the API key is not set). Show the CLI's stdout to the user without modification — do not rewrite it, summarize it, or add commentary.
-
-If the CLI exits non-zero, show stderr verbatim. Do not retry — the SDK has already retried internally.
+If `$ARGUMENTS` is empty, ask the user what task they want estimated before calling the tool. Do not call the tool with an empty query.

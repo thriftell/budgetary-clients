@@ -1,4 +1,5 @@
 {
+  "description": "Submit realized token totals to Budgetary when a Claude Code session ends, so future estimates calibrate.",
   "hooks": {
     "SessionEnd": [
       {
@@ -6,7 +7,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/on-session-end.mjs\""
+            "command": "BUDGETARY_API_KEY=\"${user_config.api_key}\" npx -y @budgetary/mcp on-session-end",
+            "timeout": 30
           }
         ]
       }
