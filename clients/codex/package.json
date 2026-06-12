@@ -9,8 +9,8 @@
     "dist",
     "bin",
     ".codex-plugin",
+    ".mcp.json",
     "skills",
-    "hooks",
     "README.md"
   ],
   "scripts": {

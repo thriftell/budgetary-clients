@@ -1,16 +1,27 @@
 {
   "name": "budgetary",
-  "version": "0.0.0",
-  "description": "Pre-flight token-spend estimates and session-end calibration for Codex.",
+  "version": "0.1.0",
+  "description": "Pre-flight, probabilistic token-spend estimate (range, scenario, confidence) for a coding task.",
+  "author": {
+    "name": "Thriftell",
+    "url": "https://github.com/thriftell"
+  },
+  "homepage": "https://api.budgetary.tools",
+  "repository": "https://github.com/thriftell/budgetary-clients",
+  "license": "Apache-2.0",
   "keywords": ["budgetary", "tokens", "estimate", "telemetry"],
-  "skills": "./skills",
-  "hooks": "./hooks/hooks.json",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Budgetary",
-    "shortDescription": "Pre-flight LLM token-spend estimates.",
-    "longDescription": "Adds an `estimate` skill that returns a probabilistic token-spend estimate for a task before you run it, and a Stop hook that submits realized token totals so future estimates calibrate.",
-    "developerName": "Budgetary",
-    "category": "telemetry",
+    "shortDescription": "Pre-flight token-spend estimates for coding tasks.",
+    "longDescription": "Adds an `estimate` tool (and an estimate skill) that returns a probabilistic token-spend estimate — a token range, a scenario label, and a confidence score — for a coding task before you run it, so you can decide whether it is worth the spend.",
+    "developerName": "Thriftell",
+    "category": "Developer Tools",
+    "capabilities": ["Interactive"],
+    "defaultPrompt": [
+      "Estimate how many tokens it will take to refactor the payments module."
+    ],
     "websiteURL": "https://api.budgetary.tools"
   }
 }
