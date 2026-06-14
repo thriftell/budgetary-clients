@@ -1,6 +1,6 @@
 {
   "name": "@budgetary/mcp",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Model Context Protocol server for Budgetary: a portable pre-flight token-spend estimate tool for any MCP-capable host.",
   "mcpName": "io.github.thriftell/budgetary",
   "license": "Apache-2.0",

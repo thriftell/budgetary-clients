@@ -1,5 +1,13 @@
 # budgetary-vscode
 
+## 0.1.1
+
+### Patch Changes
+
+- Updated dependencies [8c3fc92]
+- Updated dependencies [018d606]
+  - @budgetary/sdk@0.2.0
+
 ## 0.1.0
 
 ### Minor Changes
