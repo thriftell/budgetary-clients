@@ -198,14 +198,16 @@ export function capTrace(trace: TraceStep[]): TraceStep[] | null {
 // command/path is NEVER forwarded — only a redacted descriptor:
 //
 //   • shell step  → "<program> [<subcommand>] <digest>" (e.g. "pytest a1b2…",
-//     "go test a1b2…"). ONLY two things may ever appear in the clear: the
-//     program name (the leading token of the FIRST logical line, after a
-//     quote-safe `VAR=val` / `cd …&&` / `source …&&` peel, basenamed), and — for
-//     a known driver — a second token that is in a FIXED keyword allowlist
-//     ({@link DRIVER_SUBCOMMANDS}). Everything else — arguments, file/target
-//     names, paths, redirects, later lines, heredoc bodies, the whole chain —
-//     lives ONLY inside the non-reversible digest. When the program cannot be
-//     identified safely the whole target is omitted (fail closed).
+//     "go test a1b2…", "npx jest a1b2…"). ONLY two things may ever appear in the
+//     clear: the program name (the leading token of the FIRST logical line, after
+//     a quote-safe `VAR=val` / `cd …&&` / `source …&&` peel, basenamed), and a
+//     second token drawn from a FIXED keyword allowlist — either a known driver's
+//     subcommand ({@link DRIVER_SUBCOMMANDS}, e.g. `go test`) or, for a package
+//     runner (`npx`/`bunx`/`pnpm dlx`/`yarn dlx`), the runner tool it executes
+//     ({@link RUNNER_TOOLS}, e.g. `npx jest`). Everything else — arguments,
+//     file/target names, paths, redirects, later lines, heredoc bodies, the whole
+//     chain — lives ONLY inside the non-reversible digest. When the program
+//     cannot be identified safely the whole target is omitted (fail closed).
 //   • file tool   → bare path digest. The server classifies file tools by tool
 //     name, so the target is purely a retry key; the path never appears.
 //
@@ -254,6 +256,49 @@ const DRIVER_SUBCOMMANDS = new Set([
   // common `python -m` runner modules
   "pytest", "unittest", "mypy", "tox", "nox", "ruff", "pyright",
 ]);
+
+/**
+ * Package-runner tools (0019e) eligible for the cleartext second slot when they
+ * run through a runner preamble (`npx`/`bunx`/`pnpm dlx`/`yarn dlx`). The tool
+ * that actually executes (`jest`, `vitest`, …) is NOT a driver subcommand, so
+ * without this it would redact to the bare program (`"npx <digest>"`) and the
+ * server (0019c-2) would have no signal → `other`. Exposing the runner tool as
+ * the second token gives the server exactly the same generic-shell second-token
+ * signal it already classifies.
+ *
+ * Like every other cleartext slot this is a FIXED ALLOWLIST, never a charset: a
+ * package name is precisely the free-form, possibly-private token that can leak,
+ * so membership — not "looks like a word" — is the gate. A non-listed runner
+ * (`npx my-private-cli`, `npx some-codegen`) stays inside the digest. Formatters
+ * (`prettier`) are deliberately OUT: formatting is not verification.
+ */
+const RUNNER_TOOLS = new Set([
+  "jest", "vitest", "mocha", "ava", "tap", "jasmine", "karma", "cypress",
+  "playwright", "tsc", "eslint", "biome", "nyc", "c8",
+]);
+
+/**
+ * For a package-runner preamble, return the effective runner program IFF it is
+ * an allowlisted {@link RUNNER_TOOLS} member; otherwise `null` (not a runner
+ * preamble, or a free-form/private package → it stays inside the digest). The
+ * runner tool sits one token past the preamble:
+ *   • `npx <tool>` / `bunx <tool>`           → token index 1
+ *   • `pnpm dlx <tool>` / `yarn dlx <tool>`  → token index 2
+ * Membership (not a charset) is the leak gate, exactly as DRIVER_SUBCOMMANDS.
+ * `program` is already lowercased+basenamed; the runner token is matched
+ * case-sensitively against the lowercase allowlist, mirroring the driver rule.
+ */
+function packageRunnerTool(program: string, tokens: string[]): string | null {
+  let tool: string | undefined;
+  if (program === "npx" || program === "bunx") {
+    tool = tokens[1];
+  } else if ((program === "pnpm" || program === "yarn") && tokens[1] === "dlx") {
+    tool = tokens[2];
+  } else {
+    return null;
+  }
+  return tool !== undefined && RUNNER_TOOLS.has(tool) ? tool : null;
+}
 
 // A clean program name (no slash/space/`=`/quote) — only such a token is exposed
 // in the clear as the program. Anything else fails closed (no target).
@@ -331,10 +376,16 @@ export function redactBashTarget(command: string): string | null {
 
   const parts = [program];
   const lower = program.toLowerCase();
+  const runner = packageRunnerTool(lower, tokens);
   if ((lower === "python" || lower === "python3") && tokens[1] === "-m") {
     // `python -m pytest` — the module is the effective program. Expose it only
     // when it is an allowlisted runner keyword (never a private module name).
     if (tokens[2] && DRIVER_SUBCOMMANDS.has(tokens[2])) parts.push(tokens[2]);
+  } else if (runner !== null) {
+    // `npx jest` / `pnpm dlx playwright test` — the runner tool is the effective
+    // program. Exposed only via the RUNNER_TOOLS allowlist, so a free-form/private
+    // `npx <pkg>` degrades to the bare runner program (`"npx <digest>"`).
+    parts.push(runner);
   } else if (
     KNOWN_DRIVERS.has(lower) &&
     tokens[1] &&
