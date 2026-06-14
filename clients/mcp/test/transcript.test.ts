@@ -278,6 +278,42 @@ describe("redactBashTarget", () => {
     expect(redactBashTarget("python -m mycompany.secret_runner")!).toMatch(/^python [0-9a-f]{12}$/);
   });
 
+  it("exposes an allowlisted package-runner tool as the second token (0019e)", () => {
+    // `npx`/`bunx` — the runner tool is one token past the preamble.
+    expect(redactBashTarget("npx jest --ci")!).toMatch(/^npx jest [0-9a-f]{12}$/);
+    expect(redactBashTarget("npx vitest run")!).toMatch(/^npx vitest [0-9a-f]{12}$/);
+    expect(redactBashTarget("bunx vitest run")!).toMatch(/^bunx vitest [0-9a-f]{12}$/);
+    // `pnpm dlx`/`yarn dlx` — the runner tool is two tokens past; only the
+    // preamble program + runner reach the clear (NOT the runner's own subcommand).
+    expect(redactBashTarget("pnpm dlx playwright test e2e/login.spec.ts")!).toMatch(
+      /^pnpm playwright [0-9a-f]{12}$/,
+    );
+    expect(redactBashTarget("yarn dlx vitest run src/secret.test.ts")!).toMatch(
+      /^yarn vitest [0-9a-f]{12}$/,
+    );
+    // tsc / eslint / cypress / nyc / c8 are runners too.
+    expect(redactBashTarget("npx tsc --noEmit")!).toMatch(/^npx tsc [0-9a-f]{12}$/);
+    expect(redactBashTarget("npx eslint .")!).toMatch(/^npx eslint [0-9a-f]{12}$/);
+  });
+
+  it("never exposes a non-allowlisted (private) package name run via a runner", () => {
+    // The leak crux: a free-form package name is exactly the token that can carry
+    // a private/internal identifier, so anything outside RUNNER_TOOLS stays in the
+    // digest — the target degrades to the bare preamble program.
+    expect(redactBashTarget("npx my-private-cli --deploy")!).toMatch(/^npx [0-9a-f]{12}$/);
+    expect(redactBashTarget("npx @acme/secret-codegen")!).toMatch(/^npx [0-9a-f]{12}$/);
+    expect(redactBashTarget("bunx internal-tool")!).toMatch(/^bunx [0-9a-f]{12}$/);
+    expect(redactBashTarget("pnpm dlx @acme/private-pkg")!).toMatch(/^pnpm [0-9a-f]{12}$/);
+    // prettier is deliberately excluded — formatting is not verification.
+    expect(redactBashTarget("npx prettier --write .")!).toMatch(/^npx [0-9a-f]{12}$/);
+    // A versioned/scoped runner spec is not a bare allowlist member → digest-only.
+    expect(redactBashTarget("npx jest@29 --ci")!).toMatch(/^npx [0-9a-f]{12}$/);
+    // `pnpm test` (no `dlx`) is still the ordinary driver-subcommand path.
+    expect(redactBashTarget("pnpm test")!).toMatch(/^pnpm test [0-9a-f]{12}$/);
+    // `pnpm dlx <private>` does NOT fall through to expose `dlx` either.
+    expect(redactBashTarget("pnpm dlx some-private-tool")!).not.toContain("dlx");
+  });
+
   it("peels a leading `cd <dir> &&` preamble without leaking the path", () => {
     const t = redactBashTarget("cd /Users/alice/secret-repo && pytest -q")!;
     expect(t).toMatch(/^pytest [0-9a-f]{12}$/);
@@ -356,6 +392,9 @@ describe("redactBashTarget", () => {
       "node /Users/bob/private/run.js --password hunter2",
       "docker run -e PASSWORD=hunter2 img topsecret.key",
       "source /Users/bob/private/.env && pytest",
+      "npx jest --token sk-LEAKME /Users/bob/private",
+      "pnpm dlx playwright test topsecret.key --password hunter2",
+      "npx sk-LEAKME-private-cli /Users/bob/private",
     ];
     for (const cmd of cmds) {
       const t = redactBashTarget(cmd);
