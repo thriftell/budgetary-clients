@@ -42,6 +42,17 @@ You can instead (or additionally) provide the key via:
 
 If no key is configured, `/estimate` prints a configure-your-key hint and the session-end hook quietly does nothing — it never calls the API and never crashes the session. The API key never appears in `pending.json`, in stdout, or in any error message.
 
+## Optionally tag the language you're working in
+
+You can tag each estimate with the language you're working in so your estimate history is grouped by language. Set one of:
+
+1. the `BUDGETARY_LANGUAGE` environment variable (in the shell that launched Claude Code), or
+2. `~/.budgetary/config.json` → `{ "api_key": "bg_...", "language": "TypeScript" }`.
+
+It's a free-form display name (`TypeScript`, `Python`, `Go`, …) that the server tidies up. Like the host tag, you **declare** it in the environment — the model never sets it, it's never guessed from your task, and there is no `language` argument on the `estimate` tool. It's entirely optional: leave it unset and estimates are recorded without a language.
+
+> It is deliberately **not** an install-time plugin setting. Claude Code requires every declared plugin config value to be present at launch, so an optional language wired that way would block the whole session whenever it was left blank. Reading it from the environment / config keeps it fail-open. (A plain MCP server also can't see which file you have open — only the messages Claude Code sends it — so a declared per-session value is the signal it can rely on.)
+
 ## Commands
 
 ### `/estimate <task description>`
@@ -102,6 +113,7 @@ Only these values cross the network, and only to `https://api.budgetary.tools`:
 
 - The task description you pass to `/estimate`.
 - A SHA-256 prefix of your working-directory absolute path (groups estimates by project; reveals nothing about the path).
+- If you set it, the language tag you declared (e.g. `TypeScript`) — a benign label, the same kind of thing as the host name. Never sent unless you opt in via `BUDGETARY_LANGUAGE` or the config `language` field.
 - After the session: `tokens_in`, `tokens_out`, `duration_ms`, a `success` flag, and a behavior trace — per step, the host tool name, a token count, a **redacted descriptor** of what it touched (the program name in the clear, e.g. `pytest`, plus a non-reversible digest of the rest of the command — or a bare path digest for a file tool), and whether the step succeeded. **No file contents, absolute paths, command arguments, or tool output ever leave the machine** — only program names and opaque digests. Set `BUDGETARY_TRACE_TARGET=off` to omit the descriptor entirely.
 
 Nothing else leaves the machine. The API key is never logged.

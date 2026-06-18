@@ -19,6 +19,14 @@ export interface EstimateContext {
   host?: string;
   projectId?: string;
   depthBudget?: number;
+  /**
+   * Optional benign tag for the language the caller is working in (a host
+   * display name such as `"TypeScript"` or `"Python"`). Same risk class as
+   * {@link EstimateContext.host}: a behavior tag, never a classification.
+   * Forwarded verbatim — the server owns normalization. Omit it entirely when
+   * the caller has no reliable signal.
+   */
+  language?: string;
 }
 
 export interface EstimateRequest {

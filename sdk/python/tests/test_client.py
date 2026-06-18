@@ -66,6 +66,24 @@ def test_estimate_sends_bearer_and_parses_response(respx_mock, client):
     }
 
 
+def test_estimate_forwards_optional_language_in_context(respx_mock, client):
+    route = respx_mock.post("/v1/estimate").mock(
+        return_value=httpx.Response(200, json=_estimate_body())
+    )
+
+    client.estimate(
+        "write a haiku",
+        context={"host": "sdk", "language": "Python"},
+        client_request_id="req_fixed",
+    )
+
+    import json as _json
+
+    body = _json.loads(route.calls.last.request.content)
+    # Forwarded verbatim on the wire as snake-case-safe "language".
+    assert body["context"] == {"host": "sdk", "language": "Python"}
+
+
 def test_estimate_void_response_does_not_raise(respx_mock, client):
     respx_mock.post("/v1/estimate").mock(
         return_value=httpx.Response(

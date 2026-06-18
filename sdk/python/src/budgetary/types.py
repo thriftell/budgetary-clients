@@ -20,6 +20,11 @@ class EstimateContext(TypedDict, total=False):
     host: str
     project_id: str
     depth_budget: int
+    # Optional benign tag for the language the caller is working in (a host
+    # display name such as "TypeScript" or "Python"); same risk class as
+    # ``host``. Forwarded verbatim — the server owns normalization. Omit it
+    # entirely when there is no reliable signal.
+    language: str
 
 
 @dataclass(frozen=True)

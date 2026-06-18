@@ -60,6 +60,49 @@ export function resolveConfig(
 }
 
 /**
+ * Resolve the optional, deterministically-**declared** language tag to forward
+ * as `context.language`, in order:
+ *   1. `BUDGETARY_LANGUAGE` environment variable (set by the host or operator,
+ *      never by the model), or
+ *   2. `~/.budgetary/config.json` → `{ "language": "..." }`.
+ *
+ * Returns the trimmed value, or `undefined` when no signal exists. This is the
+ * same posture as {@link resolveConfig} for `host`: a benign behavior tag read
+ * from the environment, never inferred from the task text and never a
+ * model-writable tool argument. The client only reads + trims — the server owns
+ * normalization (so there is deliberately no client-side alias table). A stdio
+ * MCP server receives MCP messages, not editor state, so there is no reliable
+ * per-call/active-file signal; this declared value (session-static granularity)
+ * is the floor. **Fail-open:** any absent, empty, or unreadable signal returns
+ * `undefined` so the caller omits the field and the server records honest
+ * `(none)` — it never guesses a language.
+ */
+export function resolveLanguage(
+  env: NodeJS.ProcessEnv = process.env,
+  home?: string,
+): string | undefined {
+  const fromEnv = env.BUDGETARY_LANGUAGE;
+  if (typeof fromEnv === "string") {
+    const trimmed = fromEnv.trim();
+    if (trimmed.length > 0) return trimmed;
+  }
+
+  const path = configFilePath(home);
+  if (!existsSync(path)) return undefined;
+  try {
+    const raw = readFileSync(path, "utf8");
+    const parsed = JSON.parse(raw) as { language?: unknown };
+    if (typeof parsed.language === "string") {
+      const trimmed = parsed.language.trim();
+      if (trimmed.length > 0) return trimmed;
+    }
+  } catch {
+    // Unreadable / malformed config carries no language signal. Fail-open.
+  }
+  return undefined;
+}
+
+/**
  * Whether the auto path may attach the redacted `target` descriptor to trace
  * steps. Defaults to ON — `target` is a redacted descriptor (program name +
  * non-reversible digest, or a bare path digest) that carries no raw path,
