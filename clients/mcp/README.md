@@ -100,6 +100,24 @@ Key prefixes denote the environment:
 
 The API key never appears in a tool result, in `pending.json`, or in any log line.
 
+## Optional: tag the language you're working in
+
+You can optionally tag each estimate with the language you're working in, so your estimate history is grouped by language. Set it in the server's environment:
+
+```
+--env BUDGETARY_LANGUAGE=TypeScript
+```
+
+or add a `language` field to `~/.budgetary/config.json` (the environment variable wins if both are set):
+
+```json
+{ "api_key": "bg_live_...", "language": "TypeScript" }
+```
+
+It's a free-form display name — `TypeScript`, `Python`, `Go`, and so on — that the server tidies up; you don't need an exact spelling. Like `BUDGETARY_HOST`, it is a benign tag you **declare** in the environment: the language model never sets it and it is never guessed from your task description. There is intentionally no `language` argument on the `estimate` tool. If you set nothing, the estimate is simply recorded without a language — it's never required, and it never changes the estimate itself.
+
+A plain stdio MCP server only sees the messages your host sends it, not which file you have open, so this declared value (one per host/session) is the signal it can rely on. Hosts that expose no language at all just record the estimate without one.
+
 ## Actuals — automatic where possible, manual otherwise, never fabricated
 
 A pre-flight estimate is only half the loop; calibration needs the **realized** token counts after the run. How those are recorded depends on what the host exposes:
@@ -124,6 +142,7 @@ For the predicted-vs-actual calibration dashboard, install **Budgetary** (`budge
 Only these things leave your machine, and only to `https://api.budgetary.tools`:
 
 - The **task description** you pass to `estimate`.
+- If you set it, the **language tag** you declared (e.g. `TypeScript`) — a benign label, the same kind of thing as the host name. Never sent unless you opt in via `BUDGETARY_LANGUAGE` or the config `language` field.
 - After a run, the **token counts** (`tokens_in`, `tokens_out`), a `success` flag, and a duration.
 - On Claude Code, a **behavior trace**: per step, the host tool name (e.g. `Read`, `Bash`), its token count, a **redacted descriptor** of what it acted on, and whether it succeeded. The descriptor is the *program name in the clear* (e.g. `pytest`, `npm run`) plus a **non-reversible digest** of the rest of the command — or, for a file tool, a bare digest of the path. **No file contents, absolute paths, command arguments, or output ever leave the machine** — only the program name and an opaque key. Set `BUDGETARY_TRACE_TARGET=off` to drop the descriptor entirely (the trace falls back to tool names + token counts).
 

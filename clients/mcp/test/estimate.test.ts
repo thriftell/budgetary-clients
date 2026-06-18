@@ -278,3 +278,62 @@ describe("runEstimateTool — config file fallback", () => {
     expect(result.text).not.toContain("bg_test_dummy");
   });
 });
+
+describe("runEstimateTool — declared language forward", () => {
+  it("forwards context.language from BUDGETARY_LANGUAGE (trimmed), beside host", async () => {
+    const fake = makeFakeClient(async () => happyEstimate());
+
+    await runEstimateTool({
+      query: "build a feature",
+      env: {
+        BUDGETARY_API_KEY: "bg_test_dummy",
+        BUDGETARY_HOST: "claude-code",
+        BUDGETARY_LANGUAGE: "  TypeScript  ",
+      } as NodeJS.ProcessEnv,
+      cwd,
+      home,
+      clientFactory: () => asClient(fake),
+    });
+
+    const [, opts] = fake.estimate.mock.calls[0]!;
+    expect(opts.context.host).toBe("claude-code");
+    expect(opts.context.language).toBe("TypeScript");
+  });
+
+  it("OMITS context.language entirely when no signal exists (server stores '(none)')", async () => {
+    const fake = makeFakeClient(async () => happyEstimate());
+
+    await runEstimateTool({
+      query: "anything",
+      env: { BUDGETARY_API_KEY: "bg_test_dummy" } as NodeJS.ProcessEnv,
+      cwd,
+      home,
+      clientFactory: () => asClient(fake),
+    });
+
+    const [, opts] = fake.estimate.mock.calls[0]!;
+    // Omitted, not null/empty — the field must be absent from the body.
+    expect("language" in opts.context).toBe(false);
+  });
+
+  it("reads context.language from ~/.budgetary/config.json when env is unset", async () => {
+    mkdirSync(join(home, ".budgetary"), { recursive: true });
+    writeFileSync(
+      join(home, ".budgetary", "config.json"),
+      JSON.stringify({ api_key: "bg_test_dummy", language: "Python" }),
+      "utf8",
+    );
+    const fake = makeFakeClient(async () => happyEstimate());
+
+    await runEstimateTool({
+      query: "from config file",
+      env: {} as NodeJS.ProcessEnv,
+      cwd,
+      home,
+      clientFactory: () => asClient(fake),
+    });
+
+    const [, opts] = fake.estimate.mock.calls[0]!;
+    expect(opts.context.language).toBe("Python");
+  });
+});

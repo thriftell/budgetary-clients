@@ -110,6 +110,12 @@ describe("non-fabrication guard", () => {
       expect(serialized).not.toContain("actual");
       expect(serialized).not.toContain("success");
       expect(serialized).not.toContain("duration");
+      // `language` is a declared host signal resolved from the environment, not
+      // a model-writable argument (the rule-5 hazard the hosted endpoint guards
+      // against). It must never be an input property. (We don't scan the
+      // serialized schema for the word: the human description legitimately reads
+      // "natural-language description of the coding task".)
+      expect(props).not.toContain("language");
     }
     // And there is no tool that writes actuals at all.
     expect(TOOLS.map((t) => t.name)).not.toContain("actual");

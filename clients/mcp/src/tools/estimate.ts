@@ -6,10 +6,16 @@ import {
   BudgetaryError,
   BudgetaryRateLimitError,
   type BudgetaryClientOptions,
+  type EstimateContext,
   type EstimateResponse,
 } from "@budgetary/sdk";
 
-import { noKeyGuidance, pendingFilePath, resolveConfig } from "../config.js";
+import {
+  noKeyGuidance,
+  pendingFilePath,
+  resolveConfig,
+  resolveLanguage,
+} from "../config.js";
 import {
   renderAuthFailed,
   renderEstimate,
@@ -68,6 +74,14 @@ export async function runEstimateTool(
   const host = args.env.BUDGETARY_HOST ?? DEFAULT_HOST;
   const projectId = projectIdFromCwd(args.cwd);
 
+  // Optional, deterministically-declared language tag — resolved from the
+  // environment exactly like `host`, never from the model and never inferred
+  // from the query. Omitted entirely when there is no signal (the server then
+  // records honest `(none)`).
+  const context: EstimateContext = { host, projectId };
+  const language = resolveLanguage(args.env, args.home);
+  if (language !== undefined) context.language = language;
+
   const factory =
     args.clientFactory ??
     ((opts: BudgetaryClientOptions) => new BudgetaryClient(opts));
@@ -77,7 +91,7 @@ export async function runEstimateTool(
   try {
     response = await client.estimate(query, {
       model: args.model,
-      context: { host, projectId },
+      context,
     });
   } catch (err) {
     return { text: renderEstimateError(err), isError: true };
