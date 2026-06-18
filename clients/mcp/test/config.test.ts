@@ -72,6 +72,13 @@ describe("resolveLanguage — declared signal, fail-open by omission", () => {
     ).toBe("Go");
   });
 
+  it("falls through to the config file when the env var is set but blank", () => {
+    writeConfig({ api_key: "bg_test_dummy", language: "Python" });
+    expect(
+      resolveLanguage({ BUDGETARY_LANGUAGE: "   " } as NodeJS.ProcessEnv, home),
+    ).toBe("Python");
+  });
+
   it("ignores a non-string / blank config value (fail-open)", () => {
     writeConfig({ api_key: "bg_test_dummy", language: 42 });
     expect(resolveLanguage({} as NodeJS.ProcessEnv, home)).toBeUndefined();
