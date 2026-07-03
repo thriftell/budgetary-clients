@@ -17,6 +17,22 @@ export interface TranscriptTotals {
  */
 export type TraceStep = ActualsTraceStep;
 
+/**
+ * Discrete, content-free change accounting for a session (0023c). Two MEASURED
+ * integers — nothing else (no path, digest, diff, or change text) is implied:
+ *   - `produced` — successful file-mutating tool calls this session
+ *     ({@link MUTATE_TOOLS}: `Edit`/`Write`/`MultiEdit`), counted as **discrete
+ *     events, not lines**.
+ *   - `accepted` — of those, how many were NOT superseded by a later successful
+ *     mutate to the SAME file within the session (the conservative within-session
+ *     survival proxy — see {@link countChanges}). Always `<= produced`.
+ * Both are measured from observed transcript events, never model-supplied.
+ */
+export interface ChangeCounts {
+  produced: number;
+  accepted: number;
+}
+
 export interface TranscriptUsage extends TranscriptTotals {
   /**
    * Per-step execution trace on the SAME per-turn, cache-read-excluded basis
@@ -25,6 +41,14 @@ export interface TranscriptUsage extends TranscriptTotals {
    * submission.
    */
   trace: TraceStep[];
+  /**
+   * Discrete file-change accounting for the session (0023c). ALWAYS measured
+   * when the parse succeeds (a run with no edits is an honest `{0, 0}`); the
+   * auto path forwards it additively unless the operator opts out of trace
+   * detail. Independent of the trace and of {@link ReadUsageOptions.target}:
+   * these are counts, so there is nothing to redact.
+   */
+  changes: ChangeCounts;
 }
 
 /**
@@ -81,6 +105,10 @@ export interface ReadUsageOptions {
  * Either field is omitted when it cannot be read reliably — the step still
  * forwards with `tool` + `tokens` (exactly the prior behavior). Nothing here is
  * model-supplied.
+ *
+ * The result also carries {@link ChangeCounts} — two content-free integers
+ * (produced/accepted file changes) measured off the same mutate-family events;
+ * see {@link countChanges}. These are counts only: no path, diff, or content.
  */
 export function readTranscriptUsage(
   path: string,
@@ -108,6 +136,11 @@ export function readTranscriptUsage(
   // (the host writes none on a successful file read/edit) leaves the step with
   // no `ok` rather than a fabricated one.
   const results = new Map<string, boolean>();
+  // Every tool_use id that has ANY `tool_result` block, regardless of `is_error`.
+  // A successful file edit's result carries no `is_error` (verified against real
+  // transcripts), so it is absent from `results` but present here — this set is
+  // how {@link mutateSucceeded} tells a landed edit from a phantom with no result.
+  const resultIds = new Set<string>();
   let lineNo = 0;
 
   for (const line of raw.split("\n")) {
@@ -125,6 +158,7 @@ export function readTranscriptUsage(
 
     // Tool outcomes ride on user lines (no usage); harvest them first.
     for (const [id, isError] of toolResultsIn(obj)) results.set(id, isError);
+    for (const id of toolResultIdsIn(obj)) resultIds.add(id);
 
     const usage = findUsage(obj);
     if (!usage) continue;
@@ -150,14 +184,18 @@ export function readTranscriptUsage(
   let tokensIn = 0;
   let tokensOut = 0;
   const trace: TraceStep[] = [];
+  const tools: ToolUse[] = [];
   for (const key of order) {
     const turn = turns.get(key)!;
     tokensIn += turn.tokensIn;
     tokensOut += turn.tokensOut;
     appendTurnSteps(trace, turn, results, includeTarget);
+    // Same mutate-family stream the trace parses — we only COUNT it here.
+    for (const use of turn.tools) tools.push(use);
   }
 
-  return { tokensIn, tokensOut, trace };
+  const changes = countChanges(tools, results, resultIds);
+  return { tokensIn, tokensOut, trace, changes };
 }
 
 /**
@@ -421,6 +459,99 @@ export function redactTarget(
   return typeof path === "string" ? redactFileTarget(path) : null;
 }
 
+// ---------------------------------------------------------------------------
+// Change accounting (0023c) — two content-free integers, nothing else
+//
+// The client measures whether the run's spend converted into edits that stuck,
+// so the server can report cost-per-accepted efficiency. It classifies NOTHING
+// and forwards NOTHING but the two counts: no path, digest, diff, or change
+// text ever leaves this section. Both are derived from the SAME mutate-family
+// tool events the trace already parses — reused, not re-parsed.
+//
+//   • produced — successful file-mutating tool calls (discrete events, not lines)
+//   • accepted — of those, the ones NOT superseded by a later successful mutate
+//     to the same file within the session
+//
+// Survival heuristic — deliberately CONSERVATIVE (under-count, never over-count),
+// because the client is content-blind (it has target identity + event order, not
+// diffs): a produced change is "accepted" iff no later SUCCESSFUL mutate touched
+// the same file this session. A later same-file edit decrements the earlier one —
+// we cannot tell a revert from an unrelated hunk without content, so we refuse to
+// claim the earlier change survived. Equivalently, accepted = the number of
+// distinct files left with a surviving successful edit at session close.
+//
+// What this deliberately does NOT try to detect: a change undone by a DIFFERENT
+// tool (`rm`, `git checkout`, `git stash`) is content-invisible from mutate
+// events and is out of scope here; durable, cross-session persistence is measured
+// server-side over time (0023b-2), never fabricated on the client.
+// ---------------------------------------------------------------------------
+
+/**
+ * File-mutating tool family. A successful call to one of these is a discrete
+ * "produced change". Claude Code emits `Edit`/`Write` today and historically
+ * `MultiEdit`; read/search/shell tools are NOT here — they produce no tracked
+ * file change. This is exactly the family the prompt names; membership, not a
+ * heuristic, is the gate.
+ */
+const MUTATE_TOOLS = new Set(["Edit", "Write", "MultiEdit"]);
+
+/**
+ * Whether a mutate `tool_use` is a CONFIRMED success. A file tool's successful
+ * result carries no `is_error` (so it is absent from `results`), while a failure
+ * carries `is_error: true`; a denied/failed call must not count as produced. So
+ * success requires (a) a joinable id, (b) a `tool_result` actually present
+ * ({@link resultIds}), and (c) that result not flagged an error. A mutate with
+ * no id or no result is UNCONFIRMED — excluded from produced (conservative).
+ */
+function mutateSucceeded(
+  use: ToolUse,
+  results: Map<string, boolean>,
+  resultIds: Set<string>,
+): boolean {
+  if (use.id === null) return false;
+  if (!resultIds.has(use.id)) return false;
+  return results.get(use.id) !== true;
+}
+
+/**
+ * The content-free grouping key for a mutate's target file: the SAME
+ * non-reversible path digest the trace uses ({@link redactFileTarget}). Two edits
+ * to one file share a key; the raw path never leaves this module, and a (vanishing)
+ * digest collision would merge two files → under-count acceptance, which is the
+ * safe direction. `null` when no path can be read (then the change is produced
+ * but never accepted — survival is undeterminable).
+ */
+function mutateTargetKey(input: Record<string, unknown>): string | null {
+  const path = input.file_path ?? input.notebook_path ?? input.path;
+  return typeof path === "string" ? redactFileTarget(path) : null;
+}
+
+/**
+ * Count produced/accepted changes over a session's mutate events. Pure and
+ * order-independent: `produced` is the number of confirmed-successful mutate
+ * calls; `accepted` is the number of DISTINCT target files among them (each
+ * distinct file contributes exactly its surviving last edit — earlier edits to
+ * the same file are treated as superseded). A successful mutate whose target
+ * can't be derived counts toward `produced` but never `accepted`. Guarantees
+ * `0 <= accepted <= produced`. Returns only integers.
+ */
+export function countChanges(
+  tools: ReadonlyArray<ToolUse>,
+  results: Map<string, boolean>,
+  resultIds: Set<string>,
+): ChangeCounts {
+  let produced = 0;
+  const survivingTargets = new Set<string>();
+  for (const use of tools) {
+    if (!MUTATE_TOOLS.has(use.name)) continue;
+    if (!mutateSucceeded(use, results, resultIds)) continue;
+    produced += 1;
+    const key = use.input !== null ? mutateTargetKey(use.input) : null;
+    if (key !== null) survivingTargets.add(key);
+  }
+  return { produced, accepted: survivingTargets.size };
+}
+
 interface ToolUse {
   name: string;
   /** `tool_use.id`, used to join the later `tool_result` outcome. */
@@ -548,6 +679,33 @@ function toolResultsIn(obj: Record<string, unknown>): Array<[string, boolean]> {
       typeof b.is_error === "boolean"
     ) {
       out.push([b.tool_use_id, b.is_error]);
+    }
+  }
+  return out;
+}
+
+/**
+ * Harvest every `tool_use_id` that has ANY `tool_result` block on this line,
+ * regardless of `is_error`. A successful file edit's result carries no
+ * `is_error` (so {@link toolResultsIn} skips it), yet its presence is what
+ * distinguishes a landed edit from a `tool_use` with no result at all — the
+ * signal {@link mutateSucceeded} needs to confirm a produced change.
+ */
+function toolResultIdsIn(obj: Record<string, unknown>): string[] {
+  const message = obj.message;
+  if (!message || typeof message !== "object") return [];
+  const content = (message as Record<string, unknown>).content;
+  if (!Array.isArray(content)) return [];
+  const out: string[] = [];
+  for (const block of content) {
+    if (block === null || typeof block !== "object") continue;
+    const b = block as Record<string, unknown>;
+    if (
+      b.type === "tool_result" &&
+      typeof b.tool_use_id === "string" &&
+      b.tool_use_id.length > 0
+    ) {
+      out.push(b.tool_use_id);
     }
   }
   return out;

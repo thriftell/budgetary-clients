@@ -7,6 +7,7 @@ import {
   TRACE_MAX_BYTES,
   TRACE_MAX_STEPS,
   capTrace,
+  countChanges,
   readTranscriptTotals,
   readTranscriptUsage,
   redactBashTarget,
@@ -563,5 +564,156 @@ describe("readTranscriptUsage — opt-out suppresses target", () => {
       line("m1", use("Bash", "b1", { command: "pytest" }), { input_tokens: 1, output_tokens: 1 }),
     ]);
     expect(readTranscriptUsage(path)!.trace[0]!.target).toMatch(/^pytest /);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Change accounting (0023c): two content-free integers measured off the same
+// mutate-family events. produced = successful file-mutating calls (discrete
+// events); accepted = those NOT superseded by a later edit to the same file.
+// ---------------------------------------------------------------------------
+
+describe("readTranscriptUsage — change counts (0023c)", () => {
+  const U = { input_tokens: 5, output_tokens: 5 };
+
+  it("counts distinct successful mutates as both produced and accepted", () => {
+    const path = write([
+      line("m1", use("Write", "w1", { file_path: "/repo/a.ts" }), U),
+      resultLine("w1"), // file success: no is_error flag written
+      line("m2", use("Edit", "e1", { file_path: "/repo/b.ts" }), U),
+      resultLine("e1"),
+    ]);
+    expect(readTranscriptUsage(path)!.changes).toEqual({ produced: 2, accepted: 2 });
+  });
+
+  it("decrements a change superseded by a later successful edit to the same file", () => {
+    const path = write([
+      line("m1", use("Edit", "e1", { file_path: "/repo/a.ts" }), U),
+      resultLine("e1"),
+      line("m2", use("Edit", "e2", { file_path: "/repo/a.ts" }), U),
+      resultLine("e2"),
+    ]);
+    // Two produced, only the surviving last edit accepted (conservative).
+    expect(readTranscriptUsage(path)!.changes).toEqual({ produced: 2, accepted: 1 });
+  });
+
+  it("gives produced=N, accepted=N−M across survivors and superseded edits", () => {
+    // file a: 3 successful mutates (2 superseded); file b: 1 → N=4, M=2, accepted=2.
+    const path = write([
+      line("m1", use("Edit", "a1", { file_path: "/repo/a.ts" }), U), resultLine("a1"),
+      line("m2", use("Edit", "a2", { file_path: "/repo/a.ts" }), U), resultLine("a2"),
+      line("m3", use("Write", "a3", { file_path: "/repo/a.ts" }), U), resultLine("a3"),
+      line("m4", use("Edit", "b1", { file_path: "/repo/b.ts" }), U), resultLine("b1"),
+    ]);
+    expect(readTranscriptUsage(path)!.changes).toEqual({ produced: 4, accepted: 2 });
+  });
+
+  it("excludes a failed (is_error) mutate from produced", () => {
+    const path = write([
+      line("m1", use("Edit", "e1", { file_path: "/repo/a.ts" }), U),
+      resultLine("e1", true), // failed / denied edit → no change produced
+      line("m2", use("Write", "w1", { file_path: "/repo/b.ts" }), U),
+      resultLine("w1"),
+    ]);
+    expect(readTranscriptUsage(path)!.changes).toEqual({ produced: 1, accepted: 1 });
+  });
+
+  it("does not count an unconfirmed mutate that has no tool_result", () => {
+    const path = write([
+      line("m1", use("Edit", "e1", { file_path: "/repo/a.ts" }), U),
+      // no resultLine → success unconfirmed → conservative exclude
+    ]);
+    expect(readTranscriptUsage(path)!.changes).toEqual({ produced: 0, accepted: 0 });
+  });
+
+  it("does not count a mutate whose tool_use carries no id (outcome unjoinable)", () => {
+    const path = write([
+      line(
+        "m1",
+        { type: "tool_use", name: "Edit", input: { file_path: "/repo/a.ts" } },
+        U,
+      ),
+      { type: "user", message: { role: "user", content: [{ type: "tool_result", content: "ok" }] } },
+    ]);
+    expect(readTranscriptUsage(path)!.changes).toEqual({ produced: 0, accepted: 0 });
+  });
+
+  it("counts a successful mutate with no derivable target as produced but not accepted", () => {
+    const path = write([
+      line("m1", toolUse("Edit"), U), // input {} → no file_path
+      resultLine("tu"), // succeeds, but survival is undeterminable without a target
+    ]);
+    expect(readTranscriptUsage(path)!.changes).toEqual({ produced: 1, accepted: 0 });
+  });
+
+  it("ignores non-mutating tools (Read / Bash / Grep)", () => {
+    const path = write([
+      line("m1", use("Read", "r1", { file_path: "/repo/a.ts" }), U), resultLine("r1"),
+      line("m2", use("Bash", "b1", { command: "pytest -q" }), U), resultLine("b1", false),
+    ]);
+    expect(readTranscriptUsage(path)!.changes).toEqual({ produced: 0, accepted: 0 });
+  });
+
+  it("reports an edit-free session as an honest { 0, 0 }", () => {
+    const path = write([line("m1", text, { input_tokens: 2, output_tokens: 500 })]);
+    expect(readTranscriptUsage(path)!.changes).toEqual({ produced: 0, accepted: 0 });
+  });
+
+  it("measures identical counts regardless of the target opt-out (counts are not redacted)", () => {
+    const path = write([
+      line("m1", use("Edit", "e1", { file_path: "/repo/a.ts" }), U), resultLine("e1"),
+      line("m2", use("Edit", "e2", { file_path: "/repo/a.ts" }), U), resultLine("e2"),
+    ]);
+    const on = readTranscriptUsage(path, { target: true })!.changes;
+    const off = readTranscriptUsage(path, { target: false })!.changes;
+    expect(on).toEqual({ produced: 2, accepted: 1 });
+    expect(off).toEqual(on);
+  });
+});
+
+describe("countChanges — pure function contract", () => {
+  type Use = { name: string; id: string | null; input: Record<string, unknown> | null };
+  // Mirror readTranscriptUsage's two structures: `resultIds` = every result
+  // present; `results` = only the boolean is_error (true = failed).
+  function count(tools: Use[], failedIds: string[] = [], noResultIds: string[] = []) {
+    const resultIds = new Set<string>();
+    const results = new Map<string, boolean>();
+    for (const t of tools) {
+      if (t.id === null || noResultIds.includes(t.id)) continue;
+      resultIds.add(t.id);
+      if (failedIds.includes(t.id)) results.set(t.id, true);
+    }
+    return countChanges(tools as never, results, resultIds);
+  }
+  const edit = (id: string | null, file: string | null): Use => ({
+    name: "Edit",
+    id,
+    input: file === null ? {} : { file_path: file },
+  });
+
+  it("guarantees 0 <= accepted <= produced", () => {
+    const r = count([edit("1", "/a"), edit("2", "/a"), edit("3", "/b")]);
+    expect(r).toEqual({ produced: 3, accepted: 2 });
+    expect(r.accepted).toBeLessThanOrEqual(r.produced);
+    expect(r.accepted).toBeGreaterThanOrEqual(0);
+  });
+
+  it("never counts a non-mutate tool", () => {
+    const r = count([
+      { name: "Read", id: "1", input: { file_path: "/a" } },
+      { name: "Bash", id: "2", input: { command: "ls" } },
+    ]);
+    expect(r).toEqual({ produced: 0, accepted: 0 });
+  });
+
+  it("excludes a failed mutate and a result-less mutate from produced", () => {
+    // 1 failed, 2 has no result, 3 succeeds → produced=1, accepted=1.
+    const r = count([edit("1", "/a"), edit("2", "/b"), edit("3", "/c")], ["1"], ["2"]);
+    expect(r).toEqual({ produced: 1, accepted: 1 });
+  });
+
+  it("treats an id-less success as unconfirmed and a targetless success as produced-not-accepted", () => {
+    const r = count([edit(null, "/a"), edit("2", null)]);
+    expect(r).toEqual({ produced: 1, accepted: 0 });
   });
 });

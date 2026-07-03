@@ -105,6 +105,8 @@ Submits the realized token spend for a previously estimated query.
     { "tool": "Edit", "tokens": 910, "kind": "turn-split", "target": "9f3a0b1c2d4e" },
     { "tool": "Bash", "tokens": 910, "kind": "turn-split", "target": "pytest a1b2c3d4e5f6", "ok": false }
   ],
+  "produced_changes": 3,
+  "accepted_changes": 2,
   "metadata": {
     "error": null,
     "tool_calls": 47
@@ -120,6 +122,8 @@ Submits the realized token spend for a previously estimated query.
 | `success` | boolean | yes | Whether the agent run completed its objective. |
 | `duration_ms` | integer | yes | Wall-clock duration in milliseconds. |
 | `trace` | array | no | Optional per-step execution trace (see below). |
+| `produced_changes` | integer ≥ 0 | no | Discrete count of successful file-mutating tool calls in the run (see below). Content-free — not lines, not diffs. |
+| `accepted_changes` | integer ≥ 0 | no | Of those, how many were still present at session close; always `≤ produced_changes`. Sent only together with `produced_changes`. |
 | `metadata` | object | no | Free-form, max 2 KB serialized. |
 
 **`trace` — additive execution trace.** An ordered array of measured steps, each `{ "tool": string, "tokens": integer, "kind"?: string, "target"?: string, "ok"?: boolean }`:
@@ -133,6 +137,13 @@ Submits the realized token spend for a previously estimated query.
 The server uses `target` (program name) and `ok` to decompose more of the run — for example to lift test/build commands out of the generic-shell bucket and to recognize a failed step repeated as a retry. **The client still classifies nothing**: it forwards a program name, a digest, and an error flag; every phase label and verdict is computed server-side.
 
 The trace is **optional and lossy-safe**: the server uses it for server-side execution-phase classification but never requires it. Any breakdown the server derives is returned additively on `GET /v1/ledger` under the §3 forward-compatibility rule (clients ignore response fields they don't recognize); this contract does not yet pin those response fields. Limits are **≤ 512 steps** and **≤ 16 KB** serialized; a `trace` that exceeds either, or is otherwise malformed, is **silently dropped** — the actuals are still recorded as if no trace were sent. `target`/`ok` are independently optional within a step: a client that can measure tokens but not a safe target (or an outcome) omits just those fields. Clients that cannot measure a reliable per-step trace omit the field and submit totals alone.
+
+**`produced_changes` / `accepted_changes` — additive change accounting.** Two content-free integers that let the server report whether the run's spend converted into edits that *stuck* — an efficiency signal (cost-per-accepted "vs tasks like yours"), not a productivity verdict. They are **counts of file-mutating tool events, never lines, never content**: no path, diff, or change text is attached or implied.
+
+- `produced_changes` — the number of **successful file-mutating tool calls** in the run (the `Edit`/`Write`/`MultiEdit` family), counted as **discrete events**. A failed or denied mutate does not count.
+- `accepted_changes` — of those, how many were **still present at session close**. A produced change is decremented when a later successful edit/write to the **same file** superseded it within the session. This is a **conservative within-session survival proxy**: the client is content-blind (it has file identity and event order, not diffs), so it cannot tell a semantic revert from an unrelated later edit — and therefore refuses to claim the earlier change survived. It is `≤ produced_changes` by construction, and **under-counts rather than over-counts** acceptance. Reverts performed by *other* tools (`rm`, `git checkout`) are content-invisible and out of scope here; durable, cross-session persistence is a server-side concern measured over time, not fabricated on the client.
+
+Both counts are **measured from the run's own edit events, never model-supplied** — there is no model-invokable tool that can write them. They are **sent only together**, and **omitted together** on hosts that expose no per-edit events (Cursor/Copilot/Codex today) or when the operator opts out of trace detail. A missing change signal never fails or alters the actuals submission — the token total is the contract; the counts are additive. The server computes any cost-per-accepted figure and verdict; **the client classifies, scores, and benchmarks nothing**.
 
 **Response — 202 Accepted**
 

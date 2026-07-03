@@ -41,6 +41,16 @@ export interface ActualCounts {
    * to measure, and a model never supplies it.
    */
   trace?: TraceStep[];
+  /**
+   * Optional content-free change accounting (0023c): two MEASURED integers —
+   * `producedChanges` (successful file-mutating tool calls) and
+   * `acceptedChanges` (those not superseded within the session, `<= produced`).
+   * Set ONLY together, ONLY by the auto path from a real transcript, and only
+   * when the operator has not opted out of trace detail. The manual path leaves
+   * both undefined; a model never supplies them. No path, diff, or content.
+   */
+  producedChanges?: number;
+  acceptedChanges?: number;
 }
 
 /**
@@ -86,6 +96,16 @@ export async function submitActuals(args: SubmitActualsArgs): Promise<void> {
       // Additive: only sent when the caller measured a non-empty trace.
       ...(counts.trace && counts.trace.length > 0
         ? { trace: counts.trace }
+        : {}),
+      // Additive: the two content-free change counts, forwarded only when the
+      // caller measured both (they are set together). A missing count never
+      // fails or alters the submission — the total is the contract.
+      ...(typeof counts.producedChanges === "number" &&
+      typeof counts.acceptedChanges === "number"
+        ? {
+            producedChanges: counts.producedChanges,
+            acceptedChanges: counts.acceptedChanges,
+          }
         : {}),
     });
     file.entries.pop();
@@ -160,9 +180,11 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
 
   // Honor the privacy opt-out: when trace detail is suppressed, the redacted
   // `target` is omitted (the trace keeps tool/tokens/kind and the leak-free
-  // `ok`); the realized total is unaffected either way.
+  // `ok`) AND the content-free change counts are dropped; the realized total is
+  // unaffected either way.
+  const traceDetail = traceTargetEnabled(args.env);
   const usage = (args.readUsage ?? readTranscriptUsage)(transcriptPath, {
-    target: traceTargetEnabled(args.env),
+    target: traceDetail,
   });
   if (usage === null) return 0; // no real counts → submit nothing
 
@@ -189,6 +211,16 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
       success: isSuccessReason(args.payload.reason),
       durationMs: inferDurationMs(args.payload, newest, now),
       ...(trace ? { trace } : {}),
+      // Content-free change counts (0023c): measured, additive, and suppressed
+      // by the same trace-detail opt-out. `usage.changes` is always present on a
+      // real parse (an edit-free run is an honest `{0, 0}`); the `&& usage.changes`
+      // guard also tolerates a hand-built usage object that omits it.
+      ...(traceDetail && usage.changes
+        ? {
+            producedChanges: usage.changes.produced,
+            acceptedChanges: usage.changes.accepted,
+          }
+        : {}),
     },
     logger: { warn: (m) => args.stderr.write(`${m}\n`) },
   });

@@ -161,6 +161,41 @@ describe("BudgetaryClient.submitActuals", () => {
       ],
     });
   });
+
+  it("forwards the additive change counts as snake_case integers (0023c)", async () => {
+    handle.use(
+      http.post(`${TEST_BASE_URL}/v1/actuals`, () =>
+        HttpResponse.json(
+          { received: true, ledger_entry_id: "led_changes" },
+          { status: 202 },
+        ),
+      ),
+    );
+
+    const client = newClient();
+    await client.submitActuals({
+      estimateId: "est_01ABC",
+      tokensIn: 100,
+      tokensOut: 200,
+      success: true,
+      durationMs: 1000,
+      producedChanges: 5,
+      acceptedChanges: 3,
+    });
+
+    const req = handle.requests[0]!;
+    // The two integers reach the server as `produced_changes`/`accepted_changes`
+    // — and nothing else: no path, diff, or content field is on the body.
+    expect(req.body).toEqual({
+      estimate_id: "est_01ABC",
+      tokens_in: 100,
+      tokens_out: 200,
+      success: true,
+      duration_ms: 1000,
+      produced_changes: 5,
+      accepted_changes: 3,
+    });
+  });
 });
 
 describe("BudgetaryClient.getLedger", () => {

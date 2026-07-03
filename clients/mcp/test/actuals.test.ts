@@ -110,6 +110,11 @@ describe("non-fabrication guard", () => {
       expect(serialized).not.toContain("actual");
       expect(serialized).not.toContain("success");
       expect(serialized).not.toContain("duration");
+      // 0023c: the acceptance counts are measured, never model-writable — no
+      // change-accounting field may appear on the estimate tool either.
+      expect(serialized).not.toContain("produced");
+      expect(serialized).not.toContain("accepted");
+      expect(serialized).not.toContain("change");
       // `language` is a declared host signal resolved from the environment, not
       // a model-writable argument (the rule-5 hazard the hosted endpoint guards
       // against). It must never be an input property. (We don't scan the
@@ -511,5 +516,83 @@ describe("runAutoActuals", () => {
 
     const totals = readTranscriptTotals(transcript);
     expect(totals).toEqual({ tokensIn: 1000, tokensOut: 500 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Change counts (0023c): two measured integers ride the SAME actuals POST.
+// ---------------------------------------------------------------------------
+
+describe("runAutoActuals — acceptance change counts", () => {
+  const PAYLOAD = { transcript_path: "/tmp/transcript.jsonl", reason: "clear" };
+  function pend(id: string) {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: id, query: "q", project_id: "p", created_at: RECENT, attempts: 0 },
+      ],
+    });
+  }
+  const run = (fake: FakeClient, env: NodeJS.ProcessEnv, changes: { produced: number; accepted: number }) =>
+    runAutoActuals({
+      payload: PAYLOAD,
+      env,
+      home,
+      now: () => NOW,
+      stderr: { write: () => {} },
+      clientFactory: () => asClient(fake),
+      readUsage: () => ({ tokensIn: 100, tokensOut: 200, trace: [], changes }),
+    });
+
+  it("forwards produced/accepted measured from the transcript", async () => {
+    pend("est_changes");
+    const fake = makeFakeClient();
+    await run(fake, ENV, { produced: 5, accepted: 3 });
+    const sent = fake.submitActuals.mock.calls[0]![0];
+    expect(sent.producedChanges).toBe(5);
+    expect(sent.acceptedChanges).toBe(3);
+    // The realized total is unaffected — it remains the contract.
+    expect(sent.tokensIn).toBe(100);
+    expect(sent.tokensOut).toBe(200);
+  });
+
+  it("forwards an honest { 0, 0 } for an edit-free run", async () => {
+    pend("est_zero");
+    const fake = makeFakeClient();
+    await run(fake, ENV, { produced: 0, accepted: 0 });
+    const sent = fake.submitActuals.mock.calls[0]![0];
+    expect(sent.producedChanges).toBe(0);
+    expect(sent.acceptedChanges).toBe(0);
+  });
+
+  it("omits BOTH counts under the trace-detail opt-out; the total still submits", async () => {
+    pend("est_optout_changes");
+    const fake = makeFakeClient();
+    await run(fake, { ...ENV, BUDGETARY_TRACE_TARGET: "off" } as NodeJS.ProcessEnv, {
+      produced: 4,
+      accepted: 2,
+    });
+    const sent = fake.submitActuals.mock.calls[0]![0];
+    expect("producedChanges" in sent).toBe(false);
+    expect("acceptedChanges" in sent).toBe(false);
+    expect(sent.tokensIn).toBe(100);
+    expect(sent.tokensOut).toBe(200);
+  });
+
+  it("sends ONLY the two integers — no path, diff, or content on the acceptance signal", async () => {
+    pend("est_only_ints");
+    const fake = makeFakeClient();
+    await run(fake, ENV, { produced: 3, accepted: 2 });
+    const sent = fake.submitActuals.mock.calls[0]![0];
+    expect(Number.isInteger(sent.producedChanges)).toBe(true);
+    expect(Number.isInteger(sent.acceptedChanges)).toBe(true);
+    // The acceptance signal is exactly two scalars — nothing structured rides along.
+    const signal = JSON.stringify({
+      produced_changes: sent.producedChanges,
+      accepted_changes: sent.acceptedChanges,
+    });
+    expect(signal).toBe('{"produced_changes":3,"accepted_changes":2}');
+    expect(signal).not.toMatch(/[/\\]/); // no path separators
+    expect(sent.acceptedChanges).toBeLessThanOrEqual(sent.producedChanges);
   });
 });

@@ -107,6 +107,27 @@ export interface ActualsRequest {
    * and drops it (without failing the call) if it is over-cap or malformed.
    */
   trace?: ActualsTraceStep[];
+  /**
+   * Discrete, content-free change accounting for the run — two MEASURED integers
+   * that let the server report whether the spend converted into edits that stuck.
+   * They are **counts of file-mutating tool events, never lines, never content**:
+   * no path, diff, or change text is implied or attached.
+   *
+   *  - `producedChanges` — successful file-mutating tool calls in the run
+   *    (`Edit`/`Write`/`MultiEdit` family), counted as **discrete events**.
+   *  - `acceptedChanges` — of those, how many were still present at session
+   *    close: a produced change is decremented when a later successful edit/write
+   *    to the **same file** superseded it within the session. Conservative and
+   *    `<= producedChanges` (a within-session survival proxy — under-counts,
+   *    never over-counts).
+   *
+   * Both are measured from the run's own edit events, **never model-supplied**,
+   * and both are **omitted together** on hosts that expose no per-edit events or
+   * when the operator opts out of trace detail. The server derives any
+   * cost-per-accepted efficiency view; the client classifies and scores nothing.
+   */
+  producedChanges?: number;
+  acceptedChanges?: number;
   metadata?: ActualsMetadata;
 }
 
