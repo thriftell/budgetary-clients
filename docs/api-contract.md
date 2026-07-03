@@ -107,6 +107,8 @@ Submits the realized token spend for a previously estimated query.
   ],
   "produced_changes": 3,
   "accepted_changes": 2,
+  "external_symbols": 8,
+  "unresolved_symbols": 1,
   "metadata": {
     "error": null,
     "tool_calls": 47
@@ -124,6 +126,8 @@ Submits the realized token spend for a previously estimated query.
 | `trace` | array | no | Optional per-step execution trace (see below). |
 | `produced_changes` | integer ≥ 0 | no | Discrete count of successful file-mutating tool calls in the run (see below). Content-free — not lines, not diffs. |
 | `accepted_changes` | integer ≥ 0 | no | Of those, how many were still present at session close; always `≤ produced_changes`. Sent only together with `produced_changes`. |
+| `external_symbols` | integer ≥ 0 | no | Distinct external, top-level module imports across the run's produced Python (see below). Content-free — a count, no names. |
+| `unresolved_symbols` | integer ≥ 0 | no | Of those, how many a static resolver found confidently absent; always `≤ external_symbols`. Sent only together with `external_symbols`. |
 | `metadata` | object | no | Free-form, max 2 KB serialized. |
 
 **`trace` — additive execution trace.** An ordered array of measured steps, each `{ "tool": string, "tokens": integer, "kind"?: string, "target"?: string, "ok"?: boolean }`:
@@ -144,6 +148,13 @@ The trace is **optional and lossy-safe**: the server uses it for server-side exe
 - `accepted_changes` — of those, how many were **still present at session close**. A produced change is decremented when a later successful edit/write to the **same file** superseded it within the session. This is a **conservative within-session survival proxy**: the client is content-blind (it has file identity and event order, not diffs), so it cannot tell a semantic revert from an unrelated later edit — and therefore refuses to claim the earlier change survived. It is `≤ produced_changes` by construction, and **under-counts rather than over-counts** acceptance. Reverts performed by *other* tools (`rm`, `git checkout`) are content-invisible and out of scope here; durable, cross-session persistence is a server-side concern measured over time, not fabricated on the client.
 
 Both counts are **measured from the run's own edit events, never model-supplied** — there is no model-invokable tool that can write them. They are **sent only together**, and **omitted together** on hosts that expose no per-edit events (Cursor/Copilot/Codex today) or when the operator opts out of trace detail. A missing change signal never fails or alters the actuals submission — the token total is the contract; the counts are additive. The server computes any cost-per-accepted figure and verdict; **the client classifies, scores, and benchmarks nothing**.
+
+**`external_symbols` / `unresolved_symbols` — additive structural-existence accounting.** Two content-free integers that let the server report how often, for tasks like this one, code **runs but references a symbol that doesn't exist**. They describe **structural existence only** — whether a referenced module is real — not semantic correctness, and not a per-file "you hallucinated" flag.
+
+- `external_symbols` — the number of **distinct external, top-level module imports** across the run's produced `.py` files. A submodule (`os.path`) counts once under its top-level name (`os`); relative imports and the project's own local modules are excluded, so this is external references only.
+- `unresolved_symbols` — of those, how many a **linter-grade static resolver** found **confidently absent** in the interpreter that produced them. The client reads the produced files locally, parses them (never runs them), and checks each top-level name with `importlib.util.find_spec`, which resolves a top-level name via the path finders **without importing or executing** the module. It is `≤ external_symbols` and **under-counts rather than over-counts**: a name is counted absent only when `find_spec` confidently returns none, and every ambiguity (unparseable file, conditional `try/except` or function-local import, resolver error) is treated as resolved. Deeper resolution — submodules, imported members (`from X import y`), attribute existence (`X.foo`) — is out of scope in v1 (it requires importing modules, which has side effects); Python is the only ecosystem measured today.
+
+Both counts are **measured by a static resolver over observed artifacts, never model-supplied** — there is no model-invokable tool that can write them, and **no symbol name, import statement, file path, or line of code is ever transmitted; only the two integers are**. They are **sent only together**, and **omitted together** when resolution is not observable (no produced Python, no interpreter available, a resolver error or timeout) or when the operator opts out of trace detail. A missing structural signal never fails or alters the actuals submission — the token total is the contract; the counts are additive. The server turns them into a coverage-gated, regional rate; **the client classifies, scores, and benchmarks nothing**.
 
 **Response — 202 Accepted**
 

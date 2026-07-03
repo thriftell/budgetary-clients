@@ -115,6 +115,11 @@ describe("non-fabrication guard", () => {
       expect(serialized).not.toContain("produced");
       expect(serialized).not.toContain("accepted");
       expect(serialized).not.toContain("change");
+      // 0023e: the structural-existence counts are measured by a static
+      // resolver, never model-writable — no symbol field may appear either.
+      expect(serialized).not.toContain("symbol");
+      expect(serialized).not.toContain("external");
+      expect(serialized).not.toContain("unresolved");
       // `language` is a declared host signal resolved from the environment, not
       // a model-writable argument (the rule-5 hazard the hosted endpoint guards
       // against). It must never be an input property. (We don't scan the
@@ -594,5 +599,145 @@ describe("runAutoActuals — acceptance change counts", () => {
     expect(signal).toBe('{"produced_changes":3,"accepted_changes":2}');
     expect(signal).not.toMatch(/[/\\]/); // no path separators
     expect(sent.acceptedChanges).toBeLessThanOrEqual(sent.producedChanges);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Structural-hallucination counts (0023e): two measured integers from a static
+// resolver over produced Python, riding the SAME actuals POST. The resolver is
+// injected here so the wiring is tested without a real interpreter.
+// ---------------------------------------------------------------------------
+
+describe("runAutoActuals — structural-hallucination counts", () => {
+  const PAYLOAD = { transcript_path: "/tmp/transcript.jsonl", reason: "clear" };
+  function pend(id: string) {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: id, query: "q", project_id: "p", created_at: RECENT, attempts: 0 },
+      ],
+    });
+  }
+  // usage carries some produced Python; a real transcript always sets this array.
+  const usage = () => ({
+    tokensIn: 100,
+    tokensOut: 200,
+    trace: [],
+    changes: { produced: 0, accepted: 0 },
+    pythonArtifacts: ["/repo/a.py"],
+  });
+  const run = (
+    fake: FakeClient,
+    env: NodeJS.ProcessEnv,
+    resolveSymbols: (artifacts: readonly string[]) => { external: number; unresolved: number } | null,
+    seen?: { artifacts?: readonly string[]; called?: boolean },
+  ) =>
+    runAutoActuals({
+      payload: PAYLOAD,
+      env,
+      home,
+      now: () => NOW,
+      stderr: { write: () => {} },
+      clientFactory: () => asClient(fake),
+      readUsage: () => usage(),
+      resolveSymbols: (artifacts) => {
+        if (seen) {
+          seen.called = true;
+          seen.artifacts = artifacts;
+        }
+        return resolveSymbols(artifacts);
+      },
+    });
+
+  it("forwards external/unresolved measured over the produced artifacts", async () => {
+    pend("est_symbols");
+    const fake = makeFakeClient();
+    const seen: { artifacts?: readonly string[]; called?: boolean } = {};
+    await run(fake, ENV, () => ({ external: 5, unresolved: 2 }), seen);
+    const sent = fake.submitActuals.mock.calls[0]![0];
+    expect(sent.externalSymbols).toBe(5);
+    expect(sent.unresolvedSymbols).toBe(2);
+    // The resolver saw the produced Python artifacts (used locally only).
+    expect(seen.artifacts).toEqual(["/repo/a.py"]);
+    // The realized total is unaffected — it remains the contract.
+    expect(sent.tokensIn).toBe(100);
+    expect(sent.tokensOut).toBe(200);
+  });
+
+  it("forwards an honest 0/0 for a local/relative-import-only run", async () => {
+    pend("est_zero_symbols");
+    const fake = makeFakeClient();
+    await run(fake, ENV, () => ({ external: 0, unresolved: 0 }));
+    const sent = fake.submitActuals.mock.calls[0]![0];
+    expect(sent.externalSymbols).toBe(0);
+    expect(sent.unresolvedSymbols).toBe(0);
+  });
+
+  it("omits BOTH when the resolver cannot measure (fail-closed)", async () => {
+    pend("est_omit_symbols");
+    const fake = makeFakeClient();
+    await run(fake, ENV, () => null);
+    const sent = fake.submitActuals.mock.calls[0]![0];
+    expect("externalSymbols" in sent).toBe(false);
+    expect("unresolvedSymbols" in sent).toBe(false);
+    // Total still submits.
+    expect(sent.tokensIn).toBe(100);
+  });
+
+  it("omits BOTH under the trace-detail opt-out and does not even run the resolver", async () => {
+    pend("est_optout_symbols");
+    const fake = makeFakeClient();
+    const seen: { artifacts?: readonly string[]; called?: boolean } = {};
+    await run(
+      fake,
+      { ...ENV, BUDGETARY_TRACE_TARGET: "off" } as NodeJS.ProcessEnv,
+      () => ({ external: 4, unresolved: 1 }),
+      seen,
+    );
+    const sent = fake.submitActuals.mock.calls[0]![0];
+    expect("externalSymbols" in sent).toBe(false);
+    expect("unresolvedSymbols" in sent).toBe(false);
+    expect(seen.called).toBeUndefined(); // resolver never invoked under opt-out
+    expect(sent.tokensIn).toBe(100);
+  });
+
+  it("sends ONLY the two integers — no symbol name, path, or code", async () => {
+    pend("est_only_symbol_ints");
+    const fake = makeFakeClient();
+    await run(fake, ENV, () => ({ external: 3, unresolved: 1 }));
+    const sent = fake.submitActuals.mock.calls[0]![0];
+    expect(Number.isInteger(sent.externalSymbols)).toBe(true);
+    expect(Number.isInteger(sent.unresolvedSymbols)).toBe(true);
+    const signal = JSON.stringify({
+      external_symbols: sent.externalSymbols,
+      unresolved_symbols: sent.unresolvedSymbols,
+    });
+    // Exactly the two integer counts — the string equality proves no name,
+    // path, or code rides along on the structural-existence signal.
+    expect(signal).toBe('{"external_symbols":3,"unresolved_symbols":1}');
+    expect(signal).not.toMatch(/[/\\]/); // no path separators
+    expect(sent.unresolvedSymbols).toBeLessThanOrEqual(sent.externalSymbols);
+  });
+
+  it("omits the symbol counts when the default (real) resolver finds no produced Python", async () => {
+    // No resolveSymbols override and no produced artifacts → the real resolver
+    // short-circuits to null without spawning anything, so nothing is forwarded
+    // and the submission is byte-identical to the pre-0023e shape.
+    pend("est_default_resolver");
+    const fake = makeFakeClient();
+    await runAutoActuals({
+      payload: PAYLOAD,
+      env: ENV,
+      home,
+      now: () => NOW,
+      stderr: { write: () => {} },
+      clientFactory: () => asClient(fake),
+      readUsage: () => ({ tokensIn: 7, tokensOut: 9, trace: [], changes: { produced: 0, accepted: 0 }, pythonArtifacts: [] }),
+    });
+    const sent = fake.submitActuals.mock.calls[0]![0];
+    expect("externalSymbols" in sent).toBe(false);
+    expect("unresolvedSymbols" in sent).toBe(false);
+    expect(sent.tokensIn).toBe(7);
+    expect(sent.tokensOut).toBe(9);
   });
 });

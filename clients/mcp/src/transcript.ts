@@ -49,6 +49,18 @@ export interface TranscriptUsage extends TranscriptTotals {
    * these are counts, so there is nothing to redact.
    */
   changes: ChangeCounts;
+  /**
+   * RAW local paths of the produced `.py` artifacts (successful mutate-family
+   * targets) — the surface the structural-hallucination resolver reads (0023e).
+   *
+   * LOCAL-ONLY: unlike every other field on this object these are unredacted
+   * paths, present ONLY so the caller can read the files locally and feed them
+   * to the static resolver. They are NEVER forwarded — the auto path passes them
+   * to {@link resolveHallucinations} (in `hallucination.ts`) and forwards only
+   * the two resulting integer counts. No path, name, or content leaves the
+   * machine. Distinct (deduped by path); order is not meaningful.
+   */
+  pythonArtifacts: string[];
 }
 
 /**
@@ -195,7 +207,8 @@ export function readTranscriptUsage(
   }
 
   const changes = countChanges(tools, results, resultIds);
-  return { tokensIn, tokensOut, trace, changes };
+  const pythonArtifacts = collectPythonArtifacts(tools, results, resultIds);
+  return { tokensIn, tokensOut, trace, changes, pythonArtifacts };
 }
 
 /**
@@ -550,6 +563,52 @@ export function countChanges(
     if (key !== null) survivingTargets.add(key);
   }
   return { produced, accepted: survivingTargets.size };
+}
+
+/**
+ * The RAW target path of a mutate `tool_use`, or `null` when none can be read.
+ * Unlike {@link mutateTargetKey} this returns the path IN THE CLEAR — used ONLY
+ * by {@link collectPythonArtifacts} to hand local file paths to the static
+ * resolver. The path never leaves the module boundary as anything but a resolved
+ * count.
+ */
+function mutateTargetPath(input: Record<string, unknown>): string | null {
+  const path = input.file_path ?? input.notebook_path ?? input.path;
+  return typeof path === "string" && path.length > 0 ? path : null;
+}
+
+/**
+ * Collect the DISTINCT raw `.py` file paths a session successfully produced
+ * (0023e) — the surface the structural-hallucination resolver measures. Reuses
+ * the SAME confirmed-success mutate detection as {@link countChanges}
+ * ({@link MUTATE_TOOLS} + {@link mutateSucceeded}); a failed/denied/unconfirmed
+ * edit contributes nothing. Only `.py` targets are kept (Python-first); paths are
+ * deduped so repeated edits to one file yield one artifact.
+ *
+ * The returned strings are RAW local paths — a LOCAL-ONLY input for the resolver,
+ * never forwarded. The caller reads these files on the machine and forwards only
+ * the two integer counts the resolver returns. `existsSync`-at-close filtering is
+ * done downstream (in the resolver), so a file deleted before session end drops
+ * out there.
+ */
+export function collectPythonArtifacts(
+  tools: ReadonlyArray<ToolUse>,
+  results: Map<string, boolean>,
+  resultIds: Set<string>,
+): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const use of tools) {
+    if (!MUTATE_TOOLS.has(use.name)) continue;
+    if (!mutateSucceeded(use, results, resultIds)) continue;
+    if (use.input === null) continue;
+    const path = mutateTargetPath(use.input);
+    if (path === null || !path.endsWith(".py")) continue;
+    if (seen.has(path)) continue;
+    seen.add(path);
+    out.push(path);
+  }
+  return out;
 }
 
 interface ToolUse {

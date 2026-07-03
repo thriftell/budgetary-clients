@@ -10,6 +10,10 @@ import {
   resolveConfig,
   traceTargetEnabled,
 } from "./config.js";
+import {
+  resolveHallucinations,
+  type SymbolCounts,
+} from "./hallucination.js";
 import { PendingStore, type PendingEntry, type PendingStoreFile } from "./store.js";
 import {
   capTrace,
@@ -51,6 +55,18 @@ export interface ActualCounts {
    */
   producedChanges?: number;
   acceptedChanges?: number;
+  /**
+   * Optional structural-existence counts (0023e): two MEASURED integers —
+   * `externalSymbols` (distinct external top-level imports across the run's
+   * produced Python) and `unresolvedSymbols` (those a static resolver found
+   * confidently absent, `<= external`). Set ONLY together, ONLY by the auto path
+   * when a real interpreter resolved real produced artifacts, and only when the
+   * operator has not opted out of trace detail. The manual path leaves both
+   * undefined; a model never supplies them. No symbol name, import, path, or
+   * code — only the two counts.
+   */
+  externalSymbols?: number;
+  unresolvedSymbols?: number;
 }
 
 /**
@@ -107,6 +123,17 @@ export async function submitActuals(args: SubmitActualsArgs): Promise<void> {
             acceptedChanges: counts.acceptedChanges,
           }
         : {}),
+      // Additive (0023e): the two structural-existence integers, forwarded only
+      // when the caller measured both (set together). Like the change counts, a
+      // missing symbol count never fails or alters the submission — the total is
+      // the contract. Only integers; no name, path, or code.
+      ...(typeof counts.externalSymbols === "number" &&
+      typeof counts.unresolvedSymbols === "number"
+        ? {
+            externalSymbols: counts.externalSymbols,
+            unresolvedSymbols: counts.unresolvedSymbols,
+          }
+        : {}),
     });
     file.entries.pop();
     store.write(file);
@@ -146,6 +173,13 @@ export interface AutoActualsArgs {
   clientFactory?: (opts: BudgetaryClientOptions) => BudgetaryClient;
   /** Override transcript-usage reader (tests). */
   readUsage?: (path: string, options?: ReadUsageOptions) => TranscriptUsage | null;
+  /**
+   * Override the structural-hallucination resolver (0023e; tests). Given the
+   * run's produced `.py` artifact paths, returns the two measured counts or
+   * `null` to omit both. Defaults to {@link resolveHallucinations}, which spawns
+   * the user's Python and never throws.
+   */
+  resolveSymbols?: (artifacts: readonly string[]) => SymbolCounts | null;
 }
 
 /**
@@ -200,6 +234,19 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
   // still submits with no `trace` rather than failing or shipping invented steps.
   const trace = capTrace(usage.trace) ?? undefined;
 
+  // Structural-existence counts (0023e): a STATIC resolver over the run's
+  // produced Python artifacts, gated by the SAME trace-detail opt-out. Two
+  // integers only — never a symbol name, path, or line of code. Fail-closed: no
+  // produced Python, no interpreter, or any resolver doubt yields `undefined`, so
+  // the total still submits without them. Suppressed wholesale under the opt-out
+  // (the resolver is not even run). The `?? []` tolerates a hand-built usage
+  // object (tests) that omits `pythonArtifacts`.
+  const symbols = traceDetail
+    ? (args.resolveSymbols ?? resolveHallucinations)(
+        usage.pythonArtifacts ?? [],
+      ) ?? undefined
+    : undefined;
+
   await submitActuals({
     store,
     file,
@@ -219,6 +266,15 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
         ? {
             producedChanges: usage.changes.produced,
             acceptedChanges: usage.changes.accepted,
+          }
+        : {}),
+      // Structural-existence counts (0023e): measured, additive, and suppressed
+      // by the same trace-detail opt-out. Present only when the static resolver
+      // returned counts over real produced Python (else omitted, fail-closed).
+      ...(symbols
+        ? {
+            externalSymbols: symbols.external,
+            unresolvedSymbols: symbols.unresolved,
           }
         : {}),
     },

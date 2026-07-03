@@ -7,6 +7,7 @@ import {
   TRACE_MAX_BYTES,
   TRACE_MAX_STEPS,
   capTrace,
+  collectPythonArtifacts,
   countChanges,
   readTranscriptTotals,
   readTranscriptUsage,
@@ -715,5 +716,109 @@ describe("countChanges — pure function contract", () => {
   it("treats an id-less success as unconfirmed and a targetless success as produced-not-accepted", () => {
     const r = count([edit(null, "/a"), edit("2", null)]);
     expect(r).toEqual({ produced: 1, accepted: 0 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Produced-Python artifact collection (0023e): the local-only path list the
+// static resolver reads. Same confirmed-success detection as change counts;
+// Python-first; deduped; raw paths (never forwarded — only counts are).
+// ---------------------------------------------------------------------------
+
+describe("readTranscriptUsage — pythonArtifacts (0023e)", () => {
+  const U = { input_tokens: 5, output_tokens: 5 };
+
+  it("collects distinct successful .py mutate targets", () => {
+    const path = write([
+      line("m1", use("Write", "w1", { file_path: "/repo/a.py" }), U), resultLine("w1"),
+      line("m2", use("Edit", "e1", { file_path: "/repo/pkg/b.py" }), U), resultLine("e1"),
+    ]);
+    expect(readTranscriptUsage(path)!.pythonArtifacts).toEqual([
+      "/repo/a.py",
+      "/repo/pkg/b.py",
+    ]);
+  });
+
+  it("dedupes repeated edits to the same .py file", () => {
+    const path = write([
+      line("m1", use("Edit", "e1", { file_path: "/repo/a.py" }), U), resultLine("e1"),
+      line("m2", use("Edit", "e2", { file_path: "/repo/a.py" }), U), resultLine("e2"),
+    ]);
+    expect(readTranscriptUsage(path)!.pythonArtifacts).toEqual(["/repo/a.py"]);
+  });
+
+  it("excludes non-Python targets (Python-first)", () => {
+    const path = write([
+      line("m1", use("Write", "w1", { file_path: "/repo/a.ts" }), U), resultLine("w1"),
+      line("m2", use("Write", "w2", { file_path: "/repo/README.md" }), U), resultLine("w2"),
+      line("m3", use("Write", "w3", { file_path: "/repo/keep.py" }), U), resultLine("w3"),
+    ]);
+    expect(readTranscriptUsage(path)!.pythonArtifacts).toEqual(["/repo/keep.py"]);
+  });
+
+  it("excludes a failed or unconfirmed .py mutate", () => {
+    const path = write([
+      line("m1", use("Edit", "e1", { file_path: "/repo/failed.py" }), U), resultLine("e1", true),
+      line("m2", use("Edit", "e2", { file_path: "/repo/noresult.py" }), U), // no result
+      line("m3", use("Write", "w1", { file_path: "/repo/ok.py" }), U), resultLine("w1"),
+    ]);
+    expect(readTranscriptUsage(path)!.pythonArtifacts).toEqual(["/repo/ok.py"]);
+  });
+
+  it("ignores a Python path read by a non-mutating tool", () => {
+    const path = write([
+      line("m1", use("Read", "r1", { file_path: "/repo/a.py" }), U), resultLine("r1"),
+    ]);
+    expect(readTranscriptUsage(path)!.pythonArtifacts).toEqual([]);
+  });
+
+  it("is empty for an edit-free session", () => {
+    const path = write([line("m1", text, { input_tokens: 2, output_tokens: 9 })]);
+    expect(readTranscriptUsage(path)!.pythonArtifacts).toEqual([]);
+  });
+});
+
+describe("collectPythonArtifacts — pure function contract", () => {
+  type Use = { name: string; id: string | null; input: Record<string, unknown> | null };
+  function collect(tools: Use[], failedIds: string[] = [], noResultIds: string[] = []) {
+    const resultIds = new Set<string>();
+    const results = new Map<string, boolean>();
+    for (const t of tools) {
+      if (t.id === null || noResultIds.includes(t.id)) continue;
+      resultIds.add(t.id);
+      if (failedIds.includes(t.id)) results.set(t.id, true);
+    }
+    return collectPythonArtifacts(tools as never, results, resultIds);
+  }
+  const write_ = (id: string | null, file: string | null): Use => ({
+    name: "Write",
+    id,
+    input: file === null ? {} : { file_path: file },
+  });
+
+  it("returns only distinct successful .py targets, in first-seen order", () => {
+    expect(
+      collect([write_("1", "/a.py"), write_("2", "/b.py"), write_("3", "/a.py")]),
+    ).toEqual(["/a.py", "/b.py"]);
+  });
+
+  it("drops a targetless success (no path to read)", () => {
+    expect(collect([write_("1", null), write_("2", "/keep.py")])).toEqual(["/keep.py"]);
+  });
+
+  it("drops failed and result-less mutates", () => {
+    expect(
+      collect([write_("1", "/x.py"), write_("2", "/y.py"), write_("3", "/z.py")], ["1"], ["2"]),
+    ).toEqual(["/z.py"]);
+  });
+
+  it("reads notebook_path and path fields too, but still only .py", () => {
+    expect(
+      collect([
+        { name: "Write", id: "1", input: { path: "/via-path.py" } },
+        { name: "MultiEdit", id: "2", input: { file_path: "/multi.py" } },
+        { name: "Write", id: "3", input: { notebook_path: "/nb.ipynb" } },
+      ]),
+    ).toEqual(["/via-path.py", "/multi.py"]);
   });
 });

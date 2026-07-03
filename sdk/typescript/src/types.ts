@@ -128,6 +128,34 @@ export interface ActualsRequest {
    */
   producedChanges?: number;
   acceptedChanges?: number;
+  /**
+   * Structural-existence accounting for the run's produced Python code — two
+   * MEASURED integers that let the server report how often code **runs but
+   * references a symbol that doesn't exist**. They are **counts, never content**:
+   * no symbol name, import statement, file path, or line of code is implied or
+   * attached.
+   *
+   *  - `externalSymbols` — distinct **external, top-level** module imports across
+   *    the run's produced `.py` artifacts (relative/local imports and the
+   *    project's own modules are excluded; a submodule like `os.path` counts once
+   *    under its top-level name `os`).
+   *  - `unresolvedSymbols` — of those, how many a static resolver found to be
+   *    **confidently absent** in the interpreter that produced them, checked with
+   *    `importlib.util.find_spec` on the top-level name (which resolves **without
+   *    executing** the module body). Conservative and `<= externalSymbols`: every
+   *    ambiguity (parse error, conditional/dynamic import, resolver error) is
+   *    treated as resolved, so this **under-counts, never over-counts**.
+   *
+   * Both are measured by a linter-grade static resolver over observed artifacts,
+   * **never model-supplied**, and both are **omitted together** when resolution
+   * is not observable (no produced Python, no interpreter, resolver error) or the
+   * operator opts out of trace detail. The measurement is **structural existence
+   * only** — not semantic correctness, not a per-file "you hallucinated" flag; the
+   * server turns it into a coverage-gated, regional rate. The client classifies,
+   * scores, and benchmarks nothing.
+   */
+  externalSymbols?: number;
+  unresolvedSymbols?: number;
   metadata?: ActualsMetadata;
 }
 
