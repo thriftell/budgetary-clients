@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { LedgerEntry } from "@budgetary/sdk";
 
 import {
+  renderConfigUnreadable,
   renderConfigureKey,
   renderDashboard,
   renderError,
@@ -113,6 +114,25 @@ describe("renderConfigureKey", () => {
     expect(html).toContain('postMessage({ type: "refresh" })');
     expect(html).toContain('href="https://budgetary.tools"');
     expect(html.toLowerCase()).toContain("restart");
+  });
+});
+
+describe("renderConfigUnreadable", () => {
+  it("names the broken file and is distinct from the no-key panel", () => {
+    const html = renderConfigUnreadable("/home/u/.budgetary/config.json", NONCE);
+    expect(html).toContain(`script-src 'nonce-${NONCE}';`);
+    expect(html).toContain("Config file could not be read");
+    expect(html).toContain("/home/u/.budgetary/config.json");
+    // The whole point of this panel: it must NOT tell the user "no key".
+    expect(html).not.toContain("No API key configured");
+    expect(html).toContain('id="refresh"');
+    expect(html).not.toContain("<svg");
+  });
+
+  it("escapes the path (never injects it raw into the HTML)", () => {
+    const html = renderConfigUnreadable("<script>x</script>", NONCE);
+    expect(html).not.toContain("<script>x</script>");
+    expect(html).toContain("&lt;script&gt;x&lt;/script&gt;");
   });
 });
 

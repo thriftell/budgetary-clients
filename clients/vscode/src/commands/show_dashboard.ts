@@ -3,8 +3,9 @@ import * as vscode from "vscode";
 
 import { BudgetaryAuthError, BudgetaryClient, BudgetaryError } from "@budgetary/sdk";
 
-import { resolveConfig } from "../config";
+import { resolveConfigStatus } from "../config";
 import {
+  renderConfigUnreadable,
   renderConfigureKey,
   renderDashboard,
   renderError,
@@ -71,11 +72,18 @@ export async function load(
     }
   };
 
-  const config = resolveConfig();
-  if (config === null) {
+  const status = resolveConfigStatus();
+  if (status.kind === "no-key") {
     apply(renderConfigureKey(makeNonce()));
     return;
   }
+  if (status.kind === "unreadable") {
+    // A config file that exists but can't be parsed is a distinct, fixable
+    // problem from "no key" — say so, rather than telling the user to set a key.
+    apply(renderConfigUnreadable(status.path, makeNonce()));
+    return;
+  }
+  const config = status.config;
 
   // A manual refresh keeps the current dashboard visible (no full "Loading…"
   // blank that would lose scroll/focus); the webview announces "Refreshing…"

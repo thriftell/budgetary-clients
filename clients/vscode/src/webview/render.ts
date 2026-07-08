@@ -253,6 +253,25 @@ export function renderConfigureKey(nonce: string): string {
   return shell(nonce, "Budgetary — Configure Key", body);
 }
 
+// Distinct from renderConfigureKey: the config file EXISTS but couldn't be read
+// (invalid JSON, permissions). Telling the user "No API key configured" here is
+// wrong — they may have set a key the file just can't be parsed for. Name the
+// real problem so they fix the file instead of re-entering a key.
+export function renderConfigUnreadable(path: string, nonce: string): string {
+  const body = `
+  <header class="b-header">
+    <h1>Budgetary <span class="b-subtitle">config unreadable</span></h1>
+    <button class="b-refresh" id="refresh" type="button">↻ I've fixed it — re-check</button>
+  </header>
+  <div class="b-message">
+    <h2>Config file could not be read</h2>
+    <p>Budgetary found <code>${escapeHtml(path)}</code> but couldn't read it — it may contain invalid JSON. Fix that file, or remove it and set <code>BUDGETARY_API_KEY</code> instead, then press <strong>re-check</strong> above.</p>
+    <p>Get a key at <a href="https://budgetary.tools">budgetary.tools</a>.</p>
+  </div>
+  ${refreshScript(nonce)}`;
+  return shell(nonce, "Budgetary — Config Unreadable", body);
+}
+
 export function renderError(
   message: string,
   requestId: string | null,
