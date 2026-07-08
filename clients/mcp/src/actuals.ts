@@ -11,6 +11,7 @@ import {
   traceTargetEnabled,
 } from "./config.js";
 import { PendingStore, type PendingEntry, type PendingStoreFile } from "./store.js";
+import { projectIdFromCwd } from "./tools/estimate.js";
 import {
   capTrace,
   readTranscriptUsage,
@@ -46,22 +47,31 @@ export interface ActualCounts {
 /**
  * The minimal store surface {@link submitActuals} needs. Typed structurally
  * (not as the concrete {@link PendingStore}) so first-party clients can pass
- * their own byte-compatible store instance across the package boundary.
+ * their own byte-compatible store instance across the package boundary. Both
+ * `read` and `write` are required: the submit path re-reads immediately before
+ * writing so a concurrent append during the network round-trip is not lost.
  */
 export interface PendingWriter {
+  read(): PendingStoreFile;
   write(file: PendingStoreFile): void;
 }
 
 export interface SubmitActualsArgs {
   store: PendingWriter;
-  /** The store file already read by the caller. The newest entry is last. */
-  file: PendingStoreFile;
   client: BudgetaryClient;
-  /** The entry being closed out — must be the newest (last) entry. */
+  /** The entry being closed out, identified by its `estimate_id`. */
   entry: PendingEntry;
   /** Caller-supplied realized counts. Never derived from a model. */
   counts: ActualCounts;
   logger?: { warn(message: string): void };
+}
+
+/** Drop the entry with this `estimate_id` from `file`; returns whether it was present. */
+function removeById(file: PendingStoreFile, estimateId: string): boolean {
+  const idx = file.entries.findIndex((e) => e.estimate_id === estimateId);
+  if (idx === -1) return false;
+  file.entries.splice(idx, 1);
+  return true;
 }
 
 /**
@@ -71,9 +81,15 @@ export interface SubmitActualsArgs {
  * {@link MAX_ATTEMPTS} drop the entry and log one warning. This is the only
  * function in the package that calls `client.submitActuals`, and it requires
  * the counts to be passed in explicitly.
+ *
+ * The store is RE-READ immediately before every mutation, and the target is
+ * located by `estimate_id` (never by position): `client.submitActuals` takes
+ * seconds, during which another session may have appended or removed an entry.
+ * Writing back a pre-read snapshot, or popping the last element, would lose that
+ * concurrent work or close the wrong entry.
  */
 export async function submitActuals(args: SubmitActualsArgs): Promise<void> {
-  const { store, file, client, entry, counts } = args;
+  const { store, client, entry, counts } = args;
   const logger = args.logger ?? { warn: () => {} };
 
   try {
@@ -88,22 +104,43 @@ export async function submitActuals(args: SubmitActualsArgs): Promise<void> {
         ? { trace: counts.trace }
         : {}),
     });
-    file.entries.pop();
-    store.write(file);
+    const fresh = store.read();
+    if (removeById(fresh, entry.estimate_id)) store.write(fresh);
   } catch (err) {
-    const updated: PendingEntry = { ...entry, attempts: entry.attempts + 1 };
+    const fresh = store.read();
+    const idx = fresh.entries.findIndex(
+      (e) => e.estimate_id === entry.estimate_id,
+    );
+    if (idx === -1) return; // already closed (another session, or TTL-dropped)
+    const current = fresh.entries[idx]!;
+    const updated: PendingEntry = {
+      ...current,
+      attempts: current.attempts + 1,
+    };
     if (updated.attempts >= MAX_ATTEMPTS) {
-      file.entries.pop();
-      store.write(file);
+      fresh.entries.splice(idx, 1);
+      store.write(fresh);
       const detail = err instanceof BudgetaryError ? err.message : String(err);
       logger.warn(
         `Budgetary: giving up on actuals for ${entry.estimate_id} after ${MAX_ATTEMPTS} attempts (${detail}).`,
       );
       return;
     }
-    file.entries[file.entries.length - 1] = updated;
-    store.write(file);
+    fresh.entries[idx] = updated;
+    store.write(fresh);
   }
+}
+
+/** The newest pending entry belonging to `projectId`, or null if none match. */
+function newestForProject(
+  entries: readonly PendingEntry[],
+  projectId: string | null,
+): PendingEntry | null {
+  if (projectId === null) return null;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (entries[i]!.project_id === projectId) return entries[i]!;
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -114,6 +151,7 @@ export interface SessionEndPayload {
   transcript_path?: string;
   reason?: string;
   started_at?: string;
+  cwd?: string;
   [key: string]: unknown;
 }
 
@@ -121,6 +159,12 @@ export interface AutoActualsArgs {
   payload: SessionEndPayload | null;
   env: NodeJS.ProcessEnv;
   home?: string;
+  /**
+   * The ending session's working directory, hashed to the same `project_id`
+   * the estimate stored. Used to bind an actual to its own session's estimate;
+   * falls back to `payload.cwd` when omitted.
+   */
+  cwd?: string;
   now?: () => Date;
   stderr: { write(s: string): void };
   clientFactory?: (opts: BudgetaryClientOptions) => BudgetaryClient;
@@ -128,11 +172,24 @@ export interface AutoActualsArgs {
   readUsage?: (path: string, options?: ReadUsageOptions) => TranscriptUsage | null;
 }
 
+/** This session's project id from its cwd (arg or payload), or null if unknown. */
+function sessionProjectId(args: AutoActualsArgs): string | null {
+  const cwd =
+    args.cwd ??
+    (args.payload && typeof args.payload.cwd === "string"
+      ? args.payload.cwd
+      : undefined);
+  if (typeof cwd !== "string" || cwd.length === 0) return null;
+  return projectIdFromCwd(cwd);
+}
+
 /**
- * Close out the newest pending estimate from real session usage. Submits
- * nothing unless the transcript yields token counts; drops entries older than
- * 24h silently. Mirrors the first-party plugin hook behavior and routes the
- * submit through {@link submitActuals}.
+ * Close out THIS session's newest pending estimate from real session usage.
+ * The entry is bound to the session by `project_id` (derived from the session's
+ * cwd), so an actual is never mis-paired to a different concurrent session's
+ * estimate. Submits nothing unless the transcript yields token counts; drops a
+ * matched entry older than 24h silently. Routes the submit through
+ * {@link submitActuals}.
  */
 export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
   const store = new PendingStore({
@@ -142,12 +199,16 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
   const file = store.read();
   if (file.entries.length === 0) return 0;
 
-  const newest = file.entries[file.entries.length - 1]!;
+  // Bind to this session's own estimate; leave other sessions' entries alone.
+  const entry = newestForProject(file.entries, sessionProjectId(args));
+  if (entry === null) return 0;
+
   const now = (args.now ?? (() => new Date()))();
-  const created = Date.parse(newest.created_at);
+  const created = Date.parse(entry.created_at);
   if (!Number.isFinite(created) || now.getTime() - created > PENDING_TTL_MS) {
-    file.entries.pop();
-    store.write(file);
+    // Drop just this stale entry (by id, re-reading first); leave the rest.
+    const fresh = store.read();
+    if (removeById(fresh, entry.estimate_id)) store.write(fresh);
     return 0;
   }
 
@@ -180,14 +241,13 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
 
   await submitActuals({
     store,
-    file,
     client,
-    entry: newest,
+    entry,
     counts: {
       tokensIn: usage.tokensIn,
       tokensOut: usage.tokensOut,
       success: isSuccessReason(args.payload.reason),
-      durationMs: inferDurationMs(args.payload, newest, now),
+      durationMs: inferDurationMs(args.payload, entry, now),
       ...(trace ? { trace } : {}),
     },
     logger: { warn: (m) => args.stderr.write(`${m}\n`) },
@@ -294,7 +354,6 @@ export async function runManualActuals(args: ManualActualsArgs): Promise<number>
   let warned: string | null = null;
   await submitActuals({
     store,
-    file,
     client,
     entry: newest,
     counts: { tokensIn, tokensOut, success, durationMs },

@@ -22,8 +22,31 @@ import {
   resolveApiKey,
   type ConfigEnv,
 } from "../config.js";
+import { projectIdFromCwd } from "../commands/estimate.js";
 import { PendingStore, type PendingEntry } from "../store.js";
 import { readTranscriptTotals } from "../transcript.js";
+
+/** The newest pending entry belonging to `projectId`, or null if none match. */
+function newestForProject(
+  entries: readonly PendingEntry[],
+  projectId: string,
+): PendingEntry | null {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (entries[i]!.project_id === projectId) return entries[i]!;
+  }
+  return null;
+}
+
+/** Drop the entry with this `estimate_id`, if present; returns whether it was. */
+function removeById(
+  entries: PendingEntry[],
+  estimateId: string,
+): boolean {
+  const idx = entries.findIndex((e) => e.estimate_id === estimateId);
+  if (idx === -1) return false;
+  entries.splice(idx, 1);
+  return true;
+}
 
 export interface StopPayload {
   session_id?: string;
@@ -65,12 +88,16 @@ export async function runOnSessionEnd(args: SessionEndInvocation): Promise<numbe
   const file = store.read();
   if (file.entries.length === 0) return 0;
 
-  const newest = file.entries[file.entries.length - 1]!;
+  // Bind the actual to THIS session's own estimate (matched by project_id, the
+  // hash of the session cwd) so we never close another concurrent session's
+  // entry. No match → leave every entry for its own session.
+  const entry = newestForProject(file.entries, projectIdFromCwd(args.cwd));
+  if (entry === null) return 0;
+
   const now = (args.now ?? (() => new Date()))();
-  const created = Date.parse(newest.created_at);
+  const created = Date.parse(entry.created_at);
   if (!Number.isFinite(created) || now.getTime() - created > PENDING_TTL_MS) {
-    file.entries.pop();
-    store.write(file);
+    if (removeById(file.entries, entry.estimate_id)) store.write(file);
     return 0;
   }
 
@@ -84,7 +111,7 @@ export async function runOnSessionEnd(args: SessionEndInvocation): Promise<numbe
   if (totals === null) return 0;
 
   const success = isSuccessfulStop(args.payload);
-  const durationMs = inferDurationMs(args.payload, newest, now);
+  const durationMs = inferDurationMs(args.payload, entry, now);
 
   const resolved = resolveApiKey(configEnv);
   if (resolved === null) {
@@ -99,30 +126,39 @@ export async function runOnSessionEnd(args: SessionEndInvocation): Promise<numbe
     baseUrl: resolved.baseUrl,
   });
 
+  // Re-read the store immediately before every mutation and target the entry by
+  // `estimate_id` (never by position): the submit takes seconds, during which
+  // another session may append or remove an entry.
   try {
     await client.submitActuals({
-      estimateId: newest.estimate_id,
+      estimateId: entry.estimate_id,
       tokensIn: totals.tokensIn,
       tokensOut: totals.tokensOut,
       success,
       durationMs,
     });
-    file.entries.pop();
-    store.write(file);
+    const fresh = store.read();
+    if (removeById(fresh.entries, entry.estimate_id)) store.write(fresh);
     return 0;
   } catch (err) {
-    const updated: PendingEntry = { ...newest, attempts: newest.attempts + 1 };
+    const fresh = store.read();
+    const idx = fresh.entries.findIndex(
+      (e) => e.estimate_id === entry.estimate_id,
+    );
+    if (idx === -1) return 0; // already closed (another session, or TTL-dropped)
+    const current = fresh.entries[idx]!;
+    const updated: PendingEntry = { ...current, attempts: current.attempts + 1 };
     if (updated.attempts >= MAX_ATTEMPTS) {
-      file.entries.pop();
-      store.write(file);
+      fresh.entries.splice(idx, 1);
+      store.write(fresh);
       const detail = err instanceof BudgetaryError ? err.message : String(err);
       args.stderr.write(
-        `Budgetary: giving up on actuals for ${newest.estimate_id} after ${MAX_ATTEMPTS} attempts (${detail}).\n`,
+        `Budgetary: giving up on actuals for ${entry.estimate_id} after ${MAX_ATTEMPTS} attempts (${detail}).\n`,
       );
       return 0;
     }
-    file.entries[file.entries.length - 1] = updated;
-    store.write(file);
+    fresh.entries[idx] = updated;
+    store.write(fresh);
     return 0;
   }
 }

@@ -13,8 +13,20 @@ import {
   resolveApiKey,
   type ConfigEnv,
 } from "../config.js";
+import { projectIdFromCwd } from "../commands/estimate.js";
 import { PendingStore, type PendingEntry } from "../store.js";
 import { readTranscriptTotals } from "../transcript.js";
+
+/** The newest pending entry belonging to `projectId`, or null if none match. */
+function newestForProject(
+  entries: readonly PendingEntry[],
+  projectId: string,
+): PendingEntry | null {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (entries[i]!.project_id === projectId) return entries[i]!;
+  }
+  return null;
+}
 
 export interface SessionEndPayload {
   session_id?: string;
@@ -49,12 +61,22 @@ export async function runOnSessionEnd(args: SessionEndInvocation): Promise<numbe
   const file = store.read();
   if (file.entries.length === 0) return 0;
 
-  const newest = file.entries[file.entries.length - 1]!;
+  // Bind the actual to THIS session's own estimate (matched by project_id, the
+  // hash of the session cwd) so we never close another concurrent session's
+  // entry. No match → leave every entry for its own session.
+  const entry = newestForProject(file.entries, projectIdFromCwd(args.cwd));
+  if (entry === null) return 0;
+
   const now = (args.now ?? (() => new Date()))();
-  const created = Date.parse(newest.created_at);
+  const created = Date.parse(entry.created_at);
   if (!Number.isFinite(created) || now.getTime() - created > PENDING_TTL_MS) {
-    file.entries.pop();
-    store.write(file);
+    const idx = file.entries.findIndex(
+      (e) => e.estimate_id === entry.estimate_id,
+    );
+    if (idx !== -1) {
+      file.entries.splice(idx, 1);
+      store.write(file);
+    }
     return 0;
   }
 
@@ -68,7 +90,7 @@ export async function runOnSessionEnd(args: SessionEndInvocation): Promise<numbe
   if (totals === null) return 0;
 
   const success = isSuccessReason(args.payload.reason);
-  const durationMs = inferDurationMs(args.payload, newest, now);
+  const durationMs = inferDurationMs(args.payload, entry, now);
 
   const resolved = resolveApiKey(configEnv);
   if (resolved === null) {
@@ -88,9 +110,8 @@ export async function runOnSessionEnd(args: SessionEndInvocation): Promise<numbe
   // and drop-after-5 behavior is identical across every Budgetary host.
   await submitActuals({
     store,
-    file,
     client,
-    entry: newest,
+    entry,
     counts: {
       tokensIn: totals.tokensIn,
       tokensOut: totals.tokensOut,

@@ -135,7 +135,12 @@ async function runOnSessionEndCli(): Promise<number> {
       payload = null;
     }
   }
-  return runAutoActuals({ payload, env: process.env, stderr: process.stderr });
+  return runAutoActuals({
+    payload,
+    env: process.env,
+    cwd: process.cwd(),
+    stderr: process.stderr,
+  });
 }
 
 /**
