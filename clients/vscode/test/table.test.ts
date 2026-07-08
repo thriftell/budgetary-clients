@@ -56,6 +56,30 @@ describe("renderRecentTable", () => {
     expect(html).toContain("1–3");
   });
 
+  it("shows When + Query columns and a humanized scenario label", () => {
+    const html = renderRecentTable([
+      { ...entry("est_q", "2026-05-27T10:14:00Z", 100, "sparse_evidence"), queryExcerpt: "refactor the payments module" },
+    ]);
+    expect(html).toContain("<th scope=\"col\">When</th>");
+    expect(html).toContain("<th scope=\"col\">Query</th>");
+    expect(html).toContain("refactor the payments module");
+    // formatTimestamp renders the createdAt (dead code before this).
+    expect(html).toContain("2026-05");
+    // Scenario is humanized for display (raw stays only in the class hook).
+    expect(html).toContain(">sparse evidence</td>");
+    expect(html).toContain("b-scenario-sparse_evidence");
+  });
+
+  it("notes the 50-row cap in the caption only when the cap is reached", () => {
+    const few = renderRecentTable([entry("e1", "2026-05-27T10:14:00Z", 100)]);
+    expect(few).not.toContain("most recent");
+
+    const many = Array.from({ length: 50 }, (_, i) =>
+      entry(`e${i}`, "2026-05-27T10:14:00Z", 100),
+    );
+    expect(renderRecentTable(many)).toContain("Showing the 50 most recent");
+  });
+
   it("has a caption, scope=col headers, and a Result column with accessible glyphs", () => {
     const done = renderRecentTable([
       entry("est_ok", "2026-05-27T10:14:00Z", 100),

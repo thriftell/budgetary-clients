@@ -48,6 +48,9 @@ export class BudgetaryRateLimitError extends BudgetaryError {
 export type BudgetaryNetworkErrorCode = "timeout" | "network" | "abort";
 
 export class BudgetaryNetworkError extends BudgetaryError {
+  /** Narrowed from the base `string` so `err.code` autocompletes the 3 values. */
+  declare readonly code: BudgetaryNetworkErrorCode;
+
   constructor(args: { code: BudgetaryNetworkErrorCode; message: string }) {
     super({
       code: args.code,

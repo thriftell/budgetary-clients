@@ -51,6 +51,16 @@ A successful estimate is a **range, not a point**. `distribution` gives `p10`, `
 
 Don't render a low-confidence or void estimate as if it were a precise number — surface the range and the caveat.
 
+The idiomatic read narrows `distribution` by branching on `void` first, then destructures in the non-null branch:
+
+```ts
+if (estimate.void || estimate.distribution === null) {
+  // no prediction — render the caveat
+} else {
+  const { p10, p50, p90 } = estimate.distribution; // non-null here
+}
+```
+
 ## Closing the loop
 
 After a run, submit the realized counts so future estimates calibrate, then read them back from the ledger. Token counts must be **measured**, never guessed.

@@ -1,7 +1,7 @@
 import type { LedgerEntry } from "@budgetary/sdk";
 
-import { escapeHtml } from "../format";
-import { markerShapeSvg, styleForScenario } from "./scenario";
+import { escapeHtml, formatTokens } from "../format";
+import { markerShapeSvg, scenarioLabel, styleForScenario } from "./scenario";
 
 const VIEW_W = 600;
 const VIEW_H = 400;
@@ -164,7 +164,7 @@ export function renderCalibrationChart(entries: readonly LedgerEntry[]): string 
     const style = styleForScenario(p.scenario);
     const cx = xScale(p.p50, domain).toFixed(2);
     const cy = yScale(p.actual, domain).toFixed(2);
-    const title = `predicted ${formatTick(p.p50)} (p10–p90 ${formatTick(p.p10)}–${formatTick(p.p90)}) → actual ${formatTick(p.actual)} (${escapeHtml(p.scenario)})`;
+    const title = `predicted ${formatTokens(p.p50)} (p10–p90 ${formatTokens(p.p10)}–${formatTokens(p.p90)}) → actual ${formatTokens(p.actual)} (${escapeHtml(scenarioLabel(p.scenario))})`;
     return `<g transform="translate(${cx} ${cy})">${markerShapeSvg(style.shape, MARKER_R, style.color, 0.9)}<title>${title}</title></g>`;
   });
 

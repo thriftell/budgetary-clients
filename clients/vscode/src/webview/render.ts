@@ -115,6 +115,8 @@ const STYLES = `
   }
   td.b-cell-num { text-align: right; font-variant-numeric: tabular-nums; }
   td.b-cell-done { text-align: center; }
+  td.b-cell-when { white-space: nowrap; color: var(--vscode-descriptionForeground); font-size: 12px; }
+  td.b-cell-query { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   td.b-cell-scenario { font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; }
   td.b-cell-id { font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; color: var(--vscode-descriptionForeground); }
   .b-empty { color: var(--vscode-descriptionForeground); font-style: italic; }

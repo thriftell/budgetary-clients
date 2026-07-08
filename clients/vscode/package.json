@@ -24,7 +24,8 @@
     "commands": [
       {
         "command": "budgetary.showDashboard",
-        "title": "Budgetary: Show Dashboard"
+        "title": "Show Dashboard",
+        "category": "Budgetary"
       }
     ]
   },
