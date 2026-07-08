@@ -12,6 +12,9 @@ import {
 } from "../webview/render";
 
 let panel: vscode.WebviewPanel | undefined;
+// Monotonic load counter: every load() captures the value it started with, and
+// only writes to the webview while it is still the latest — see load().
+let loadGeneration = 0;
 
 function makeNonce(): string {
   return randomBytes(16).toString("base64").replace(/[+/=]/g, "");
@@ -50,14 +53,26 @@ export function showDashboard(_context: vscode.ExtensionContext): void {
   void load(panel);
 }
 
-async function load(p: vscode.WebviewPanel): Promise<void> {
+export async function load(p: vscode.WebviewPanel): Promise<void> {
+  // Newest-wins + disposed guard. A ledger fetch can resolve after a newer
+  // refresh started, or after the panel was disposed. `apply` writes only while
+  // this load is still the latest AND `p` is still the active panel — so a stale
+  // response can't clobber fresher content, and a resolve on a disposed panel
+  // can't throw (VS Code throws when you set `.html` on a disposed webview).
+  const generation = ++loadGeneration;
+  const apply = (html: string): void => {
+    if (generation === loadGeneration && panel === p) {
+      p.webview.html = html;
+    }
+  };
+
   const config = resolveConfig();
   if (config === null) {
-    p.webview.html = renderConfigureKey(makeNonce());
+    apply(renderConfigureKey(makeNonce()));
     return;
   }
 
-  p.webview.html = renderLoading(makeNonce());
+  apply(renderLoading(makeNonce()));
 
   const client = new BudgetaryClient({
     apiKey: config.apiKey,
@@ -65,17 +80,21 @@ async function load(p: vscode.WebviewPanel): Promise<void> {
   });
 
   try {
-    const page = await client.getLedger({ limit: 50, includeOrphans: false });
-    p.webview.html = renderDashboard(page.entries, makeNonce());
+    // includeOrphans: pending estimates have no actuals yet; show them as rows
+    // rather than hiding them (and mislabeling a non-empty ledger "No estimates").
+    const page = await client.getLedger({ limit: 50, includeOrphans: true });
+    apply(renderDashboard(page.entries, makeNonce()));
   } catch (err) {
     const nonce = makeNonce();
     if (err instanceof BudgetaryError) {
-      p.webview.html = renderError(err.message, err.requestId, nonce);
+      apply(renderError(err.message, err.requestId, nonce));
     } else {
-      p.webview.html = renderError(
-        err instanceof Error ? err.message : String(err),
-        null,
-        nonce,
+      apply(
+        renderError(
+          err instanceof Error ? err.message : String(err),
+          null,
+          nonce,
+        ),
       );
     }
   }

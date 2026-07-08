@@ -81,7 +81,9 @@ describe("renderCalibrationChart", () => {
     const onePoint = renderCalibrationChart([
       entry("e1", "confident", 1_000, 1_200),
     ]);
-    expect(onePoint).toContain("No calibration data yet");
+    // One point is not "no data" — the message says so honestly now.
+    expect(onePoint).toContain("at least 2 are needed");
+    expect(onePoint).not.toContain("No calibration data yet");
     expect(countCircles(onePoint)).toBe(0);
   });
 
@@ -126,5 +128,29 @@ describe("renderCalibrationChart", () => {
     const svg = renderCalibrationChart([]);
     expect(svg).toMatch(/^<svg\b/);
     expect(svg).toContain('viewBox="0 0 600 400"');
+  });
+
+  it("escapes a markup-shaped scenario in the point <title>", () => {
+    const evil = '<script>alert(1)</script>';
+    const svg = renderCalibrationChart([
+      entry("e1", evil, 1_000, 1_200),
+      entry("e2", "confident", 2_000, 2_400),
+    ]);
+    // Raw markup must not appear; the escaped form must.
+    expect(svg).not.toContain("<script>alert(1)</script>");
+    expect(svg).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+  });
+
+  it("does not treat an inherited Object property name as a scenario color", () => {
+    // "constructor"/"toString" are Object.prototype members; a plain lookup would
+    // return a function and inject it into the fill attribute.
+    const svg = renderCalibrationChart([
+      entry("e1", "constructor", 1_000, 1_200),
+      entry("e2", "toString", 2_000, 2_400),
+    ]);
+    expect(svg.toLowerCase()).not.toContain("function");
+    expect(svg).not.toContain("[object");
+    // Both fall through to the unknown color.
+    expect(svg).toContain("var(--vscode-foreground)");
   });
 });
