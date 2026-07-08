@@ -60,7 +60,8 @@ The full hierarchy:
 | Exception | When |
 |---|---|
 | `BudgetaryError` | Base class. Exposes `code`, `http_status`, `request_id`. |
-| `BudgetaryAuthError` | `401`, `403`. |
+| `BudgetaryAuthError` | `401` (`authentication_failed`) — bad or missing key. |
+| `BudgetaryPermissionError` | `403` (`permission_denied`) — valid key, insufficient scope. Distinct from `BudgetaryAuthError` (a sibling, not a subclass), so catching `BudgetaryAuthError` won't swallow a 403. |
 | `BudgetaryNotFoundError` | `404`. |
 | `BudgetaryValidationError` | `400`, `409`, `413`. |
 | `BudgetaryRateLimitError` | `429`. Also exposes `retry_after_seconds`. |
@@ -74,7 +75,7 @@ The full hierarchy:
 | `api_key` | `str` | _required_ | Sent as `Authorization: Bearer <api_key>`. |
 | `base_url` | `str` | `"https://api.budgetary.tools"` | Override for staging or self-hosted endpoints. |
 | `timeout_ms` | `int` | `10_000` | Per-request timeout. |
-| `max_retries` | `int` | `5` | Max retries on `429` and `5xx`. Total attempts = `max_retries + 1`. |
+| `max_retries` | `int` | `4` | Max retries on `429` and `5xx`. Total attempts = `max_retries + 1` (5, per contract §8). |
 | `http_client` | `httpx.Client \| None` | a new one | Inject your own `httpx.Client` (mainly for tests or connection pooling). |
 
 ## Idempotency
@@ -108,5 +109,7 @@ A first-class async client (`AsyncBudgetaryClient` backed by `httpx.AsyncClient`
 ## Reference
 
 For the full v1 API contract — endpoints, error codes, scenario labels, idempotency semantics — see [docs/api-contract.md](../../docs/api-contract.md).
+
+This SDK is kept behavior-compatible with the [TypeScript SDK](../typescript/README.md) against that contract; contributors changing either one should tick the [SDK parity checklist](../../docs/sdk-parity.md).
 
 Licensed under [Apache-2.0](../../LICENSE).

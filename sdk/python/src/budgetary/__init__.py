@@ -6,6 +6,7 @@ from budgetary.errors import (
     BudgetaryError,
     BudgetaryNetworkError,
     BudgetaryNotFoundError,
+    BudgetaryPermissionError,
     BudgetaryRateLimitError,
     BudgetaryServerError,
     BudgetaryValidationError,
@@ -21,12 +22,14 @@ from budgetary.types import (
     LedgerPage,
     LedgerPredicted,
     LedgerQuery,
+    normalize_scenario,
 )
 
 __all__ = [
     "BudgetaryClient",
     "BudgetaryError",
     "BudgetaryAuthError",
+    "BudgetaryPermissionError",
     "BudgetaryRateLimitError",
     "BudgetaryNotFoundError",
     "BudgetaryValidationError",
@@ -42,4 +45,5 @@ __all__ = [
     "LedgerActual",
     "LedgerPredicted",
     "EstimateContext",
+    "normalize_scenario",
 ]

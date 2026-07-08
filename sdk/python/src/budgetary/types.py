@@ -15,6 +15,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal, TypedDict
 
+_KNOWN_SCENARIOS = frozenset(
+    {"confident", "uncertain", "sparse_evidence", "out_of_domain"}
+)
+
+
+def normalize_scenario(scenario: str) -> str:
+    """Fold an unknown scenario label to ``"uncertain"``.
+
+    The contract says new scenario labels may be added without notice, so a
+    response ``scenario`` is typed as ``str``. This mirrors the TypeScript SDK's
+    ``normalizeScenario``: the known labels pass through; anything else — a label
+    this SDK version doesn't recognize — becomes ``"uncertain"``.
+    """
+    return scenario if scenario in _KNOWN_SCENARIOS else "uncertain"
+
 
 class EstimateContext(TypedDict, total=False):
     host: str

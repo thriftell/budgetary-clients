@@ -1,4 +1,5 @@
-"""Exponential backoff with full jitter, matching the TypeScript SDK."""
+"""Exponential backoff with full jitter; a 429 ``Retry-After`` is used as a
+floor and clamped to ``max_delay_ms`` — parity with the TypeScript SDK."""
 
 from __future__ import annotations
 
@@ -45,6 +46,11 @@ def with_retry(
                 isinstance(err, BudgetaryRateLimitError)
                 and err.retry_after_seconds is not None
             ):
-                delay_ms = max(err.retry_after_seconds * 1000.0, computed_ms)
+                # Retry-After is a floor, but still clamped to max_delay_ms so a
+                # large (or hostile) header can't stall the client for minutes.
+                delay_ms = min(
+                    max(err.retry_after_seconds * 1000.0, computed_ms),
+                    max_delay_ms,
+                )
             sleep(delay_ms / 1000.0)
             attempt += 1

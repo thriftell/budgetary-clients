@@ -22,7 +22,20 @@ class BudgetaryError(Exception):
 
 
 class BudgetaryAuthError(BudgetaryError):
-    """401 ``authentication_failed`` or 403 ``permission_denied``."""
+    """401 ``authentication_failed`` — the API key is missing, malformed, or revoked."""
+
+
+class BudgetaryPermissionError(BudgetaryError):
+    """403 ``permission_denied`` — the key is valid but lacks scope for this operation.
+
+    Distinct from :class:`BudgetaryAuthError` — a sibling, both extending
+    :class:`BudgetaryError` rather than one nesting under the other — so callers
+    can tell "bad key" (re-authenticate) apart from "authorized but gated" (a
+    permission/plan problem), and a handler catching ``BudgetaryAuthError`` does
+    not also swallow a 403. See contract §6 (``authentication_failed`` vs
+    ``permission_denied``). Mirrors the TypeScript SDK's
+    ``BudgetaryPermissionError``, which likewise extends the base error.
+    """
 
 
 class BudgetaryNotFoundError(BudgetaryError):

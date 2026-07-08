@@ -76,6 +76,30 @@ def test_retry_after_floor():
     assert sleeps[0] >= 2.0
 
 
+def test_retry_after_is_clamped_to_max_delay():
+    sleeps: list[float] = []
+    attempts = {"n": 0}
+
+    def fn() -> str:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise _rate_limit_error(retry_after=9999.0)  # 9,999,000 ms
+        return "ok"
+
+    with_retry(
+        fn,
+        max_retries=3,
+        max_delay_ms=60_000,
+        sleep=lambda s: sleeps.append(s),
+        random_fn=lambda: 1.0,
+    )
+
+    assert len(sleeps) == 1
+    # Retry-After (9,999,000 ms) is clamped to max_delay_ms (60 s), so a huge or
+    # hostile header can't stall the client for minutes (parity with the TS SDK).
+    assert sleeps[0] == 60.0
+
+
 def test_non_retryable_error_does_not_retry():
     attempts = {"n": 0}
 

@@ -26,15 +26,13 @@ class _UnsetType:
 _UNSET: Any = _UnsetType()
 
 
-def resolve_client_request_id(provided: Any) -> str | None:
+def resolve_client_request_id(provided: str | None | _UnsetType) -> str | None:
     """Three-way resolution.
 
     * ``_UNSET`` → auto-generate a fresh UUID v4 (safe-by-default retries).
     * ``None``   → explicit opt-out; the caller wants no ``client_request_id``.
     * ``str``    → passed through verbatim.
     """
-    if provided is _UNSET:
+    if isinstance(provided, _UnsetType):
         return str(uuid.uuid4())
-    if provided is None:
-        return None
     return provided
