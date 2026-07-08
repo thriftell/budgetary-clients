@@ -359,6 +359,77 @@ describe("runOnSessionEnd", () => {
       "est_other",
     ]);
   });
+
+  it("reports success=false for a non-normal termination reason", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        {
+          estimate_id: "est_fail",
+          query: "q",
+          project_id: projectIdFromCwd(cwd),
+          created_at: RECENT,
+          attempts: 0,
+        },
+      ],
+    });
+    const fake = makeFakeClient();
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    await runOnSessionEnd({
+      payload: { ...PAYLOAD, reason: "other" },
+      env: ENV,
+      cwd,
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      clientFactory: () => fake as unknown as import("@budgetary/sdk").BudgetaryClient,
+      home,
+      now: () => NOW,
+      readTotals: () => ({ tokensIn: 1, tokensOut: 1 }),
+    });
+
+    // "other" is not a documented normal termination → not claimed as success.
+    expect(fake.submitActuals.mock.calls[0]![0].success).toBe(false);
+  });
+
+  it("builds the hook client with bounded retries/timeout (does not block exit)", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        {
+          estimate_id: "est_bounded",
+          query: "q",
+          project_id: projectIdFromCwd(cwd),
+          created_at: RECENT,
+          attempts: 0,
+        },
+      ],
+    });
+    const fake = makeFakeClient();
+    const stdout = captureStream();
+    const stderr = captureStream();
+    let opts: import("@budgetary/sdk").BudgetaryClientOptions | null = null;
+
+    await runOnSessionEnd({
+      payload: PAYLOAD,
+      env: ENV,
+      cwd,
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      clientFactory: (o) => {
+        opts = o;
+        return fake as unknown as import("@budgetary/sdk").BudgetaryClient;
+      },
+      home,
+      now: () => NOW,
+      readTotals: () => ({ tokensIn: 1, tokensOut: 1 }),
+    });
+
+    expect(opts).not.toBeNull();
+    expect(opts!.maxRetries).toBe(1);
+    expect(opts!.timeoutMs).toBe(5000);
+  });
 });
 
 describe("runOnSessionEnd — baseUrl threading", () => {

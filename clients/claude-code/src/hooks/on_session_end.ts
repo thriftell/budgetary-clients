@@ -100,9 +100,14 @@ export async function runOnSessionEnd(args: SessionEndInvocation): Promise<numbe
 
   const factory =
     args.clientFactory ?? ((opts: BudgetaryClientOptions) => new BudgetaryClient(opts));
+  // Bounded retries/timeout: this runs on the host's exit path, so a long
+  // retry/backoff would block the session from exiting. A transient failure is
+  // left for the next session (attempts already advanced), not blocked on now.
   const client = factory({
     apiKey: resolved.apiKey,
     baseUrl: resolved.baseUrl,
+    maxRetries: 1,
+    timeoutMs: 5000,
   });
 
   // Real, transcript-derived counts only — routed through the shared submit

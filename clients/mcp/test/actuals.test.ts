@@ -364,6 +364,28 @@ describe("runAutoActuals", () => {
     ]);
   });
 
+  it("reports success=false for a non-normal termination reason", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_fail", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient();
+    await runAutoActuals({
+      payload: { transcript_path: "/tmp/t.jsonl", reason: "other" },
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      stderr: { write: () => {} },
+      clientFactory: () => asClient(fake),
+      readUsage: () => ({ tokensIn: 1, tokensOut: 1, trace: [] }),
+    });
+    // "other" is not a documented normal termination → not claimed as success.
+    expect(fake.submitActuals.mock.calls[0]![0].success).toBe(false);
+  });
+
   it("submits nothing when the transcript yields no totals", async () => {
     writePending(home, {
       version: 1,
@@ -606,5 +628,30 @@ describe("submitActuals — store integrity under concurrency", () => {
     expect(readPending(home).entries.map((e) => e.estimate_id)).toEqual([
       "est_concurrent",
     ]);
+  });
+
+  it("persists the attempts bump BEFORE the submit resolves (survives a mid-flight kill)", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_hang", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const store = new PendingStore({ path: join(home, ".budgetary", "pending.json") });
+    const entry = store.read().entries[0]!;
+
+    // A submit that never resolves — as if the hook process were killed mid-flight.
+    const fake = makeFakeClient(() => new Promise<never>(() => {}));
+    void submitActuals({
+      store,
+      client: asClient(fake),
+      entry,
+      counts: { tokensIn: 1, tokensOut: 1, success: true, durationMs: 0 },
+    });
+
+    // The bump is synchronous (before the network await), so it is already on
+    // disk even though the submit never completes — the next session picks up
+    // attempts=1 and advances toward the give-up bound instead of looping.
+    expect(readPending(home).entries[0]!.attempts).toBe(1);
   });
 });

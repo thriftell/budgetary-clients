@@ -400,6 +400,79 @@ describe("runOnSessionEnd (Codex Stop hook)", () => {
       "est_other",
     ]);
   });
+
+  it("persists the attempts bump BEFORE the submit resolves (survives a mid-flight kill)", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        {
+          estimate_id: "est_hang",
+          query: "q",
+          project_id: projectIdFromCwd(cwd),
+          created_at: RECENT,
+          attempts: 0,
+        },
+      ],
+    });
+    // A submit that never resolves — as if the hook were killed mid-flight.
+    const fake = makeFakeClient(() => new Promise<never>(() => {}));
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    void runOnSessionEnd({
+      payload: PAYLOAD,
+      env: ENV,
+      cwd,
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      clientFactory: () => fake as unknown as import("@budgetary/sdk").BudgetaryClient,
+      home,
+      now: () => NOW,
+      readTotals: () => ({ tokensIn: 1, tokensOut: 1 }),
+    });
+
+    // The bump is synchronous (before the network await), so it is on disk even
+    // though the submit never completes.
+    expect(readPending(home).entries[0]!.attempts).toBe(1);
+  });
+
+  it("builds the hook client with bounded retries/timeout (does not block exit)", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        {
+          estimate_id: "est_bounded",
+          query: "q",
+          project_id: projectIdFromCwd(cwd),
+          created_at: RECENT,
+          attempts: 0,
+        },
+      ],
+    });
+    const fake = makeFakeClient();
+    const stdout = captureStream();
+    const stderr = captureStream();
+    let opts: import("@budgetary/sdk").BudgetaryClientOptions | null = null;
+
+    await runOnSessionEnd({
+      payload: PAYLOAD,
+      env: ENV,
+      cwd,
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      clientFactory: (o) => {
+        opts = o;
+        return fake as unknown as import("@budgetary/sdk").BudgetaryClient;
+      },
+      home,
+      now: () => NOW,
+      readTotals: () => ({ tokensIn: 1, tokensOut: 1 }),
+    });
+
+    expect(opts).not.toBeNull();
+    expect(opts!.maxRetries).toBe(1);
+    expect(opts!.timeoutMs).toBe(5000);
+  });
 });
 
 describe("runOnSessionEnd — baseUrl threading", () => {

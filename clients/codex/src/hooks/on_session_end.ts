@@ -48,6 +48,20 @@ function removeById(
   return true;
 }
 
+/**
+ * Re-read the store and increment `attempts` for this entry, persisting
+ * immediately. Returns the new count, or null if the entry is already gone.
+ */
+function bumpAttempts(store: PendingStore, estimateId: string): number | null {
+  const fresh = store.read();
+  const idx = fresh.entries.findIndex((e) => e.estimate_id === estimateId);
+  if (idx === -1) return null;
+  const attempts = fresh.entries[idx]!.attempts + 1;
+  fresh.entries[idx] = { ...fresh.entries[idx]!, attempts };
+  store.write(fresh);
+  return attempts;
+}
+
 export interface StopPayload {
   session_id?: string;
   turn_id?: string;
@@ -121,14 +135,22 @@ export async function runOnSessionEnd(args: SessionEndInvocation): Promise<numbe
 
   const factory =
     args.clientFactory ?? ((opts: BudgetaryClientOptions) => new BudgetaryClient(opts));
+  // Bounded retries/timeout: this runs on the host's exit path, so a long
+  // retry/backoff would block the session from exiting. A transient failure is
+  // left for the next session (attempts already advanced), not blocked on now.
   const client = factory({
     apiKey: resolved.apiKey,
     baseUrl: resolved.baseUrl,
+    maxRetries: 1,
+    timeoutMs: 5000,
   });
 
-  // Re-read the store immediately before every mutation and target the entry by
-  // `estimate_id` (never by position): the submit takes seconds, during which
-  // another session may append or remove an entry.
+  // Persist the attempt bump BEFORE the network call so a hook-timeout kill
+  // still advances toward the give-up bound. Re-read + target by estimate_id so
+  // a concurrent append survives and the wrong entry is never touched.
+  const attempts = bumpAttempts(store, entry.estimate_id);
+  if (attempts === null) return 0; // already closed by another session
+
   try {
     await client.submitActuals({
       estimateId: entry.estimate_id,
@@ -141,24 +163,16 @@ export async function runOnSessionEnd(args: SessionEndInvocation): Promise<numbe
     if (removeById(fresh.entries, entry.estimate_id)) store.write(fresh);
     return 0;
   } catch (err) {
-    const fresh = store.read();
-    const idx = fresh.entries.findIndex(
-      (e) => e.estimate_id === entry.estimate_id,
-    );
-    if (idx === -1) return 0; // already closed (another session, or TTL-dropped)
-    const current = fresh.entries[idx]!;
-    const updated: PendingEntry = { ...current, attempts: current.attempts + 1 };
-    if (updated.attempts >= MAX_ATTEMPTS) {
-      fresh.entries.splice(idx, 1);
-      store.write(fresh);
+    if (attempts >= MAX_ATTEMPTS) {
+      const fresh = store.read();
+      if (removeById(fresh.entries, entry.estimate_id)) store.write(fresh);
       const detail = err instanceof BudgetaryError ? err.message : String(err);
       args.stderr.write(
         `Budgetary: giving up on actuals for ${entry.estimate_id} after ${MAX_ATTEMPTS} attempts (${detail}).\n`,
       );
       return 0;
     }
-    fresh.entries[idx] = updated;
-    store.write(fresh);
+    // The bump is already persisted; leave the entry for a later session.
     return 0;
   }
 }

@@ -23,6 +23,13 @@ import {
 export const MAX_ATTEMPTS = 5;
 const PENDING_TTL_MS = 24 * 60 * 60 * 1000;
 
+// The auto path runs inside a session-end hook, on the host's exit path. A long
+// retry/backoff would block the host from exiting, so the hook client is bounded
+// well under a typical hook timeout; a transient failure is left for the next
+// session (attempts already advanced) rather than blocking now.
+const HOOK_MAX_RETRIES = 1;
+const HOOK_TIMEOUT_MS = 5000;
+
 /**
  * Realized counts for a completed run. These are ALWAYS supplied by the
  * caller — either a session-end hook reading the real transcript, or a human
@@ -75,12 +82,28 @@ function removeById(file: PendingStoreFile, estimateId: string): boolean {
 }
 
 /**
+ * Re-read the store and increment `attempts` for the entry with this id,
+ * persisting immediately. Returns the new attempt count, or null if the entry
+ * is no longer present (closed by another session in the meantime).
+ */
+function bumpAttempts(store: PendingWriter, estimateId: string): number | null {
+  const fresh = store.read();
+  const idx = fresh.entries.findIndex((e) => e.estimate_id === estimateId);
+  if (idx === -1) return null;
+  const attempts = fresh.entries[idx]!.attempts + 1;
+  fresh.entries[idx] = { ...fresh.entries[idx]!, attempts };
+  store.write(fresh);
+  return attempts;
+}
+
+/**
  * The single submit path shared by the auto (hook) and manual (CLI) flows.
  *
- * On success: remove the entry. On failure: increment `attempts`, and after
- * {@link MAX_ATTEMPTS} drop the entry and log one warning. This is the only
- * function in the package that calls `client.submitActuals`, and it requires
- * the counts to be passed in explicitly.
+ * The attempt bump is PERSISTED BEFORE the network call, so if the hook process
+ * is killed mid-submit (a session-exit timeout, say), the store has still
+ * advanced toward the give-up bound instead of retrying forever at the same
+ * count. On success the entry is removed; on failure it is left (already bumped)
+ * until {@link MAX_ATTEMPTS}, after which it is dropped with one warning.
  *
  * The store is RE-READ immediately before every mutation, and the target is
  * located by `estimate_id` (never by position): `client.submitActuals` takes
@@ -91,6 +114,9 @@ function removeById(file: PendingStoreFile, estimateId: string): boolean {
 export async function submitActuals(args: SubmitActualsArgs): Promise<void> {
   const { store, client, entry, counts } = args;
   const logger = args.logger ?? { warn: () => {} };
+
+  const attempts = bumpAttempts(store, entry.estimate_id);
+  if (attempts === null) return; // already closed by another session
 
   try {
     await client.submitActuals({
@@ -107,27 +133,15 @@ export async function submitActuals(args: SubmitActualsArgs): Promise<void> {
     const fresh = store.read();
     if (removeById(fresh, entry.estimate_id)) store.write(fresh);
   } catch (err) {
-    const fresh = store.read();
-    const idx = fresh.entries.findIndex(
-      (e) => e.estimate_id === entry.estimate_id,
-    );
-    if (idx === -1) return; // already closed (another session, or TTL-dropped)
-    const current = fresh.entries[idx]!;
-    const updated: PendingEntry = {
-      ...current,
-      attempts: current.attempts + 1,
-    };
-    if (updated.attempts >= MAX_ATTEMPTS) {
-      fresh.entries.splice(idx, 1);
-      store.write(fresh);
+    if (attempts >= MAX_ATTEMPTS) {
+      const fresh = store.read();
+      if (removeById(fresh, entry.estimate_id)) store.write(fresh);
       const detail = err instanceof BudgetaryError ? err.message : String(err);
       logger.warn(
         `Budgetary: giving up on actuals for ${entry.estimate_id} after ${MAX_ATTEMPTS} attempts (${detail}).`,
       );
-      return;
     }
-    fresh.entries[idx] = updated;
-    store.write(fresh);
+    // else: the bump is already persisted; leave the entry for a later session.
   }
 }
 
@@ -233,7 +247,12 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
   const factory =
     args.clientFactory ??
     ((opts: BudgetaryClientOptions) => new BudgetaryClient(opts));
-  const client = factory({ apiKey: resolved.apiKey, baseUrl: resolved.baseUrl });
+  const client = factory({
+    apiKey: resolved.apiKey,
+    baseUrl: resolved.baseUrl,
+    maxRetries: HOOK_MAX_RETRIES,
+    timeoutMs: HOOK_TIMEOUT_MS,
+  });
 
   // Fail-closed: an over-cap or empty trace becomes `undefined`, so the total
   // still submits with no `trace` rather than failing or shipping invented steps.
