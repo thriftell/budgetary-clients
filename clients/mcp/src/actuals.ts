@@ -74,13 +74,47 @@ function removeById(file: PendingStoreFile, estimateId: string): boolean {
   return true;
 }
 
+/** The outcome of one {@link submitActuals} call, so callers can report it honestly. */
+export interface SubmitOutcome {
+  /** THIS call's POST succeeded and the entry was removed. */
+  submitted: boolean;
+  /**
+   * When not submitted, whether a later attempt could plausibly succeed —
+   * `true` for network / 5xx / 429, `false` for a 4xx the server rejected. A
+   * caller must NOT advise retrying a non-retryable rejection.
+   */
+  retryable: boolean;
+  /** True iff attempts reached {@link MAX_ATTEMPTS} and the entry was dropped (already warned). */
+  gaveUp: boolean;
+  /** The error that prevented submission, for honest reporting. Never carries the key. */
+  error?: unknown;
+}
+
 /**
- * The single submit path shared by the auto (hook) and manual (CLI) flows.
+ * Whether a failed submit could plausibly succeed on a later attempt. The SDK
+ * already retries 5xx/429 internally; by the time an error reaches here it is
+ * either a transient network failure, an exhausted-retry 5xx/429, or a 4xx the
+ * server deliberately rejected. Only the former are worth another attempt.
+ */
+function isRetryableSubmitError(err: unknown): boolean {
+  if (err instanceof BudgetaryError) {
+    const s = err.httpStatus;
+    return s === null || s >= 500 || s === 429;
+  }
+  // A non-Budgetary (unexpected) error is treated as transient.
+  return true;
+}
+
+/**
+ * The single submit path shared by the auto (hook), manual, and rollout flows.
  *
  * On success: remove the entry. On failure: increment `attempts`, and after
  * {@link MAX_ATTEMPTS} drop the entry and log one warning. This is the only
  * function in the package that calls `client.submitActuals`, and it requires
- * the counts to be passed in explicitly.
+ * the counts to be passed in explicitly. Returns a {@link SubmitOutcome} so a
+ * foreground caller can report exactly what happened — success, a retryable
+ * transport failure, or a non-retryable rejection — instead of inferring it
+ * from the entry's presence (which a concurrent close could make a lie).
  *
  * The store is RE-READ immediately before every mutation, and the target is
  * located by `estimate_id` (never by position): `client.submitActuals` takes
@@ -88,7 +122,9 @@ function removeById(file: PendingStoreFile, estimateId: string): boolean {
  * Writing back a pre-read snapshot, or popping the last element, would lose that
  * concurrent work or close the wrong entry.
  */
-export async function submitActuals(args: SubmitActualsArgs): Promise<void> {
+export async function submitActuals(
+  args: SubmitActualsArgs,
+): Promise<SubmitOutcome> {
   const { store, client, entry, counts } = args;
   const logger = args.logger ?? { warn: () => {} };
 
@@ -106,12 +142,15 @@ export async function submitActuals(args: SubmitActualsArgs): Promise<void> {
     });
     const fresh = store.read();
     if (removeById(fresh, entry.estimate_id)) store.write(fresh);
+    return { submitted: true, retryable: false, gaveUp: false };
   } catch (err) {
+    const retryable = isRetryableSubmitError(err);
     const fresh = store.read();
     const idx = fresh.entries.findIndex(
       (e) => e.estimate_id === entry.estimate_id,
     );
-    if (idx === -1) return; // already closed (another session, or TTL-dropped)
+    // Already closed by another path — THIS call did not submit; say so.
+    if (idx === -1) return { submitted: false, retryable, gaveUp: false, error: err };
     const current = fresh.entries[idx]!;
     const updated: PendingEntry = {
       ...current,
@@ -124,10 +163,11 @@ export async function submitActuals(args: SubmitActualsArgs): Promise<void> {
       logger.warn(
         `Budgetary: giving up on actuals for ${entry.estimate_id} after ${MAX_ATTEMPTS} attempts (${detail}).`,
       );
-      return;
+      return { submitted: false, retryable, gaveUp: true, error: err };
     }
     fresh.entries[idx] = updated;
     store.write(fresh);
+    return { submitted: false, retryable, gaveUp: false, error: err };
   }
 }
 
@@ -477,8 +517,10 @@ export async function runRolloutActuals(
   // submit. A Codex rollout always yields an empty trace (no per-tool data).
   const trace = capTrace(usage.trace) ?? undefined;
 
-  let warned: string | null = null;
-  await submitActuals({
+  // The submit reports its own outcome, so success is asserted from THIS call —
+  // never inferred from the entry's absence (a concurrent close could make that
+  // a lie) — and a non-retryable rejection is never dressed up as "try again".
+  const outcome = await submitActuals({
     store,
     client,
     entry,
@@ -489,30 +531,39 @@ export async function runRolloutActuals(
       durationMs: inferDurationMs({}, entry, now),
       ...(trace ? { trace } : {}),
     },
-    logger: { warn: (m) => (warned = m) },
+    logger: { warn: args.out },
   });
 
-  if (warned !== null) {
-    args.out(warned);
-    return 1;
-  }
-  // submitActuals removes the entry on success; if it is gone, we succeeded.
-  if (store.read().entries.some((e) => e.estimate_id === entry.estimate_id)) {
+  if (outcome.submitted) {
+    const commas = (n: number) => n.toLocaleString("en-US");
     args.out(
-      "Submission failed; the estimate is still pending. Try again later.",
+      `Actuals submitted: ${commas(usage.tokensIn)} in / ${commas(usage.tokensOut)} out, ` +
+        `recorded as ${args.success ? "successful" : "failed"}. ` +
+        "Thanks — this calibrates future estimates.",
     );
+    if (args.success) {
+      args.out("(Re-run with `--failed` if the task didn't actually complete.)");
+    }
+    return 0;
+  }
+  if (outcome.gaveUp) {
+    // submitActuals already printed the give-up warning via the logger.
     return 1;
   }
-  const commas = (n: number) => n.toLocaleString("en-US");
-  args.out(
-    `Actuals submitted: ${commas(usage.tokensIn)} in / ${commas(usage.tokensOut)} out, ` +
-      `recorded as ${args.success ? "successful" : "failed"}. ` +
-      "Thanks — this calibrates future estimates.",
-  );
-  if (args.success) {
-    args.out("(Re-run with `--failed` if the task didn't actually complete.)");
+  const detail =
+    outcome.error instanceof Error ? outcome.error.message : "";
+  if (outcome.retryable) {
+    args.out(
+      `Couldn't reach Budgetary${detail ? ` (${detail})` : ""}; the estimate is ` +
+        "still pending. Resubmit after the next session or with `report-actual`.",
+    );
+  } else {
+    args.out(
+      `Budgetary rejected this submission${detail ? `: ${detail}` : ""}. It won't ` +
+        "succeed on retry; the estimate is left pending for you to inspect.",
+    );
   }
-  return 0;
+  return 1;
 }
 
 function parseBool(raw: string): boolean | null {

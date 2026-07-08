@@ -124,22 +124,36 @@ async function runReportActualCli(): Promise<number> {
   }
 }
 
+export interface OnSessionEndArgs {
+  transcript: string | null;
+  success: boolean;
+  /** A usage error (e.g. `--transcript` with no path), or null. */
+  error: string | null;
+}
+
 /**
  * Parse `on-session-end` arguments: an optional rollout/transcript file path
  * (via `--transcript`/`--rollout` or a bare positional) and a success flag
  * (`--failed` / `--success`, default success). The counts are always measured
- * from the file; only success is caller-declared.
+ * from the file; only success is caller-declared. A `--transcript`/`--rollout`
+ * with no value (or a flag-shaped value like `--failed`) is a usage ERROR — it
+ * must never be swallowed as the path, nor fall through to the stdin hook path
+ * where the explicit request to submit a file would silently do nothing.
  */
-function parseOnSessionEndArgs(rest: string[]): {
-  transcript: string | null;
-  success: boolean;
-} {
+export function parseOnSessionEndArgs(rest: string[]): OnSessionEndArgs {
   let transcript: string | null = null;
   let success = true;
+  let error: string | null = null;
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i]!;
     if (a === "--transcript" || a === "--rollout") {
-      transcript = rest[++i] ?? null;
+      const val = rest[i + 1];
+      if (val === undefined || val.startsWith("-")) {
+        error = `${a} requires a file path`;
+      } else {
+        transcript = val;
+        i++;
+      }
     } else if (a === "--failed") {
       success = false;
     } else if (a === "--success") {
@@ -148,13 +162,22 @@ function parseOnSessionEndArgs(rest: string[]): {
       transcript = a;
     }
   }
-  return { transcript, success };
+  return { transcript, success, error };
 }
 
 async function runOnSessionEndCli(rest: string[]): Promise<number> {
+  const { transcript, success, error } = parseOnSessionEndArgs(rest);
+  // Fail loud on a malformed foreground request rather than silently entering
+  // the stdin hook path (where it would hang on a TTY or no-op on empty stdin).
+  if (error !== null) {
+    process.stderr.write(
+      `Budgetary: ${error}.\n` +
+        "  Usage: npx @budgetary/mcp on-session-end --transcript <path> [--failed]\n",
+    );
+    return 2;
+  }
   // Foreground form: an explicit rollout/transcript file path. Reads real counts
   // from the file and reports what it did — the working Codex actuals path.
-  const { transcript, success } = parseOnSessionEndArgs(rest);
   if (transcript !== null) {
     return runRolloutActuals({
       transcriptPath: transcript,

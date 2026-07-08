@@ -640,12 +640,15 @@ function codexTokenCountTotals(
 function codexUsageTotals(u: Record<string, unknown>): TranscriptTotals | null {
   const input = toFiniteNonNeg(u.input_tokens);
   const output = toFiniteNonNeg(u.output_tokens);
-  if (input === null && output === null) return null;
+  // Fail closed: require BOTH components. A record with only one measurable half
+  // must not submit a fabricated 0 for the other — return null so the reader
+  // skips it and keeps the last fully-measured record instead.
+  if (input === null || output === null) return null;
   // input_tokens INCLUDES cached input → subtract to reach the cache-excluded
   // basis. Clamp at 0 so a malformed record can never yield a negative count.
   const cached = toFiniteNonNeg(codexCachedInputTokens(u)) ?? 0;
-  const tokensIn = Math.max(0, (input ?? 0) - cached);
-  return { tokensIn, tokensOut: output ?? 0 };
+  const tokensIn = Math.max(0, input - cached);
+  return { tokensIn, tokensOut: output };
 }
 
 /** The cached-input figure, from either the rollout field or the API-shaped nesting. */

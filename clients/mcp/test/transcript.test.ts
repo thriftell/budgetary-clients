@@ -308,6 +308,23 @@ describe("readTranscriptUsage — Codex rollout dialect", () => {
     ]);
     expect(readTranscriptUsage(path)).toBeNull();
   });
+
+  it("skips a half-measured record (output missing) and keeps the last full one", () => {
+    // A malformed final record must not submit a fabricated tokensOut:0 — the
+    // reader falls back to the last fully-measured record.
+    const path = write([
+      codexCumulative({ input_tokens: 300, cached_input_tokens: 50, output_tokens: 25 }),
+      { type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: 999, cached_input_tokens: 0 } } } },
+    ]);
+    expect(readTranscriptUsage(path)).toEqual({ tokensIn: 250, tokensOut: 25, trace: [] });
+  });
+
+  it("returns null when the only record is half-measured (fail closed, no zeroed half)", () => {
+    const path = write([
+      { type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { output_tokens: 5 } } } },
+    ]);
+    expect(readTranscriptUsage(path)).toBeNull();
+  });
 });
 
 describe("capTrace — cap + fail-closed", () => {
