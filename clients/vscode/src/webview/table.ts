@@ -35,12 +35,17 @@ export function renderRecentTable(entries: readonly LedgerEntry[]): string {
   }
 
   // Newest first by createdAt; entries already returned in this order from
-  // the API, but sort defensively in case of future changes.
+  // the API, but sort defensively in case of future changes. An unparseable
+  // date maps to -Infinity (sorts last) so the comparator stays transitive —
+  // returning 0 for any unparseable pairing broke the total order.
+  const ts = (iso: string): number => {
+    const t = Date.parse(iso);
+    return Number.isFinite(t) ? t : -Infinity;
+  };
   const sorted = [...entries].sort((a, b) => {
-    const ta = Date.parse(a.createdAt);
-    const tb = Date.parse(b.createdAt);
-    if (Number.isFinite(ta) && Number.isFinite(tb)) return tb - ta;
-    return 0;
+    const ta = ts(a.createdAt);
+    const tb = ts(b.createdAt);
+    return ta === tb ? 0 : tb - ta;
   });
 
   return `<table class="b-table">

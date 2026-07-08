@@ -1,5 +1,7 @@
 import type { LedgerEntry } from "@budgetary/sdk";
 
+import { escapeHtml } from "../format";
+
 const VIEW_W = 600;
 const VIEW_H = 400;
 const PAD_LEFT = 64;
@@ -88,7 +90,12 @@ function colorForScenario(scenario: string): {
   fill: string;
   opacity: number;
 } {
-  const fill = SCENARIO_COLORS[scenario];
+  // `scenario` is an open set (any wire string). Look it up as an OWN property
+  // only, so an inherited key ("constructor", "toString", "__proto__") can never
+  // masquerade as a color and inject a function/object into the `fill` attribute.
+  const fill = Object.hasOwn(SCENARIO_COLORS, scenario)
+    ? SCENARIO_COLORS[scenario]
+    : undefined;
   if (fill) return { fill, opacity: 0.9 };
   return { fill: UNKNOWN_COLOR, opacity: UNKNOWN_OPACITY };
 }
@@ -99,9 +106,13 @@ function formatTick(value: number): string {
   return `${value}`;
 }
 
-function emptyState(): string {
+function emptyState(plottable: number): string {
+  // <2 points can't anchor a calibration line. Distinguish "nothing yet" from
+  // "one point, need one more" so the message isn't misleading with 1 datum.
   const msg =
-    "No calibration data yet. Run /estimate in Claude Code to start collecting points.";
+    plottable === 0
+      ? "No calibration data yet. Run /estimate in Claude Code to start collecting points."
+      : "Only one completed estimate so far — at least 2 are needed to plot calibration.";
   return `<svg viewBox="0 0 ${VIEW_W} ${VIEW_H}" role="img" aria-label="Empty calibration chart">
   <text x="${VIEW_W / 2}" y="${VIEW_H / 2}" text-anchor="middle" dominant-baseline="middle" fill="${AXIS_COLOR}" opacity="0.7" font-size="14">${msg}</text>
 </svg>`;
@@ -109,7 +120,7 @@ function emptyState(): string {
 
 export function renderCalibrationChart(entries: readonly LedgerEntry[]): string {
   const points = pickPoints(entries);
-  if (points.length < 2) return emptyState();
+  if (points.length < 2) return emptyState(points.length);
 
   const domain = computeDomain(points);
 
@@ -149,7 +160,7 @@ export function renderCalibrationChart(entries: readonly LedgerEntry[]): string 
     const { fill, opacity } = colorForScenario(p.scenario);
     const cx = xScale(p.predicted, domain).toFixed(2);
     const cy = yScale(p.actual, domain).toFixed(2);
-    return `<circle cx="${cx}" cy="${cy}" r="4" fill="${fill}" opacity="${opacity}"><title>predicted ${formatTick(p.predicted)} → actual ${formatTick(p.actual)} (${p.scenario})</title></circle>`;
+    return `<circle cx="${cx}" cy="${cy}" r="4" fill="${fill}" opacity="${opacity}"><title>predicted ${formatTick(p.predicted)} → actual ${formatTick(p.actual)} (${escapeHtml(p.scenario)})</title></circle>`;
   });
 
   const xAxisLabel = `<text x="${(VIEW_W + PAD_LEFT - PAD_RIGHT) / 2}" y="${VIEW_H - 12}" text-anchor="middle" fill="${AXIS_COLOR}" opacity="0.9" font-size="12">predicted (tokens, log)</text>`;
