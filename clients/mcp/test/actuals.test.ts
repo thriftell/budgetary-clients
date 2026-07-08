@@ -17,6 +17,7 @@ import {
   type ActualCounts,
 } from "../src/actuals.js";
 import { PendingStore, type PendingStoreFile } from "../src/store.js";
+import { projectIdFromCwd } from "../src/tools/estimate.js";
 import { readTranscriptTotals } from "../src/transcript.js";
 import { TOOLS, TOOL_NAME } from "../src/server.js";
 
@@ -67,13 +68,16 @@ function readPending(home: string): PendingStoreFile {
 }
 
 let home: string;
+let cwd: string;
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "budgetary-home-"));
+  cwd = mkdtempSync(join(tmpdir(), "budgetary-cwd-"));
 });
 
 afterEach(() => {
   rmSync(home, { recursive: true, force: true });
+  rmSync(cwd, { recursive: true, force: true });
 });
 
 const ENV = { BUDGETARY_API_KEY: "bg_test_dummy" } as NodeJS.ProcessEnv;
@@ -126,7 +130,7 @@ describe("non-fabrication guard", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_x", query: "q", project_id: "p", created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_x", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
       ],
     });
     const store = new PendingStore({ path: join(home, ".budgetary", "pending.json") });
@@ -141,7 +145,6 @@ describe("non-fabrication guard", () => {
 
     await submitActuals({
       store,
-      file,
       client: asClient(fake),
       entry: file.entries[0]!,
       counts,
@@ -164,7 +167,7 @@ describe("runManualActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_manual", query: "refactor the parser", project_id: "p", created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_manual", query: "refactor the parser", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
       ],
     });
     const fake = makeFakeClient();
@@ -194,7 +197,7 @@ describe("runManualActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_bad", query: "q", project_id: "p", created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_bad", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
       ],
     });
     const fake = makeFakeClient();
@@ -219,7 +222,7 @@ describe("runManualActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_retry", query: "q", project_id: "p", created_at: RECENT, attempts: 1 },
+        { estimate_id: "est_retry", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 1 },
       ],
     });
     const fake = makeFakeClient(async () => {
@@ -246,7 +249,7 @@ describe("runManualActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_give_up", query: "q", project_id: "p", created_at: RECENT, attempts: 4 },
+        { estimate_id: "est_give_up", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 4 },
       ],
     });
     const fake = makeFakeClient(async () => {
@@ -303,7 +306,7 @@ describe("runAutoActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_auto", query: "q", project_id: "p", created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_auto", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
       ],
     });
     const fake = makeFakeClient();
@@ -312,6 +315,7 @@ describe("runAutoActuals", () => {
       payload: PAYLOAD,
       env: ENV,
       home,
+      cwd,
       now: () => NOW,
       stderr: { write: () => {} },
       clientFactory: () => asClient(fake),
@@ -329,11 +333,15 @@ describe("runAutoActuals", () => {
     expect(readPending(home).entries).toEqual([]);
   });
 
-  it("submits nothing when the transcript yields no totals", async () => {
+  it("closes only THIS session's estimate even when another project's entry is newer", async () => {
+    // The globally-newest entry belongs to a DIFFERENT project (another running
+    // session); binding by project_id must skip it, not mis-pair this session's
+    // tokens onto it.
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_none", query: "q", project_id: "p", created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_mine", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_other", query: "q", project_id: "0000000other0000", created_at: RECENT, attempts: 0 },
       ],
     });
     const fake = makeFakeClient();
@@ -342,6 +350,34 @@ describe("runAutoActuals", () => {
       payload: PAYLOAD,
       env: ENV,
       home,
+      cwd,
+      now: () => NOW,
+      stderr: { write: () => {} },
+      clientFactory: () => asClient(fake),
+      readUsage: () => ({ tokensIn: 12340, tokensOut: 36210, trace: [] }),
+    });
+
+    expect(fake.submitActuals).toHaveBeenCalledTimes(1);
+    expect(fake.submitActuals.mock.calls[0]![0].estimateId).toBe("est_mine");
+    expect(readPending(home).entries.map((e) => e.estimate_id)).toEqual([
+      "est_other",
+    ]);
+  });
+
+  it("submits nothing when the transcript yields no totals", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_none", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient();
+
+    await runAutoActuals({
+      payload: PAYLOAD,
+      env: ENV,
+      home,
+      cwd,
       now: () => NOW,
       stderr: { write: () => {} },
       clientFactory: () => asClient(fake),
@@ -356,7 +392,7 @@ describe("runAutoActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_trace", query: "q", project_id: "p", created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_trace", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
       ],
     });
 
@@ -366,6 +402,7 @@ describe("runAutoActuals", () => {
       payload: PAYLOAD,
       env: ENV,
       home,
+      cwd,
       now: () => NOW,
       stderr: { write: () => {} },
       clientFactory: () => asClient(okClient),
@@ -391,7 +428,7 @@ describe("runAutoActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_overcap", query: "q", project_id: "p", created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_overcap", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
       ],
     });
     const overClient = makeFakeClient();
@@ -400,6 +437,7 @@ describe("runAutoActuals", () => {
       payload: PAYLOAD,
       env: ENV,
       home,
+      cwd,
       now: () => NOW,
       stderr: { write: () => {} },
       clientFactory: () => asClient(overClient),
@@ -416,7 +454,7 @@ describe("runAutoActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_optout", query: "q", project_id: "p", created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_optout", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
       ],
     });
 
@@ -427,6 +465,7 @@ describe("runAutoActuals", () => {
       payload: PAYLOAD,
       env: { ...ENV, BUDGETARY_TRACE_TARGET: "off" } as NodeJS.ProcessEnv,
       home,
+      cwd,
       now: () => NOW,
       stderr: { write: () => {} },
       clientFactory: () => asClient(offClient),
@@ -444,7 +483,7 @@ describe("runAutoActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_opton", query: "q", project_id: "p", created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_opton", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
       ],
     });
     let onOpts: { target?: boolean } | undefined;
@@ -452,6 +491,7 @@ describe("runAutoActuals", () => {
       payload: PAYLOAD,
       env: ENV,
       home,
+      cwd,
       now: () => NOW,
       stderr: { write: () => {} },
       clientFactory: () => asClient(makeFakeClient()),
@@ -467,7 +507,7 @@ describe("runAutoActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_enriched", query: "q", project_id: "p", created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_enriched", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
       ],
     });
     const fake = makeFakeClient();
@@ -475,6 +515,7 @@ describe("runAutoActuals", () => {
       payload: PAYLOAD,
       env: ENV,
       home,
+      cwd,
       now: () => NOW,
       stderr: { write: () => {} },
       clientFactory: () => asClient(fake),
@@ -511,5 +552,59 @@ describe("runAutoActuals", () => {
 
     const totals = readTranscriptTotals(transcript);
     expect(totals).toEqual({ tokensIn: 1000, tokensOut: 500 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Store integrity under concurrency (the shared ~/.budgetary/pending.json is
+// written by multiple sessions and both plugins).
+// ---------------------------------------------------------------------------
+
+describe("submitActuals — store integrity under concurrency", () => {
+  it("preserves a concurrent append made during an in-flight submit", async () => {
+    const path = join(home, ".budgetary", "pending.json");
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_inflight", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const store = new PendingStore({ path });
+    const entry = store.read().entries[0]!;
+
+    // A submit that blocks on the "network" until we release it.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const fake = makeFakeClient(async () => {
+      await gate;
+      return { received: true, ledgerEntryId: "led" };
+    });
+
+    const submitting = submitActuals({
+      store,
+      client: asClient(fake),
+      entry,
+      counts: { tokensIn: 1, tokensOut: 1, success: true, durationMs: 0 },
+    });
+
+    // Mid-flight, another session appends a new pending entry to the store.
+    new PendingStore({ path }).append({
+      estimate_id: "est_concurrent",
+      query: "q",
+      project_id: "p2",
+      created_at: RECENT,
+      attempts: 0,
+    });
+
+    release();
+    await submitting;
+
+    // The in-flight entry is closed; the concurrently-appended one SURVIVES.
+    // The old snapshot-write (pop + write pre-read file) would have lost it.
+    expect(readPending(home).entries.map((e) => e.estimate_id)).toEqual([
+      "est_concurrent",
+    ]);
   });
 });

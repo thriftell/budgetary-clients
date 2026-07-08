@@ -19,6 +19,7 @@ import {
 } from "@budgetary/sdk";
 
 import { runOnSessionEnd } from "../src/hooks/on_session_end.js";
+import { projectIdFromCwd } from "../src/commands/estimate.js";
 import type { PendingStoreFile } from "../src/store.js";
 
 interface FakeClient {
@@ -104,7 +105,7 @@ describe("runOnSessionEnd", () => {
         {
           estimate_id: "est_to_submit",
           query: "q",
-          project_id: "p",
+          project_id: projectIdFromCwd(cwd),
           created_at: RECENT,
           attempts: 0,
         },
@@ -165,7 +166,7 @@ describe("runOnSessionEnd", () => {
         {
           estimate_id: "est_stale",
           query: "q",
-          project_id: "p",
+          project_id: projectIdFromCwd(cwd),
           created_at: STALE,
           attempts: 0,
         },
@@ -199,7 +200,7 @@ describe("runOnSessionEnd", () => {
         {
           estimate_id: "est_retry",
           query: "q",
-          project_id: "p",
+          project_id: projectIdFromCwd(cwd),
           created_at: RECENT,
           attempts: 1,
         },
@@ -241,7 +242,7 @@ describe("runOnSessionEnd", () => {
         {
           estimate_id: "est_give_up",
           query: "q",
-          project_id: "p",
+          project_id: projectIdFromCwd(cwd),
           created_at: RECENT,
           attempts: 4, // this attempt brings it to 5
         },
@@ -285,7 +286,7 @@ describe("runOnSessionEnd", () => {
         {
           estimate_id: "est_no_tokens",
           query: "q",
-          project_id: "p",
+          project_id: projectIdFromCwd(cwd),
           created_at: RECENT,
           attempts: 0,
         },
@@ -311,6 +312,53 @@ describe("runOnSessionEnd", () => {
     // Entry stays, untouched.
     expect(readPending(home).entries).toHaveLength(1);
   });
+
+  it("closes only THIS session's estimate even when another project's entry is newer", async () => {
+    // The globally-newest entry belongs to a DIFFERENT project (another running
+    // session). The old "close the last entry" behavior would mis-pair this
+    // session's tokens onto it; binding by project_id must skip it.
+    writePending(home, {
+      version: 1,
+      entries: [
+        {
+          estimate_id: "est_mine",
+          query: "q",
+          project_id: projectIdFromCwd(cwd),
+          created_at: RECENT,
+          attempts: 0,
+        },
+        {
+          estimate_id: "est_other",
+          query: "q",
+          project_id: "0000000other0000",
+          created_at: RECENT,
+          attempts: 0,
+        },
+      ],
+    });
+    const fake = makeFakeClient();
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    await runOnSessionEnd({
+      payload: PAYLOAD,
+      env: ENV,
+      cwd,
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      clientFactory: () => fake as unknown as import("@budgetary/sdk").BudgetaryClient,
+      home,
+      now: () => NOW,
+      readTotals: () => ({ tokensIn: 12340, tokensOut: 36210 }),
+    });
+
+    expect(fake.submitActuals).toHaveBeenCalledTimes(1);
+    expect(fake.submitActuals.mock.calls[0]![0].estimateId).toBe("est_mine");
+    // The other session's entry is left untouched for its own session.
+    expect(readPending(home).entries.map((e) => e.estimate_id)).toEqual([
+      "est_other",
+    ]);
+  });
 });
 
 describe("runOnSessionEnd — baseUrl threading", () => {
@@ -330,7 +378,7 @@ describe("runOnSessionEnd — baseUrl threading", () => {
         {
           estimate_id: "est_baseurl",
           query: "q",
-          project_id: "p",
+          project_id: projectIdFromCwd(cwd),
           created_at: RECENT,
           attempts: 0,
         },

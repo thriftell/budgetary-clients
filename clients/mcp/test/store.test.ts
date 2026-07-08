@@ -104,4 +104,55 @@ describe("PendingStore", () => {
     store.append(entry("est_nested"));
     expect(existsSync(nested)).toBe(true);
   });
+
+  it("keeps valid entries and drops only the malformed ones", () => {
+    writeFileSync(
+      path,
+      JSON.stringify({
+        version: 1,
+        entries: [
+          entry("est_ok"),
+          { estimate_id: "bad", query: "q" }, // missing project_id/created_at/attempts
+          entry("est_ok2"),
+        ],
+      }),
+      "utf8",
+    );
+    const warnings: string[] = [];
+    const store = new PendingStore({
+      path,
+      logger: { warn: (m) => warnings.push(m) },
+    });
+    // The whole file is not discarded for one bad entry.
+    expect(store.read().entries.map((e) => e.estimate_id)).toEqual([
+      "est_ok",
+      "est_ok2",
+    ]);
+    expect(warnings).toHaveLength(1);
+  });
+
+  it("refuses to append over an unreadable store, preserving the bytes", () => {
+    writeFileSync(path, "{corrupt json", "utf8");
+    const warnings: string[] = [];
+    const store = new PendingStore({
+      path,
+      logger: { warn: (m) => warnings.push(m) },
+    });
+    store.append(entry("est_new"));
+    // The corrupt bytes are intact; the append did not clobber them with a
+    // store that would have silently dropped whatever was there.
+    expect(readFileSync(path, "utf8")).toBe("{corrupt json");
+    expect(warnings.some((w) => w.includes("not appending"))).toBe(true);
+  });
+
+  it("refuses to append an entry without an estimate_id", () => {
+    const warnings: string[] = [];
+    const store = new PendingStore({
+      path,
+      logger: { warn: (m) => warnings.push(m) },
+    });
+    store.append({ ...entry("x"), estimate_id: "" });
+    expect(existsSync(path)).toBe(false); // nothing written
+    expect(warnings.some((w) => w.includes("estimate_id"))).toBe(true);
+  });
 });
