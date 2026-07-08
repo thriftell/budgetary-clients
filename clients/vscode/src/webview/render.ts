@@ -159,6 +159,7 @@ function shell(nonce: string, title: string, body: string): string {
   <style>${STYLES}</style>
 </head>
 <body>
+<div class="b-visually-hidden" id="b-status" role="status" aria-live="polite"></div>
 ${body}
 </body>
 </html>`;
@@ -179,12 +180,19 @@ function refreshScript(nonce: string): string {
   const status = document.getElementById("b-status");
   if (typeof prev.scrollY === "number") window.scrollTo(0, prev.scrollY);
   if (prev.pendingRefresh) {
-    if (status) status.textContent = "Dashboard updated.";
-    vscode.setState(Object.assign({}, prev, { pendingRefresh: false }));
+    // Announce honestly: the dashboard rendered (has the chart heading) → updated;
+    // otherwise the refresh landed on an error/configure page → say so.
+    const ok = !!document.getElementById("b-chart-h");
+    if (status) status.textContent = ok ? "Dashboard updated." : "Refresh didn't complete — see the message.";
+    vscode.setState(Object.assign({}, vscode.getState() || {}, { pendingRefresh: false }));
   }
   const btn = document.getElementById("refresh");
   if (btn) {
-    if (prev.refreshFocused) btn.focus();
+    if (prev.refreshFocused) {
+      btn.focus();
+      // Consume the flag so a later, unrelated reload doesn't steal focus back.
+      vscode.setState(Object.assign({}, vscode.getState() || {}, { refreshFocused: false }));
+    }
     btn.addEventListener("click", function () {
       vscode.setState({ scrollY: window.scrollY, refreshFocused: true, pendingRefresh: true });
       if (status) status.textContent = "Refreshing…";
@@ -211,7 +219,6 @@ export function renderDashboard(
     </div>
     <button class="b-refresh" id="refresh" type="button">⟳ Refresh</button>
   </header>
-  <div class="b-visually-hidden" id="b-status" role="status" aria-live="polite"></div>
   <section class="b-chart" aria-labelledby="b-chart-h">
     <h2 id="b-chart-h">Calibration</h2>
     ${renderCalibrationChart(entries)}

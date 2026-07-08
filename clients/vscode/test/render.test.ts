@@ -89,6 +89,8 @@ describe("renderDashboard", () => {
     expect(html).toContain("setState(");
     expect(html).toContain("window.scrollTo");
     expect(html).toContain(".focus()");
+    // Focus is consumed, not sticky — a later reload won't steal it back.
+    expect(html).toContain("refreshFocused: false");
   });
 });
 
@@ -127,6 +129,11 @@ describe("renderError", () => {
     const html = renderError("network down", null, NONCE);
     expect(html).toContain("network down");
     expect(html).not.toContain("request_id:");
+  });
+
+  it("carries an aria-live status region (so a failed refresh isn't silent)", () => {
+    expect(renderError("boom", null, NONCE)).toContain('id="b-status"');
+    expect(renderConfigureKey(NONCE)).toContain('id="b-status"');
   });
 
   it("escapes HTML in the message", () => {
