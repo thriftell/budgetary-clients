@@ -37,6 +37,17 @@ export function styleForScenario(scenario: string): ScenarioStyle {
 }
 
 /**
+ * Human-readable scenario label: the known set's friendly wording, or the raw
+ * value with underscores turned to spaces (so an unrecognized label is still
+ * shown, never hidden as "other").
+ */
+export function scenarioLabel(scenario: string): string {
+  return Object.hasOwn(SCENARIO_STYLES, scenario)
+    ? SCENARIO_STYLES[scenario]!.label
+    : scenario.replace(/_/g, " ");
+}
+
+/**
  * An SVG marker of the given shape centered at the origin — for use inside a
  * `<g transform="translate(cx cy)">`. `r` is the half-size. Coordinates are
  * fixed literals, never user data.

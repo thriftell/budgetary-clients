@@ -1,6 +1,16 @@
 import type { LedgerEntry } from "@budgetary/sdk";
 
-import { escapeHtml, formatTokens, truncateEstimateId } from "../format";
+import {
+  escapeHtml,
+  formatTimestamp,
+  formatTokens,
+  truncateEstimateId,
+} from "../format";
+import { scenarioLabel } from "./scenario";
+
+/** How many rows the dashboard fetches (getLedger limit); shown in the caption. */
+const ROW_CAP = 50;
+const QUERY_MAX = 48;
 
 function resultCell(entry: LedgerEntry): string {
   // A glyph with an accessible label, so a screen reader announces the outcome
@@ -32,10 +42,20 @@ function actualCell(entry: LedgerEntry): string {
   return formatTokens(entry.actual.total);
 }
 
+function queryCell(entry: LedgerEntry): string {
+  const q = entry.queryExcerpt ?? "";
+  if (q.length === 0) return "—";
+  const shown = q.length > QUERY_MAX ? `${q.slice(0, QUERY_MAX)}…` : q;
+  return escapeHtml(shown);
+}
+
 function row(entry: LedgerEntry): string {
   const id = escapeHtml(truncateEstimateId(entry.estimateId, 12));
-  const scenario = escapeHtml(entry.scenario);
+  // Humanized scenario for display; the raw value stays in the class hook.
+  const scenario = escapeHtml(scenarioLabel(entry.scenario));
   return `<tr>
+    <td class="b-cell-when">${escapeHtml(formatTimestamp(entry.createdAt))}</td>
+    <td class="b-cell-query">${queryCell(entry)}</td>
     <td class="b-cell-id">${id}</td>
     <td class="b-cell-num">${predictedCell(entry)}</td>
     <td class="b-cell-num">${rangeCell(entry)}</td>
@@ -64,10 +84,17 @@ export function renderRecentTable(entries: readonly LedgerEntry[]): string {
     return ta === tb ? 0 : tb - ta;
   });
 
+  // Honest about the cap: the dashboard fetches at most ROW_CAP rows, so when we
+  // render exactly that many there are likely older estimates not shown.
+  const capNote =
+    sorted.length >= ROW_CAP ? ` Showing the ${ROW_CAP} most recent.` : "";
+
   return `<table class="b-table">
-  <caption class="b-caption">Recent estimates — predicted vs. actual, newest first.</caption>
+  <caption class="b-caption">Recent estimates — predicted vs. actual, newest first.${capNote}</caption>
   <thead>
     <tr>
+      <th scope="col">When</th>
+      <th scope="col">Query</th>
       <th scope="col">Estimate</th>
       <th scope="col" class="b-cell-num">Predicted p50</th>
       <th scope="col" class="b-cell-num">Range (p10–p90)</th>

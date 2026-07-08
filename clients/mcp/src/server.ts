@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -18,7 +19,28 @@ import {
 import { runEstimateTool } from "./tools/estimate.js";
 
 const SERVER_NAME = "budgetary";
-const SERVER_VERSION = "0.0.0";
+
+/**
+ * The handshake version, read from the package's own package.json so it always
+ * matches the published `@budgetary/mcp` rather than drifting from a hard-coded
+ * literal. `src/server.ts` and `dist/server.js` are both one level below the
+ * package root, so `../package.json` resolves in both. Falls back to `0.0.0` if
+ * it can't be read (never throws at import time).
+ */
+function readServerVersion(): string {
+  try {
+    const pkg = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { version?: unknown };
+    return typeof pkg.version === "string" && pkg.version.length > 0
+      ? pkg.version
+      : "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
+export const SERVER_VERSION = readServerVersion();
 
 /** The one and only model-invokable tool name. */
 export const TOOL_NAME = "estimate";

@@ -46,6 +46,11 @@ export interface EstimateContext {
   language?: string;
 }
 
+/**
+ * The `POST /v1/estimate` request body. **Reference only** — callers don't build
+ * this; use {@link BudgetaryClient.estimate}(query, opts), which assembles it and
+ * snake-cases the fields at the wire boundary.
+ */
 export interface EstimateRequest {
   query: string;
   model?: string;

@@ -1,6 +1,18 @@
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it } from "vitest";
 
-import { parseOnSessionEndArgs } from "../src/server.js";
+import { parseOnSessionEndArgs, SERVER_VERSION } from "../src/server.js";
+
+describe("SERVER_VERSION", () => {
+  it("is derived from package.json, not a hard-coded 0.0.0", () => {
+    const pkg = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { version: string };
+    expect(SERVER_VERSION).toBe(pkg.version);
+    expect(SERVER_VERSION).not.toBe("0.0.0");
+  });
+});
 
 describe("parseOnSessionEndArgs", () => {
   it("parses --transcript <path> and defaults success=true", () => {
