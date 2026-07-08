@@ -13,6 +13,7 @@ import { BudgetaryError } from "@budgetary/sdk";
 import {
   runAutoActuals,
   runManualActuals,
+  runPendingList,
   runRolloutActuals,
   submitActuals,
   type ActualCounts,
@@ -194,7 +195,7 @@ describe("runManualActuals", () => {
     expect(out.join("\n")).toContain("Actuals submitted");
   });
 
-  it("rejects non-integer token counts without submitting", async () => {
+  it("rejects non-integer token counts (after re-prompting) without submitting", async () => {
     writePending(home, {
       version: 1,
       entries: [
@@ -208,15 +209,123 @@ describe("runManualActuals", () => {
       env: ENV,
       home,
       out: (l) => out.push(l),
-      prompt: scriptedPrompt(["not-a-number", "36210", "y", ""]),
+      // Three invalid answers exhaust the re-prompt retries.
+      prompt: scriptedPrompt(["nope", "still-bad", "x"]),
       clientFactory: () => asClient(fake),
     });
 
     expect(code).toBe(2);
     expect(fake.submitActuals).not.toHaveBeenCalled();
-    // Entry left untouched.
     expect(readPending(home).entries).toHaveLength(1);
     expect(out.join("\n")).toContain("non-negative whole number");
+  });
+
+  it("accepts comma-grouped numbers like 48,000", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_commas", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient();
+    const out: string[] = [];
+
+    const code = await runManualActuals({
+      env: ENV,
+      home,
+      out: (l) => out.push(l),
+      prompt: scriptedPrompt(["48,000", "12,500", "y", "420,000"]),
+      clientFactory: () => asClient(fake),
+    });
+
+    expect(code).toBe(0);
+    const sent = fake.submitActuals.mock.calls[0]![0];
+    expect(sent.tokensIn).toBe(48000);
+    expect(sent.tokensOut).toBe(12500);
+    expect(sent.durationMs).toBe(420000);
+  });
+
+  it("checks the API key BEFORE prompting for counts", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_nokey", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient();
+    const out: string[] = [];
+    let prompted = false;
+
+    const code = await runManualActuals({
+      env: {} as NodeJS.ProcessEnv, // no key anywhere
+      home,
+      out: (l) => out.push(l),
+      prompt: async () => {
+        prompted = true;
+        return "1";
+      },
+      clientFactory: () => asClient(fake),
+    });
+
+    expect(code).toBe(1);
+    expect(prompted).toBe(false); // never asked for counts
+    expect(out.join("\n")).toContain("no API key");
+    expect(fake.submitActuals).not.toHaveBeenCalled();
+  });
+
+  it("scopes to THIS project's estimate when a cwd is given", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_mine", query: "mine", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_other", query: "other", project_id: "0000000other0000", created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient();
+    const out: string[] = [];
+
+    await runManualActuals({
+      env: ENV,
+      home,
+      cwd,
+      out: (l) => out.push(l),
+      prompt: scriptedPrompt(["1", "2", "y", ""]),
+      clientFactory: () => asClient(fake),
+    });
+
+    // The globally-newest is est_other, but project binding closes est_mine.
+    expect(fake.submitActuals.mock.calls[0]![0].estimateId).toBe("est_mine");
+    expect(readPending(home).entries.map((e) => e.estimate_id)).toEqual(["est_other"]);
+  });
+
+  it("surfaces a non-retryable rejection and keeps the entry (not 'try again')", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_reject", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient(async () => {
+      throw new BudgetaryError({ code: "invalid_request", message: "duration_ms out of range", httpStatus: 400, requestId: "r" });
+    });
+    const out: string[] = [];
+
+    const code = await runManualActuals({
+      env: ENV,
+      home,
+      out: (l) => out.push(l),
+      prompt: scriptedPrompt(["1", "2", "y", ""]),
+      clientFactory: () => asClient(fake),
+    });
+
+    expect(code).toBe(1);
+    const text = out.join("\n");
+    expect(text).toContain("rejected");
+    expect(text.toLowerCase()).not.toContain("try again");
+    // A user-fixable rejection is NOT counted toward give-up: the entry survives.
+    const entries = readPending(home).entries;
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.attempts).toBe(0);
   });
 
   it("keeps the entry and increments attempts on a single submit failure", async () => {
@@ -290,6 +399,34 @@ describe("runManualActuals", () => {
     expect(code).toBe(0);
     expect(fake.submitActuals).not.toHaveBeenCalled();
     expect(out.join("\n")).toContain("No pending");
+  });
+});
+
+describe("runPendingList", () => {
+  it("says the loop is closed when there are no pending estimates", () => {
+    writePending(home, { version: 1, entries: [] });
+    const out: string[] = [];
+    const code = runPendingList({ env: ENV, home, out: (l) => out.push(l) });
+    expect(code).toBe(0);
+    expect(out.join("\n")).toContain("loop is closed");
+  });
+
+  it("lists pending estimates and marks the ones for this project", () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_mine", query: "refactor the parser", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_other", query: "another project task", project_id: "0000000other0000", created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const out: string[] = [];
+    const code = runPendingList({ env: ENV, home, cwd, now: () => NOW, out: (l) => out.push(l) });
+    expect(code).toBe(0);
+    const text = out.join("\n");
+    expect(text).toContain("2 pending Budgetary estimates");
+    expect(text).toContain("refactor the parser");
+    expect(text).toContain("(this project)");
+    expect(text).toContain("report-actual");
   });
 });
 

@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import * as vscode from "vscode";
 
-import { BudgetaryClient, BudgetaryError } from "@budgetary/sdk";
+import { BudgetaryAuthError, BudgetaryClient, BudgetaryError } from "@budgetary/sdk";
 
 import { resolveConfig } from "../config";
 import {
@@ -86,7 +86,12 @@ export async function load(p: vscode.WebviewPanel): Promise<void> {
     apply(renderDashboard(page.entries, makeNonce()));
   } catch (err) {
     const nonce = makeNonce();
-    if (err instanceof BudgetaryError) {
+    if (err instanceof BudgetaryAuthError) {
+      // A rejected key (401) is a configuration problem, not a transient error —
+      // show the configure-key panel (with its re-check button) so the user can
+      // fix and retry, instead of a generic "could not load ledger".
+      apply(renderConfigureKey(nonce));
+    } else if (err instanceof BudgetaryError) {
       apply(renderError(err.message, err.requestId, nonce));
     } else {
       apply(

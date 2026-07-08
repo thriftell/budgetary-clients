@@ -8,6 +8,7 @@ import {
   noKeyGuidance,
   pendingFilePath,
   resolveConfig,
+  resolveConfigStatus,
   traceTargetEnabled,
 } from "./config.js";
 import { PendingStore, type PendingEntry, type PendingStoreFile } from "./store.js";
@@ -151,6 +152,12 @@ export async function submitActuals(
     );
     // Already closed by another path — THIS call did not submit; say so.
     if (idx === -1) return { submitted: false, retryable, gaveUp: false, error: err };
+    // A non-retryable rejection (4xx) won't succeed on retry. Don't count it
+    // toward the give-up bound and don't drop the entry — leave it for the user
+    // to fix the cause (bad key, oversized request, …) and resubmit.
+    if (!retryable) {
+      return { submitted: false, retryable: false, gaveUp: false, error: err };
+    }
     const current = fresh.entries[idx]!;
     const updated: PendingEntry = {
       ...current,
@@ -324,6 +331,12 @@ function inferDurationMs(
 export interface ManualActualsArgs {
   env: NodeJS.ProcessEnv;
   home?: string;
+  /**
+   * Session cwd, hashed to scope to THIS project's newest pending estimate so a
+   * concurrent project's estimate is never closed by mistake. Omit → the
+   * globally-newest entry (back-compat).
+   */
+  cwd?: string;
   /** Write a line to the user. */
   out: (line: string) => void;
   /** Ask the user a question and return their (trimmed) answer. */
@@ -332,89 +345,136 @@ export interface ManualActualsArgs {
 }
 
 const QUERY_EXCERPT_LEN = 120;
+const MAX_PROMPT_TRIES = 3;
 
 /**
- * Prompt a human for the realized counts of the newest pending estimate and
- * submit them. Used by hosts that do not expose run token usage. Rejects
- * non-integer / negative input rather than submitting garbage.
+ * Prompt a human for the realized counts of the current project's newest pending
+ * estimate and submit them. Used by hosts that do not expose run token usage.
+ * The API key is checked BEFORE prompting (don't make the user type counts only
+ * to learn there is no key); grouped numbers like `48,000` are accepted and
+ * invalid input is re-prompted; the failure cause is surfaced honestly and a
+ * user-fixable rejection leaves the estimate pending rather than dropping it.
  */
 export async function runManualActuals(args: ManualActualsArgs): Promise<number> {
-  const store = new PendingStore({ path: pendingFilePath(args.home) });
+  const host = args.env.BUDGETARY_HOST;
+
+  // Check the key first — before any prompting.
+  const status = resolveConfigStatus(args.env, args.home);
+  if (status.kind !== "ok") {
+    args.out(
+      noKeyGuidance(host, status.kind === "unreadable" ? "unreadable" : "no-key"),
+    );
+    return 1;
+  }
+  const resolved = status.config;
+
+  const store = new PendingStore({
+    path: pendingFilePath(args.home),
+    logger: { warn: args.out },
+  });
   const file = store.read();
   if (file.entries.length === 0) {
     args.out("No pending Budgetary estimate to report.");
     return 0;
   }
 
-  const newest = file.entries[file.entries.length - 1]!;
-  const excerpt = newest.query.slice(0, QUERY_EXCERPT_LEN);
-  args.out(`Reporting actuals for the most recent estimate:`);
-  args.out(`  ${excerpt}${newest.query.length > QUERY_EXCERPT_LEN ? "…" : ""}`);
+  const entry =
+    args.cwd !== undefined
+      ? newestForProject(file.entries, projectIdFromCwd(args.cwd))
+      : file.entries[file.entries.length - 1]!;
+  if (entry === null) {
+    args.out("No pending Budgetary estimate for this project directory.");
+    args.out(
+      `(${file.entries.length} pending for other ${
+        file.entries.length === 1 ? "project" : "projects"
+      } — run report-actual from the directory you estimated in.)`,
+    );
+    return 0;
+  }
+
+  const excerpt = entry.query.slice(0, QUERY_EXCERPT_LEN);
+  args.out("Reporting actuals for this estimate:");
+  args.out(`  ${excerpt}${entry.query.length > QUERY_EXCERPT_LEN ? "…" : ""}`);
   args.out("");
 
-  const tokensIn = parseNonNegInt(await args.prompt("Input tokens (tokens_in): "));
-  if (tokensIn === null) {
-    args.out("tokens_in must be a non-negative whole number. Nothing submitted.");
-    return 2;
-  }
-  const tokensOut = parseNonNegInt(
-    await args.prompt("Output tokens (tokens_out): "),
-  );
-  if (tokensOut === null) {
-    args.out("tokens_out must be a non-negative whole number. Nothing submitted.");
-    return 2;
-  }
+  const tokensIn = await promptNonNegInt(args, "Input tokens (tokens_in): ", "tokens_in", false);
+  if (tokensIn === null) return 2;
+  const tokensOut = await promptNonNegInt(args, "Output tokens (tokens_out): ", "tokens_out", false);
+  if (tokensOut === null) return 2;
   const success = parseBool(await args.prompt("Did the task succeed? [y/N]: "));
   if (success === null) {
     args.out("Please answer y or n. Nothing submitted.");
     return 2;
   }
-  const durationRaw = (await args.prompt("Duration in ms (optional): ")).trim();
-  let durationMs = 0;
-  if (durationRaw.length > 0) {
-    const parsed = parseNonNegInt(durationRaw);
-    if (parsed === null) {
-      args.out("duration_ms must be a non-negative whole number. Nothing submitted.");
-      return 2;
-    }
-    durationMs = parsed;
-  }
-
-  const resolved = resolveConfig(args.env, args.home);
-  if (resolved === null) {
-    args.out(noKeyGuidance());
-    return 1;
-  }
+  const durationMs = await promptNonNegInt(args, "Duration in ms (optional): ", "duration_ms", true);
+  if (durationMs === null) return 2;
 
   const factory =
     args.clientFactory ??
     ((opts: BudgetaryClientOptions) => new BudgetaryClient(opts));
   const client = factory({ apiKey: resolved.apiKey, baseUrl: resolved.baseUrl });
 
-  let warned: string | null = null;
-  await submitActuals({
+  const outcome = await submitActuals({
     store,
     client,
-    entry: newest,
+    entry,
     counts: { tokensIn, tokensOut, success, durationMs },
-    logger: { warn: (m) => (warned = m) },
+    logger: { warn: args.out },
   });
 
-  if (warned !== null) {
-    args.out(warned);
+  if (outcome.submitted) {
+    args.out("Actuals submitted. Thanks — this calibrates future estimates.");
+    return 0;
+  }
+  if (outcome.gaveUp) {
+    // submitActuals already printed the give-up warning via the logger.
     return 1;
   }
-  // submitActuals removes the entry on success; if it is gone, we succeeded.
-  if (store.read().entries.some((e) => e.estimate_id === newest.estimate_id)) {
-    args.out("Submission failed; the estimate is still pending. Try again later.");
-    return 1;
+  const detail = outcome.error instanceof Error ? outcome.error.message : "";
+  if (outcome.retryable) {
+    args.out(
+      `Couldn't reach Budgetary${detail ? ` (${detail})` : ""}; the estimate is ` +
+        "still pending. Try again later.",
+    );
+  } else {
+    args.out(
+      `Budgetary rejected this submission${detail ? `: ${detail}` : ""}. It won't ` +
+        "succeed on retry; the estimate is left pending for you to fix and resubmit.",
+    );
   }
-  args.out("Actuals submitted. Thanks — this calibrates future estimates.");
-  return 0;
+  return 1;
+}
+
+/**
+ * Prompt for a non-negative whole number, accepting grouped input (`48,000`)
+ * and re-prompting up to {@link MAX_PROMPT_TRIES} times on invalid input. An
+ * `optional` field returns 0 on an empty answer; a required field that stays
+ * invalid returns `null` (the caller aborts).
+ */
+async function promptNonNegInt(
+  args: Pick<ManualActualsArgs, "prompt" | "out">,
+  question: string,
+  label: string,
+  optional: boolean,
+): Promise<number | null> {
+  for (let i = 0; i < MAX_PROMPT_TRIES; i++) {
+    const raw = (await args.prompt(question)).trim();
+    if (optional && raw.length === 0) return 0;
+    const n = parseNonNegInt(raw);
+    if (n !== null) return n;
+    if (i < MAX_PROMPT_TRIES - 1) {
+      args.out(
+        `${label} must be a non-negative whole number (commas OK, e.g. 48,000). Try again.`,
+      );
+    }
+  }
+  args.out(`${label} must be a non-negative whole number. Nothing submitted.`);
+  return null;
 }
 
 function parseNonNegInt(raw: string): number | null {
-  const trimmed = raw.trim();
+  // Accept human grouping separators: "48,000" / "48 000" / "48_000".
+  const trimmed = raw.trim().replace(/[,_ ]/g, "");
   if (!/^\d+$/.test(trimmed)) return null;
   const n = Number(trimmed);
   if (!Number.isInteger(n) || n < 0) return null;
@@ -571,4 +631,75 @@ function parseBool(raw: string): boolean | null {
   if (v === "y" || v === "yes" || v === "true") return true;
   if (v === "n" || v === "no" || v === "false" || v === "") return false;
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Status: `pending` — surface estimates whose actuals were never captured.
+// Read-only; no server call. This is how a lost actual becomes visible.
+// ---------------------------------------------------------------------------
+
+export interface PendingListArgs {
+  env: NodeJS.ProcessEnv;
+  home?: string;
+  /** Marks entries belonging to the current project. */
+  cwd?: string;
+  now?: () => Date;
+  out: (line: string) => void;
+}
+
+/** A short human age like "just now", "3h ago", "2d ago". */
+function describeAge(createdAt: string, now: Date): string {
+  const created = Date.parse(createdAt);
+  if (!Number.isFinite(created)) return "unknown age";
+  const ms = now.getTime() - created;
+  if (ms < 60 * 1000) return "just now";
+  const mins = Math.floor(ms / 60000);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 48) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+/**
+ * List pending estimates awaiting actuals, newest first, marking those for the
+ * current project. Never fabricates or submits anything — it only reads the
+ * local store so an un-recorded run is visible instead of silently lost.
+ */
+export function runPendingList(args: PendingListArgs): number {
+  const store = new PendingStore({
+    path: pendingFilePath(args.home),
+    logger: { warn: args.out },
+  });
+  const entries = store.read().entries;
+  if (entries.length === 0) {
+    args.out("No pending Budgetary estimates — the loop is closed.");
+    return 0;
+  }
+
+  const now = (args.now ?? (() => new Date()))();
+  const projectId =
+    args.cwd !== undefined ? projectIdFromCwd(args.cwd) : null;
+  const sorted = [...entries].sort((a, b) => {
+    const ta = Date.parse(a.created_at);
+    const tb = Date.parse(b.created_at);
+    return (Number.isFinite(tb) ? tb : -Infinity) - (Number.isFinite(ta) ? ta : -Infinity);
+  });
+
+  args.out(
+    `${entries.length} pending Budgetary ${
+      entries.length === 1 ? "estimate" : "estimates"
+    } awaiting actuals:`,
+  );
+  for (const e of sorted) {
+    const here = projectId !== null && e.project_id === projectId ? " (this project)" : "";
+    const excerpt = e.query.slice(0, 60);
+    const ellipsis = e.query.length > 60 ? "…" : "";
+    args.out(`  • ${excerpt}${ellipsis} — ${describeAge(e.created_at, now)}${here}`);
+  }
+  args.out("");
+  args.out(
+    "Close them with `npx @budgetary/mcp report-actual` (or, from a rollout, " +
+      "`npx @budgetary/mcp on-session-end --transcript <path>`).",
+  );
+  return 0;
 }

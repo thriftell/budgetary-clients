@@ -149,12 +149,18 @@ export class PendingStore {
     }
   }
 
-  append(entry: PendingEntry): void {
+  /**
+   * Append an entry. Returns `true` iff it was actually written, `false` when
+   * the append was refused (missing id, or the existing bytes are unrecoverable)
+   * or the write failed — so a caller can tell the user honestly rather than
+   * claim "stored". Never throws.
+   */
+  append(entry: PendingEntry): boolean {
     if (typeof entry.estimate_id !== "string" || entry.estimate_id.length === 0) {
       this.logger.warn(
         "Budgetary: refusing to append a pending entry without an estimate_id.",
       );
-      return;
+      return false;
     }
     const { file, writable } = this.readResult();
     if (!writable) {
@@ -163,9 +169,19 @@ export class PendingStore {
       this.logger.warn(
         `Budgetary: pending store at ${this.path} is unreadable; not appending (existing file left intact).`,
       );
-      return;
+      return false;
     }
     file.entries.push(entry);
-    this.write(file);
+    try {
+      this.write(file);
+      return true;
+    } catch (err) {
+      this.logger.warn(
+        `Budgetary: could not write the pending store at ${this.path}; the estimate was not stored. (${
+          err instanceof Error ? err.message : String(err)
+        })`,
+      );
+      return false;
+    }
   }
 }

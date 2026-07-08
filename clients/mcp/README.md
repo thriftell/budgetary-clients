@@ -17,7 +17,7 @@ claude mcp add budgetary \
   -- npx -y @budgetary/mcp
 ```
 
-(The bundled Claude Code plugin in this repo also wires the server automatically via its `.mcp.json`, with `BUDGETARY_HOST=claude-code`.)
+> **Automatic actuals need the plugin, not just this command.** `claude mcp add` wires the **estimate tool** only. The session-end hook that submits real actuals is wired by the bundled [Claude Code plugin](../claude-code/README.md) (via its manifest), so with a bare `claude mcp add` you get estimates but record actuals **manually** (`npx @budgetary/mcp report-actual`), the same as any other host. Install the plugin for the automatic loop.
 
 ### Cursor — `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global)
 
@@ -90,8 +90,12 @@ If neither is set, the `estimate` tool returns short configure-your-key guidance
 
 ```bash
 mkdir -p ~/.budgetary
-echo '{ "api_key": "bg_live_..." }' > ~/.budgetary/config.json
+# Write the key with an EDITOR so it never lands in your shell history:
+"${EDITOR:-nano}" ~/.budgetary/config.json   # add: { "api_key": "bg_live_..." }
+chmod 600 ~/.budgetary/config.json            # owner-only
 ```
+
+> Prefer an editor over `echo '{...}' > config.json`, which records the secret in your shell history, and `chmod 600` the file so it isn't world-readable.
 
 Key prefixes denote the environment:
 
@@ -122,14 +126,27 @@ A plain stdio MCP server only sees the messages your host sends it, not which fi
 
 A pre-flight estimate is only half the loop; calibration needs the **realized** token counts after the run. How those are recorded depends on what the host exposes:
 
-- **Claude Code — automatic.** This host writes a real session transcript. The session-end hook reads the true `tokens_in + tokens_out` (cache-read tokens **excluded**) and submits them — together with a short **behavior trace**: which tools the run used (`Read`, `Edit`, `Bash`, …), roughly how many tokens each, and now two raw measurements per step — *which command it ran* (a **redacted** descriptor: the program name such as `pytest` or `go test`, plus a non-reversible digest of the rest — never a raw path, argument, or command) and *whether it succeeded*. The trace is measured from the transcript, never model-supplied, and any field that can't be read reliably is simply omitted; the total still submits. No human action needed. (Codex deferred: it exposes no session-end event, so there is no auto path yet — trace forwarding is wired for Claude Code only.)
+- **Claude Code (with the plugin) — automatic.** This host writes a real session transcript. The plugin's session-end hook reads the true `tokens_in + tokens_out` (cache-read tokens **excluded**) and submits them — together with a short **behavior trace**: which tools the run used (`Read`, `Edit`, `Bash`, …), roughly how many tokens each, and two raw measurements per step — *which command it ran* (a **redacted** descriptor: the program name such as `pytest` or `go test`, plus a non-reversible digest of the rest — never a raw path, argument, or command) and *whether it succeeded*. The trace is measured from the transcript, never model-supplied, and any field that can't be read reliably is simply omitted; the total still submits. No human action needed. (A bare `claude mcp add` **without** the plugin has no session-end hook, so it is manual like the hosts below.)
+- **Codex — manual, from the rollout.** Codex ships no session-end hook, but it writes a rollout transcript. After a session, submit its real counts:
+
+  ```bash
+  npx @budgetary/mcp on-session-end --transcript ~/.codex/sessions/rollout-<ts>-<uuid>.jsonl
+  ```
+
+  Run it from the directory you estimated in. Add `--failed` if the task didn't complete.
 - **Cursor / Copilot / other hosts — manual.** These hosts do **not** hand a third-party server the token totals of a completed agent run, and the language model does not know them either. So you record them yourself when you have a moment:
 
   ```bash
   npx @budgetary/mcp report-actual
   ```
 
-  It shows the most recent pending estimate and prompts you for the input/output token counts (read them from your host's usage UI), whether the task succeeded, and an optional duration.
+  It shows this project's most recent pending estimate and prompts you for the input/output token counts (read them from your host's usage UI, grouped numbers like `48,000` are fine), whether the task succeeded, and an optional duration.
+
+To see which estimates still await actuals at any time (read-only, no server call):
+
+```bash
+npx @budgetary/mcp pending
+```
 
 > **The model never supplies token counts.** The only model-invokable tool is `estimate`. Actuals are submitted only from (a) the session-end hook reading a real transcript, or (b) the human-entered `report-actual` command. A fabricated actual would poison calibration, so there is deliberately no tool a model can call to write counts.
 

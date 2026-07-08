@@ -52,11 +52,18 @@ function scenarioView(scenario: string): ScenarioView {
   }
 }
 
-/** Decode the bare confidence decimal into a plain-language band. */
-function confidenceLabel(confidence: number): string {
-  const c = Number.isFinite(confidence)
+/** Confidence below which we always lead with the range, whatever the scenario. */
+const LOW_CONFIDENCE = 0.5;
+
+function clampConfidence(confidence: number): number {
+  return Number.isFinite(confidence)
     ? Math.min(1, Math.max(0, confidence))
     : 0;
+}
+
+/** Decode the bare confidence decimal into a plain-language band. */
+function confidenceLabel(confidence: number): string {
+  const c = clampConfidence(confidence);
   let word: string;
   if (c >= 0.75) word = "high";
   else if (c >= 0.5) word = "moderate";
@@ -70,10 +77,54 @@ function confidenceLabel(confidence: number): string {
  * MCP host. The band is presented as a RANGE, never a bare point: a confident
  * estimate leads with an approximate midpoint plus the range; an uncertain /
  * sparse / unknown estimate leads with the range itself and a caution, so
- * honesty about coverage reaches the surface. A void result intentionally omits
- * any pending-storage line — the caller stores nothing for it.
+ * honesty about coverage reaches the surface. The footer is host-aware and never
+ * claims the estimate was stored when it wasn't. A void result intentionally
+ * omits any pending-storage line — the caller stores nothing for it.
  */
-export function renderEstimate(estimate: EstimateResponse): string {
+export interface RenderEstimateOptions {
+  /** The host tag (`claude-code`/`codex`/…) — selects the right actuals path. */
+  host?: string;
+  /** Whether the pending entry was actually stored (default true). */
+  stored?: boolean;
+}
+
+/**
+ * The trailing "what happens next" lines, host-aware and honest about storage.
+ * When the pending entry could NOT be stored, say so — never print "stored".
+ * Automatic actuals on Claude Code require the plugin's session-end hook (a bare
+ * `claude mcp add` wires only the estimate tool), so we don't over-promise.
+ */
+function storedFooter(host: string | undefined, stored: boolean): string[] {
+  if (!stored) {
+    return [
+      "⚠ Couldn't save this as a pending estimate — the local store under ~/.budgetary",
+      "  is unwritable, so it will NOT be recorded automatically. Fix ~/.budgetary,",
+      "  then re-estimate, or submit actuals manually with `npx @budgetary/mcp report-actual`.",
+    ];
+  }
+  switch (host) {
+    case "claude-code":
+      return [
+        "Pending estimate stored. With the Budgetary plugin installed, actuals are",
+        "recorded automatically at session end — otherwise run `npx @budgetary/mcp report-actual`.",
+      ];
+    case "codex":
+      return [
+        "Pending estimate stored. After the run, record actuals with",
+        "`npx @budgetary/mcp on-session-end --transcript <rollout>` (or `report-actual`).",
+      ];
+    default:
+      return [
+        "Pending estimate stored. After the run, record actuals with",
+        "`npx @budgetary/mcp report-actual`.",
+      ];
+  }
+}
+
+export function renderEstimate(
+  estimate: EstimateResponse,
+  options: RenderEstimateOptions = {},
+): string {
   if (estimate.void || estimate.distribution === null) {
     return [
       "Budgetary cannot confidently estimate this query (out of domain).",
@@ -83,23 +134,38 @@ export function renderEstimate(estimate: EstimateResponse): string {
 
   const { p10, p50, p90 } = estimate.distribution;
   const view = scenarioView(estimate.scenario);
+  // Honesty coupling: the scenario and the confidence value are independent on
+  // the wire, so a "confident" scenario can arrive with a low confidence. Never
+  // let the two disagree on screen — a low confidence ALWAYS leads with the
+  // range and drops the reassuring "reliable" framing, whatever the scenario.
+  const lowConfidence = clampConfidence(estimate.confidence) < LOW_CONFIDENCE;
+  const leadWithRange = view.leadWithRange || lowConfidence;
   const lines: string[] = [];
-  if (view.leadWithRange) {
+  if (leadWithRange) {
     lines.push(
       `Estimated range: ${commas(p10)}–${commas(p90)} tokens (p10–p90), midpoint ~${commas(p50)}`,
     );
-    lines.push(`⚠ ${view.caution}`);
+    lines.push(
+      `⚠ ${
+        view.leadWithRange
+          ? view.caution
+          : "Low confidence — rely on the range, not the midpoint."
+      }`,
+    );
   } else {
     lines.push(
       `Estimated cost: ~${commas(p50)} tokens (range ${commas(p10)}–${commas(p90)}, p10–p90)`,
     );
   }
-  lines.push(`Scenario: ${view.meaning}`);
+  const meaning =
+    lowConfidence && !view.leadWithRange
+      ? "confident scenario, but low confidence — treat the range as the answer."
+      : view.meaning;
+  lines.push(`Scenario: ${meaning}`);
   lines.push(`Confidence: ${confidenceLabel(estimate.confidence)}`);
   lines.push(`Model: ${estimate.model}`);
   lines.push("");
-  lines.push("Pending estimate stored. After the run, actuals are recorded");
-  lines.push("automatically (Claude Code) or via `npx @budgetary/mcp report-actual`.");
+  lines.push(...storedFooter(options.host, options.stored ?? true));
   return lines.join("\n");
 }
 
@@ -108,9 +174,28 @@ export function renderPermissionDenied(): string {
   return "Your Budgetary key isn't on an active plan. Start one at https://budgetary.tools";
 }
 
-/** 401: the key itself was rejected. */
-export function renderAuthFailed(): string {
-  return "Your API key was rejected. Update it in `~/.budgetary/config.json` or set `BUDGETARY_API_KEY`.";
+/**
+ * 401: the key itself was rejected. Names the source of the REJECTED key (env is
+ * checked first, so a rejected key came from env when set), orders the fixes
+ * env-first, is host-aware, and points at where to get a key.
+ */
+export function renderAuthFailed(
+  host?: string,
+  source?: "env" | "config",
+): string {
+  const sourceLine =
+    source === "env"
+      ? "The API key in BUDGETARY_API_KEY was rejected."
+      : source === "config"
+        ? "The API key in ~/.budgetary/config.json was rejected."
+        : "Your API key was rejected.";
+  const fixLine =
+    host === "claude-code"
+      ? "Update it with `/plugin configure budgetary@budgetary`, or set BUDGETARY_API_KEY (checked first) / edit ~/.budgetary/config.json."
+      : "Set a valid BUDGETARY_API_KEY (checked first), or update ~/.budgetary/config.json.";
+  return [sourceLine, fixLine, "Get or check a key at https://budgetary.tools"].join(
+    "\n",
+  );
 }
 
 /** 429: rate limited. Includes the retry hint when the server surfaced one. */
@@ -119,6 +204,26 @@ export function renderRateLimited(retryAfterSeconds: number | null): string {
     return `Budgetary rate limit reached. Try again in ${retryAfterSeconds} seconds.`;
   }
   return "Budgetary rate limit reached. Try again in a little while.";
+}
+
+/**
+ * A 4xx the server deliberately rejected (bad/oversized request). This is NOT a
+ * transport failure, so it must not advise a blind retry — it states the reason
+ * and, where we know one, the concrete fix (413 → shorten the task).
+ */
+export function renderRequestRejected(
+  message: string,
+  requestId: string | null,
+  httpStatus: number | null,
+): string {
+  const tail = requestId ? ` (request_id: ${requestId})` : "";
+  const fix =
+    httpStatus === 413
+      ? " Shorten the task description and try again."
+      : httpStatus === 404
+        ? " The referenced estimate no longer exists."
+        : "";
+  return `Budgetary rejected the request: ${message}${tail}.${fix}`;
 }
 
 /** Network failures and 5xx. Surfaces request_id when present, with a retry affordance. */

@@ -15,8 +15,12 @@ function predictedCell(entry: LedgerEntry): string {
 function rangeCell(entry: LedgerEntry): string {
   if (!entry.predicted) return "—";
   const { p10, p90 } = entry.predicted;
-  if (!Number.isFinite(p10) || !Number.isFinite(p90)) return "—";
-  return `${formatTokens(p10)}–${formatTokens(p90)}`;
+  if (!Number.isFinite(p10) || !Number.isFinite(p90) || p10 <= 0 || p90 <= 0) {
+    return "—";
+  }
+  // Order defensively so odd wire data never renders an inverted range (the
+  // chart clamps the same way).
+  return `${formatTokens(Math.min(p10, p90))}–${formatTokens(Math.max(p10, p90))}`;
 }
 
 function actualCell(entry: LedgerEntry): string {

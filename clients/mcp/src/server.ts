@@ -11,6 +11,7 @@ import {
 import {
   runAutoActuals,
   runManualActuals,
+  runPendingList,
   runRolloutActuals,
   type SessionEndPayload,
 } from "./actuals.js";
@@ -116,6 +117,7 @@ async function runReportActualCli(): Promise<number> {
   try {
     return await runManualActuals({
       env: process.env,
+      cwd: process.cwd(),
       out: (line) => process.stdout.write(`${line}\n`),
       prompt: (question) => rl.question(question),
     });
@@ -221,15 +223,25 @@ async function runOnSessionEndCli(rest: string[]): Promise<number> {
   });
 }
 
+function runPendingCli(): number {
+  return runPendingList({
+    env: process.env,
+    cwd: process.cwd(),
+    out: (line) => process.stdout.write(`${line}\n`),
+  });
+}
+
 /**
  * CLI entry point. Subcommands:
  *   (none)                        → run the MCP stdio server (returns null: do not exit)
+ *   pending                       → list pending estimates awaiting actuals (read-only)
  *   report-actual                 → manual, human-entered actuals
  *   on-session-end                → auto actuals from a session-end payload on stdin (hook)
  *   on-session-end --transcript P → submit actuals from a rollout/transcript file P
  */
 export async function main(argv: string[]): Promise<number | null> {
   const sub = argv[0];
+  if (sub === "pending") return runPendingCli();
   if (sub === "report-actual") return runReportActualCli();
   if (sub === "on-session-end") return runOnSessionEndCli(argv.slice(1));
   await runStdioServer();
