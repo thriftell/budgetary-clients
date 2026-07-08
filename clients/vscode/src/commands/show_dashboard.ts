@@ -46,14 +46,19 @@ export function showDashboard(_context: vscode.ExtensionContext): void {
 
   panel.webview.onDidReceiveMessage((msg) => {
     if (msg && typeof msg === "object" && (msg as { type?: unknown }).type === "refresh") {
-      if (panel) void load(panel);
+      // A manual refresh keeps the current view (no full "Loading…" blank); the
+      // webview announces "Refreshing…" via aria-live and restores focus/scroll.
+      if (panel) void load(panel, { isRefresh: true });
     }
   });
 
   void load(panel);
 }
 
-export async function load(p: vscode.WebviewPanel): Promise<void> {
+export async function load(
+  p: vscode.WebviewPanel,
+  opts: { isRefresh?: boolean } = {},
+): Promise<void> {
   // Newest-wins + disposed guard. A ledger fetch can resolve after a newer
   // refresh started, or after the panel was disposed. `apply` writes only while
   // this load is still the latest AND `p` is still the active panel — so a stale
@@ -72,7 +77,10 @@ export async function load(p: vscode.WebviewPanel): Promise<void> {
     return;
   }
 
-  apply(renderLoading(makeNonce()));
+  // A manual refresh keeps the current dashboard visible (no full "Loading…"
+  // blank that would lose scroll/focus); the webview announces "Refreshing…"
+  // via aria-live. Only the first paint shows the loading interstitial.
+  if (!opts.isRefresh) apply(renderLoading(makeNonce()));
 
   const client = new BudgetaryClient({
     apiKey: config.apiKey,

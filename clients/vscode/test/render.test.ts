@@ -64,6 +64,32 @@ describe("renderDashboard", () => {
     expect(html).toContain('id="refresh"');
     expect(html).toContain('postMessage({ type: "refresh" })');
   });
+
+  it("has section <h2> headings and a data-bearing chart summary", () => {
+    const html = renderDashboard([entry("est_1"), entry("est_2")], NONCE);
+    expect(html).toContain('<h2 id="b-chart-h">Calibration</h2>');
+    expect(html).toContain('<h2 id="b-recent-h">Recent estimates</h2>');
+    expect(html).toContain('id="b-chart-summary"');
+  });
+
+  it("legend lists all scenarios (incl. out of domain) with shape marks, from one source", () => {
+    const html = renderDashboard([entry("est_1")], NONCE);
+    expect(html).toContain("out of domain"); // previously missing from the legend
+    expect(html).toContain("b-legend-mark"); // each item carries a shape swatch
+    // The legend is a semantic list, not a pile of spans.
+    expect(html).toContain('<ul class="b-legend"');
+  });
+
+  it("announces refresh via aria-live and preserves scroll/focus across reloads", () => {
+    const html = renderDashboard([entry("est_1")], NONCE);
+    expect(html).toContain('role="status"');
+    expect(html).toContain('aria-live="polite"');
+    // The refresh script persists + restores state.
+    expect(html).toContain("getState()");
+    expect(html).toContain("setState(");
+    expect(html).toContain("window.scrollTo");
+    expect(html).toContain(".focus()");
+  });
 });
 
 describe("renderConfigureKey", () => {

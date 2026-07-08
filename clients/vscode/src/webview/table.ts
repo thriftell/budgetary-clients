@@ -2,9 +2,13 @@ import type { LedgerEntry } from "@budgetary/sdk";
 
 import { escapeHtml, formatTokens, truncateEstimateId } from "../format";
 
-function donelyCell(entry: LedgerEntry): string {
-  if (entry.actual === null) return "—";
-  return entry.actual.success ? "✓" : "✗";
+function resultCell(entry: LedgerEntry): string {
+  // A glyph with an accessible label, so a screen reader announces the outcome
+  // instead of an ambiguous symbol.
+  if (entry.actual === null) return `<span aria-label="pending">○</span>`;
+  return entry.actual.success
+    ? `<span aria-label="succeeded">✓</span>`
+    : `<span aria-label="failed">✗</span>`;
 }
 
 function predictedCell(entry: LedgerEntry): string {
@@ -37,7 +41,7 @@ function row(entry: LedgerEntry): string {
     <td class="b-cell-num">${rangeCell(entry)}</td>
     <td class="b-cell-num">${actualCell(entry)}</td>
     <td class="b-cell-scenario b-scenario-${escapeHtml(entry.scenario)}">${scenario}</td>
-    <td class="b-cell-done">${donelyCell(entry)}</td>
+    <td class="b-cell-done">${resultCell(entry)}</td>
   </tr>`;
 }
 
@@ -61,14 +65,15 @@ export function renderRecentTable(entries: readonly LedgerEntry[]): string {
   });
 
   return `<table class="b-table">
+  <caption class="b-caption">Recent estimates — predicted vs. actual, newest first.</caption>
   <thead>
     <tr>
-      <th>Estimate</th>
-      <th class="b-cell-num">Predicted p50</th>
-      <th class="b-cell-num">Range (p10–p90)</th>
-      <th class="b-cell-num">Actual</th>
-      <th>Scenario</th>
-      <th>Done</th>
+      <th scope="col">Estimate</th>
+      <th scope="col" class="b-cell-num">Predicted p50</th>
+      <th scope="col" class="b-cell-num">Range (p10–p90)</th>
+      <th scope="col" class="b-cell-num">Actual</th>
+      <th scope="col">Scenario</th>
+      <th scope="col">Result</th>
     </tr>
   </thead>
   <tbody>

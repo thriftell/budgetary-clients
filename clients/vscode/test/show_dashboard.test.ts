@@ -138,6 +138,26 @@ describe("dashboard load sequencing", () => {
     expect(fp._html).not.toContain("est_old");
   });
 
+  it("a manual refresh keeps the current view instead of blanking to Loading", async () => {
+    const fp = makeFakePanel();
+    activePanel = fp;
+    vscodeStub.window.createWebviewPanel = () => fp;
+
+    showDashboard({} as never); // deferreds[0]
+    ctl.deferreds[0]!.resolve(ledgerPage("est_initial"));
+    await tick();
+    expect(fp._html).toContain("est_initial");
+
+    // Manual refresh: no "Loading…" interstitial; prior content stays up.
+    const refreshing = load(fp, { isRefresh: true }); // deferreds[1]
+    expect(fp._html).not.toContain("Loading your ledger");
+    expect(fp._html).toContain("est_initial");
+
+    ctl.deferreds[1]!.resolve(ledgerPage("est_ref2"));
+    await refreshing;
+    expect(fp._html).toContain("est_ref2");
+  });
+
   it("renders the configure-key panel on an auth error (not a generic error)", async () => {
     const fp = makeFakePanel();
     activePanel = fp;
