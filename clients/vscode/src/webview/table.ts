@@ -12,6 +12,13 @@ function predictedCell(entry: LedgerEntry): string {
   return formatTokens(entry.predicted.p50);
 }
 
+function rangeCell(entry: LedgerEntry): string {
+  if (!entry.predicted) return "—";
+  const { p10, p90 } = entry.predicted;
+  if (!Number.isFinite(p10) || !Number.isFinite(p90)) return "—";
+  return `${formatTokens(p10)}–${formatTokens(p90)}`;
+}
+
 function actualCell(entry: LedgerEntry): string {
   if (entry.actual === null) return "—";
   return formatTokens(entry.actual.total);
@@ -23,6 +30,7 @@ function row(entry: LedgerEntry): string {
   return `<tr>
     <td class="b-cell-id">${id}</td>
     <td class="b-cell-num">${predictedCell(entry)}</td>
+    <td class="b-cell-num">${rangeCell(entry)}</td>
     <td class="b-cell-num">${actualCell(entry)}</td>
     <td class="b-cell-scenario b-scenario-${escapeHtml(entry.scenario)}">${scenario}</td>
     <td class="b-cell-done">${donelyCell(entry)}</td>
@@ -53,6 +61,7 @@ export function renderRecentTable(entries: readonly LedgerEntry[]): string {
     <tr>
       <th>Estimate</th>
       <th class="b-cell-num">Predicted p50</th>
+      <th class="b-cell-num">Range (p10–p90)</th>
       <th class="b-cell-num">Actual</th>
       <th>Scenario</th>
       <th>Done</th>
