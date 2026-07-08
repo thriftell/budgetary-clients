@@ -15,7 +15,10 @@ export interface BudgetaryClientOptions {
   baseUrl?: string;
   /** Per-request timeout. Default 10 000 ms. */
   timeoutMs?: number;
-  /** Maximum retries on `5xx` and `429`. Default 5. */
+  /**
+   * Maximum retries on `5xx` and `429`. Default 4, i.e. 5 total attempts —
+   * the contract's "give up after 5 attempts" (§8).
+   */
   maxRetries?: number;
   /** Override for the global `fetch`. Mainly for tests. */
   fetchImpl?: typeof fetch;
@@ -37,7 +40,8 @@ export interface EstimateCallOptions {
 
 const DEFAULT_BASE_URL = "https://api.budgetary.tools";
 const DEFAULT_TIMEOUT_MS = 10_000;
-const DEFAULT_MAX_RETRIES = 5;
+// 4 retries + the initial attempt = 5 total, per contract §8.
+const DEFAULT_MAX_RETRIES = 4;
 
 export class BudgetaryClient {
   private readonly http: HttpClient;

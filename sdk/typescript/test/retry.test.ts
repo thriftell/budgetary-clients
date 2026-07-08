@@ -84,6 +84,39 @@ describe("withRetry unit", () => {
     expect(sleeps[0]).toBeGreaterThanOrEqual(2000);
   });
 
+  it("clamps an oversized Retry-After to maxDelay (never hangs for minutes)", async () => {
+    const sleeps: number[] = [];
+    let attempt = 0;
+
+    await withRetry(
+      async () => {
+        attempt += 1;
+        if (attempt === 1) {
+          throw new BudgetaryRateLimitError({
+            code: "rate_limited",
+            message: "come back in an hour",
+            httpStatus: 429,
+            requestId: null,
+            retryAfterSeconds: 3600, // 1 hour
+          });
+        }
+        return "ok";
+      },
+      {
+        maxRetries: 3,
+        maxDelayMs: 5000,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+        random: () => 1, // no jitter
+      },
+    );
+
+    expect(sleeps).toHaveLength(1);
+    // Clamped to maxDelay — NOT 3_600_000.
+    expect(sleeps[0]).toBe(5000);
+  });
+
   it("does not retry on non-retryable errors", async () => {
     let attempt = 0;
     const err = await withRetry(

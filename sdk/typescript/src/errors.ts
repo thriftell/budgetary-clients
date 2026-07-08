@@ -19,7 +19,16 @@ export class BudgetaryError extends Error {
   }
 }
 
+/** 401: the API key is missing, malformed, or revoked. */
 export class BudgetaryAuthError extends BudgetaryError {}
+
+/**
+ * 403: the key is valid but lacks the scope for this operation. Distinct from
+ * {@link BudgetaryAuthError} so callers can tell "bad key" (re-authenticate)
+ * apart from "authorized but gated" (a permission/plan problem) — see contract
+ * §6 (`authentication_failed` vs `permission_denied`).
+ */
+export class BudgetaryPermissionError extends BudgetaryError {}
 
 export class BudgetaryNotFoundError extends BudgetaryError {}
 

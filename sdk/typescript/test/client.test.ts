@@ -105,19 +105,23 @@ describe("BudgetaryClient.submitActuals", () => {
       tokensOut: 36210,
       success: true,
       durationMs: 420_000,
-      metadata: { toolCalls: 47 },
+      // Free-form, caller-owned map: keys are DATA, not protocol. They must
+      // reach the wire byte-for-byte — mixed case and nesting untouched.
+      metadata: { toolCalls: 47, camelKey: "v", nested: { innerKey: 1 } },
     });
 
     expect(res).toEqual({ received: true, ledgerEntryId: "led_999" });
 
     const req = handle.requests[0]!;
     expect(req.body).toEqual({
+      // Known protocol fields ARE snake-cased...
       estimate_id: "est_01ABC",
       tokens_in: 12340,
       tokens_out: 36210,
       success: true,
       duration_ms: 420_000,
-      metadata: { tool_calls: 47 },
+      // ...but `metadata` passes through verbatim (no key transformation).
+      metadata: { toolCalls: 47, camelKey: "v", nested: { innerKey: 1 } },
     });
   });
 
