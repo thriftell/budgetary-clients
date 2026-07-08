@@ -39,7 +39,7 @@ client = BudgetaryClient(api_key=os.environ["BUDGETARY_API_KEY"])
 
 ## VS Code extension
 
-Install **Budgetary** from the VS Code Marketplace (or Open VSX). After install, run the `Budgetary: Sign In` command and paste your API key when prompted.
+Install **Budgetary** from [Open VSX](https://open-vsx.org/extension/budgetary/budgetary-vscode) — the extension is published there, not to the Microsoft VS Code Marketplace. After install, run the `Budgetary: Sign In` command and paste your API key when prompted.
 
 ## Claude Code plugin
 

@@ -2,6 +2,15 @@
 
 All notable changes to the Budgetary clients are tracked here. Newest first.
 
+> **Historical.** This hand-written log covers milestones through **0012**, when
+> every package was still pre-release at `0.0.0`. Since **0014**, versioned
+> releases are managed by [Changesets](https://github.com/changesets/changesets):
+> each published package carries its own `CHANGELOG.md` and a GitHub Release, and
+> the Python SDK is released by tag (see
+> [CONTRIBUTING → Release flow](./CONTRIBUTING.md#release-flow)). This file is
+> kept for historical context and is no longer updated — the "version stays
+> `0.0.0`" notes below describe that pre-release era, not the current state.
+
 ## 0012 — MCP client
 
 - New `@budgetary/mcp` server: an MCP `estimate` tool that returns a

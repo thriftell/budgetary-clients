@@ -4,19 +4,13 @@ TypeScript SDK for the [Budgetary](https://api.budgetary.tools) API — a hosted
 
 ## Install
 
-`@budgetary/sdk` is not published to npm until 1.0. Until then, install it from this repository.
-
-**pnpm** (supported today):
-
 ```bash
-pnpm add "github:thriftell/budgetary-clients#main&path:sdk/typescript"
+npm install @budgetary/sdk
+# or: pnpm add @budgetary/sdk   /   yarn add @budgetary/sdk
 ```
 
-Keep the quotes so your shell doesn't split on `&`, and use `#main` (not a feature branch).
-
-**npm / yarn:** installing the SDK from a git subdirectory is **not supported**. npm and yarn ignore the `&path:` fragment — they print a warning like `ignoring unknown key "…&path"`, exit 0, and silently install the repository root (a private workspace) instead of `@budgetary/sdk`, leaving the import unresolvable with no error. Until `@budgetary/sdk` is published to npm at 1.0, **npm and yarn users should install with pnpm** (above).
-
-Once 1.0 ships, `npm install @budgetary/sdk` / `pnpm add @budgetary/sdk` / `yarn add @budgetary/sdk` becomes the canonical install for everyone.
+The package publishes both ESM and CommonJS builds with type declarations for
+each, so `import` and `require` both work from TypeScript and JavaScript.
 
 ## Quickstart
 
