@@ -85,6 +85,13 @@ export interface SubmitOutcome {
    * caller must NOT advise retrying a non-retryable rejection.
    */
   retryable: boolean;
+  /**
+   * When not submitted and not retryable: `true` iff the rejection is TERMINAL
+   * (400/404/409/413/… — it will never succeed) and the entry was DROPPED so it
+   * can't head-of-line-block the queue; `false` iff it is user-fixable (401/403 —
+   * fixing the key/plan lets the same submit succeed) and the entry was KEPT.
+   */
+  terminal: boolean;
   /** True iff attempts reached {@link MAX_ATTEMPTS} and the entry was dropped (already warned). */
   gaveUp: boolean;
   /** The error that prevented submission, for honest reporting. Never carries the key. */
@@ -104,6 +111,19 @@ function isRetryableSubmitError(err: unknown): boolean {
   }
   // A non-Budgetary (unexpected) error is treated as transient.
   return true;
+}
+
+/**
+ * A 4xx rejection a user CAN fix so the SAME submit later succeeds — a rejected
+ * key (401) or a key without an active plan (403). Every other 4xx is terminal:
+ * re-submitting the same estimate will never work, so it must not be kept (it
+ * would pin the newest-entry queue forever with no cleanup on the manual paths).
+ */
+function isUserFixableRejection(err: unknown): boolean {
+  if (err instanceof BudgetaryError) {
+    return err.httpStatus === 401 || err.httpStatus === 403;
+  }
+  return false;
 }
 
 /**
@@ -143,7 +163,7 @@ export async function submitActuals(
     });
     const fresh = store.read();
     if (removeById(fresh, entry.estimate_id)) store.write(fresh);
-    return { submitted: true, retryable: false, gaveUp: false };
+    return { submitted: true, retryable: false, terminal: false, gaveUp: false };
   } catch (err) {
     const retryable = isRetryableSubmitError(err);
     const fresh = store.read();
@@ -151,12 +171,20 @@ export async function submitActuals(
       (e) => e.estimate_id === entry.estimate_id,
     );
     // Already closed by another path — THIS call did not submit; say so.
-    if (idx === -1) return { submitted: false, retryable, gaveUp: false, error: err };
-    // A non-retryable rejection (4xx) won't succeed on retry. Don't count it
-    // toward the give-up bound and don't drop the entry — leave it for the user
-    // to fix the cause (bad key, oversized request, …) and resubmit.
+    if (idx === -1)
+      return { submitted: false, retryable, terminal: false, gaveUp: false, error: err };
     if (!retryable) {
-      return { submitted: false, retryable: false, gaveUp: false, error: err };
+      if (isUserFixableRejection(err)) {
+        // 401/403: fixing the key/plan lets the SAME submit succeed. Keep the
+        // entry (don't count it toward give-up); the user resubmits after fixing.
+        return { submitted: false, retryable: false, terminal: false, gaveUp: false, error: err };
+      }
+      // A terminal 4xx (400/404/409/413/…) will never succeed. DROP it so it
+      // can't head-of-line-block this project's queue — the manual/rollout paths
+      // always act on the newest matching entry and have no TTL cleanup.
+      fresh.entries.splice(idx, 1);
+      store.write(fresh);
+      return { submitted: false, retryable: false, terminal: true, gaveUp: false, error: err };
     }
     const current = fresh.entries[idx]!;
     const updated: PendingEntry = {
@@ -170,11 +198,11 @@ export async function submitActuals(
       logger.warn(
         `Budgetary: giving up on actuals for ${entry.estimate_id} after ${MAX_ATTEMPTS} attempts (${detail}).`,
       );
-      return { submitted: false, retryable, gaveUp: true, error: err };
+      return { submitted: false, retryable, terminal: false, gaveUp: true, error: err };
     }
     fresh.entries[idx] = updated;
     store.write(fresh);
-    return { submitted: false, retryable, gaveUp: false, error: err };
+    return { submitted: false, retryable, terminal: false, gaveUp: false, error: err };
   }
 }
 
@@ -436,10 +464,15 @@ export async function runManualActuals(args: ManualActualsArgs): Promise<number>
       `Couldn't reach Budgetary${detail ? ` (${detail})` : ""}; the estimate is ` +
         "still pending. Try again later.",
     );
+  } else if (outcome.terminal) {
+    args.out(
+      `Budgetary rejected this submission${detail ? `: ${detail}` : ""}. It can't ` +
+        "succeed, so the estimate has been discarded.",
+    );
   } else {
     args.out(
-      `Budgetary rejected this submission${detail ? `: ${detail}` : ""}. It won't ` +
-        "succeed on retry; the estimate is left pending for you to fix and resubmit.",
+      `Budgetary rejected this submission${detail ? `: ${detail}` : ""}. Fix your ` +
+        "API key or plan, then resubmit — the estimate is left pending.",
     );
   }
   return 1;
@@ -473,10 +506,13 @@ async function promptNonNegInt(
 }
 
 function parseNonNegInt(raw: string): number | null {
-  // Accept human grouping separators: "48,000" / "48 000" / "48_000".
-  const trimmed = raw.trim().replace(/[,_ ]/g, "");
-  if (!/^\d+$/.test(trimmed)) return null;
-  const n = Number(trimmed);
+  const trimmed = raw.trim();
+  // Plain digits, or WELL-FORMED 3-digit groups ("48,000" / "48 000" /
+  // "1_000_000"). A malformed group ("1,2,3", "48,00") is rejected rather than
+  // silently coerced — never fabricate a count from ambiguous input.
+  const grouped = /^\d{1,3}([,_ ]\d{3})+$/.test(trimmed);
+  if (!/^\d+$/.test(trimmed) && !grouped) return null;
+  const n = Number(trimmed.replace(/[,_ ]/g, ""));
   if (!Number.isInteger(n) || n < 0) return null;
   return n;
 }
@@ -617,10 +653,15 @@ export async function runRolloutActuals(
       `Couldn't reach Budgetary${detail ? ` (${detail})` : ""}; the estimate is ` +
         "still pending. Resubmit after the next session or with `report-actual`.",
     );
+  } else if (outcome.terminal) {
+    args.out(
+      `Budgetary rejected this submission${detail ? `: ${detail}` : ""}. It can't ` +
+        "succeed, so the estimate has been discarded.",
+    );
   } else {
     args.out(
-      `Budgetary rejected this submission${detail ? `: ${detail}` : ""}. It won't ` +
-        "succeed on retry; the estimate is left pending for you to inspect.",
+      `Budgetary rejected this submission${detail ? `: ${detail}` : ""}. Fix your ` +
+        "API key or plan, then resubmit — the estimate is left pending.",
     );
   }
   return 1;

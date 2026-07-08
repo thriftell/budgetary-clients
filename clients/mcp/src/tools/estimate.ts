@@ -150,8 +150,9 @@ function renderEstimateError(
     return renderRateLimited(err.retryAfterSeconds);
   }
   if (err instanceof BudgetaryError) {
-    // The SDK maps both 401 and 403 to BudgetaryAuthError, so distinguish by
-    // HTTP status / wire code rather than by class.
+    // The SDK maps 401 → BudgetaryAuthError and 403 → BudgetaryPermissionError
+    // (both extend BudgetaryError). Distinguish by HTTP status / wire code so
+    // this stays correct regardless of the class hierarchy.
     if (err.httpStatus === 403 || err.code === "permission_denied") {
       return renderPermissionDenied();
     }

@@ -217,12 +217,11 @@ export function renderRequestRejected(
   httpStatus: number | null,
 ): string {
   const tail = requestId ? ` (request_id: ${requestId})` : "";
+  // Only 413 has a safe, context-free fix. For other 4xx the server message
+  // carries the detail — don't invent a cause (a 404 here can be a wrong
+  // base_url, not a missing estimate).
   const fix =
-    httpStatus === 413
-      ? " Shorten the task description and try again."
-      : httpStatus === 404
-        ? " The referenced estimate no longer exists."
-        : "";
+    httpStatus === 413 ? " Shorten the task description and try again." : "";
   return `Budgetary rejected the request: ${message}${tail}.${fix}`;
 }
 

@@ -51,8 +51,11 @@ export function resolveConfigStatus(
   env: NodeJS.ProcessEnv = process.env,
   home?: string,
 ): ConfigStatus {
-  const fromEnv = env.BUDGETARY_API_KEY;
-  if (fromEnv && fromEnv.length > 0) {
+  // Trim so a whitespace-only value counts as "no key" (not a real key that
+  // only fails later as a 401), and a stray copy-paste space is tolerated.
+  const fromEnv =
+    typeof env.BUDGETARY_API_KEY === "string" ? env.BUDGETARY_API_KEY.trim() : "";
+  if (fromEnv.length > 0) {
     return {
       kind: "ok",
       config: { apiKey: fromEnv, baseUrl: DEFAULT_BASE_URL, source: "env" },
@@ -76,7 +79,9 @@ export function resolveConfigStatus(
     // "no key at all". Surface it as such rather than pretending nothing is set.
     return { kind: "unreadable", path };
   }
-  if (typeof parsed.api_key !== "string" || parsed.api_key.length === 0) {
+  const apiKey =
+    typeof parsed.api_key === "string" ? parsed.api_key.trim() : "";
+  if (apiKey.length === 0) {
     return { kind: "no-key" };
   }
   const baseUrl =
@@ -85,7 +90,7 @@ export function resolveConfigStatus(
       : DEFAULT_BASE_URL;
   return {
     kind: "ok",
-    config: { apiKey: parsed.api_key, baseUrl, source: "config" },
+    config: { apiKey, baseUrl, source: "config" },
   };
 }
 
