@@ -1,10 +1,25 @@
-// Adapted from clients/claude-code/src/transcript.ts. Codex's Stop hook
-// payload, like Claude Code's SessionEnd, does not include session-level
-// token totals — only `transcript_path` pointing at the rollout JSONL at
-// `~/.codex/sessions/rollout-<ts>-<uuid>.jsonl`. The exact line schema is
-// not part of Codex's stable public API; we probe the same plausible
-// `usage.{input,output}_tokens` shape the Claude Code transcript uses,
-// which the Codex rollout records appear to follow today.
+// Codex's Stop hook payload, like Claude Code's SessionEnd, does not include
+// session-level token totals — only `transcript_path` pointing at the rollout
+// JSONL at `~/.codex/sessions/rollout-<ts>-<uuid>.jsonl`.
+//
+// The rollout records token usage as a CUMULATIVE running total on dedicated
+// event lines (confirmed against real `codex-rs` rollouts):
+//
+//   {"type":"event_msg","payload":{"type":"token_count","info":{
+//      "total_token_usage":{"input_tokens":9433942,"cached_input_tokens":8803968,
+//        "output_tokens":28055,"reasoning_output_tokens":20160,"total_tokens":9461997},
+//      "last_token_usage":{...},"model_context_window":272000}}}
+//
+// Two facts drive the parser:
+//   1. `total_token_usage` is CUMULATIVE for the whole session, so we take the
+//      FINAL such record rather than summing lines (summing would multiply the
+//      real spend by the number of token_count events). `info` is `null` on the
+//      first event and possibly others — those records are skipped.
+//   2. Codex/OpenAI `input_tokens` INCLUDES cached input, the opposite of the
+//      Anthropic basis. We subtract `cached_input_tokens` (or
+//      `input_tokens_details.cached_tokens`) to land on the same
+//      cache-read-EXCLUDED basis the server calibrates on. `output_tokens`
+//      already includes `reasoning_output_tokens`, so it is used as-is.
 import { existsSync, readFileSync } from "node:fs";
 
 export interface TranscriptTotals {
@@ -14,8 +29,12 @@ export interface TranscriptTotals {
 
 /**
  * Best-effort parse of a Codex rollout JSONL transcript to total session-level
- * input / output tokens. Returns `null` if we can't be confident — callers
- * MUST NOT submit actuals without real token counts.
+ * input / output tokens on the cache-read-excluded basis. Returns the FINAL
+ * cumulative `token_count` total, or `null` if no such record is present — a
+ * shape we don't recognize fails closed rather than emitting a wrong count.
+ *
+ * Returning `null` is load-bearing: callers MUST NOT submit actuals without
+ * real token counts.
  */
 export function readTranscriptTotals(path: string): TranscriptTotals | null {
   if (!existsSync(path)) return null;
@@ -27,9 +46,8 @@ export function readTranscriptTotals(path: string): TranscriptTotals | null {
   }
   if (raw.trim().length === 0) return null;
 
-  let tokensIn = 0;
-  let tokensOut = 0;
-  let foundAny = false;
+  // Cumulative: keep the LAST record that carries real totals.
+  let latest: TranscriptTotals | null = null;
 
   for (const line of raw.split("\n")) {
     const trimmed = line.trim();
@@ -40,48 +58,53 @@ export function readTranscriptTotals(path: string): TranscriptTotals | null {
     } catch {
       continue;
     }
-    const totals = extractTotals(parsed);
-    if (totals) {
-      tokensIn += totals.tokensIn;
-      tokensOut += totals.tokensOut;
-      foundAny = true;
-    }
+    if (parsed === null || typeof parsed !== "object") continue;
+    const totals = tokenCountTotals(parsed as Record<string, unknown>);
+    if (totals !== null) latest = totals;
   }
 
-  if (!foundAny) return null;
-  return { tokensIn, tokensOut };
+  return latest;
 }
 
-interface Usage {
-  input_tokens?: unknown;
-  output_tokens?: unknown;
-  cache_creation_input_tokens?: unknown;
-  cache_read_input_tokens?: unknown;
+/**
+ * Extract the cache-excluded totals from a `token_count` event's cumulative
+ * `total_token_usage`, or `null` when the line is not such an event (or its
+ * `info` is `null`). Only the strict, confirmed shape is accepted.
+ */
+function tokenCountTotals(
+  obj: Record<string, unknown>,
+): TranscriptTotals | null {
+  if (obj.type !== "event_msg") return null;
+  const payload = obj.payload;
+  if (payload === null || typeof payload !== "object") return null;
+  const p = payload as Record<string, unknown>;
+  if (p.type !== "token_count") return null;
+  const info = p.info;
+  if (info === null || typeof info !== "object") return null;
+  const usage = (info as Record<string, unknown>).total_token_usage;
+  if (usage === null || typeof usage !== "object") return null;
+  return usageTotals(usage as Record<string, unknown>);
 }
 
-function extractTotals(value: unknown): TranscriptTotals | null {
-  if (value === null || typeof value !== "object") return null;
-  const obj = value as Record<string, unknown>;
-
-  const usage = findUsage(obj);
-  if (!usage) return null;
-
-  const inT = toFiniteNonNeg(usage.input_tokens);
-  const outT = toFiniteNonNeg(usage.output_tokens);
-  if (inT === null && outT === null) return null;
-  return { tokensIn: inT ?? 0, tokensOut: outT ?? 0 };
+function usageTotals(u: Record<string, unknown>): TranscriptTotals | null {
+  const input = toFiniteNonNeg(u.input_tokens);
+  const output = toFiniteNonNeg(u.output_tokens);
+  if (input === null && output === null) return null;
+  // input_tokens INCLUDES cached input → subtract to reach the cache-excluded
+  // basis. Clamp at 0 so a malformed record can never yield a negative count.
+  const cached = toFiniteNonNeg(cachedInputTokens(u)) ?? 0;
+  const tokensIn = Math.max(0, (input ?? 0) - cached);
+  return { tokensIn, tokensOut: output ?? 0 };
 }
 
-function findUsage(obj: Record<string, unknown>): Usage | null {
-  if (obj.usage && typeof obj.usage === "object") {
-    return obj.usage as Usage;
+/** The cached-input figure, from either the rollout field or the API-shaped nesting. */
+function cachedInputTokens(u: Record<string, unknown>): unknown {
+  if (u.cached_input_tokens !== undefined) return u.cached_input_tokens;
+  const details = u.input_tokens_details;
+  if (details !== null && typeof details === "object") {
+    return (details as Record<string, unknown>).cached_tokens;
   }
-  const message = obj.message;
-  if (message && typeof message === "object") {
-    const inner = (message as Record<string, unknown>).usage;
-    if (inner && typeof inner === "object") return inner as Usage;
-  }
-  return null;
+  return undefined;
 }
 
 function toFiniteNonNeg(v: unknown): number | null {
