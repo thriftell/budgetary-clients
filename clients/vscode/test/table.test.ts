@@ -47,6 +47,61 @@ describe("renderRecentTable", () => {
     expect(renderRecentTable([])).toContain("No estimates yet");
   });
 
+  it("shows a p10–p90 range column with the predicted band", () => {
+    const html = renderRecentTable([
+      entry("est_x", "2026-05-27T10:14:00Z", 100),
+    ]);
+    expect(html).toContain("Range (p10–p90)");
+    // The fixture's predicted band is { p10: 1, p50: 2, p90: 3 }.
+    expect(html).toContain("1–3");
+  });
+
+  it("shows When + Query columns and a humanized scenario label", () => {
+    const html = renderRecentTable([
+      { ...entry("est_q", "2026-05-27T10:14:00Z", 100, "sparse_evidence"), queryExcerpt: "refactor the payments module" },
+    ]);
+    expect(html).toContain("<th scope=\"col\">When</th>");
+    expect(html).toContain("<th scope=\"col\">Query</th>");
+    expect(html).toContain("refactor the payments module");
+    // formatTimestamp renders the createdAt (dead code before this).
+    expect(html).toContain("2026-05");
+    // Scenario is humanized for display (raw stays only in the class hook).
+    expect(html).toContain(">sparse evidence</td>");
+    expect(html).toContain("b-scenario-sparse_evidence");
+  });
+
+  it("notes the 50-row cap in the caption only when the cap is reached", () => {
+    const few = renderRecentTable([entry("e1", "2026-05-27T10:14:00Z", 100)]);
+    expect(few).not.toContain("most recent");
+
+    const many = Array.from({ length: 50 }, (_, i) =>
+      entry(`e${i}`, "2026-05-27T10:14:00Z", 100),
+    );
+    expect(renderRecentTable(many)).toContain("Showing the 50 most recent");
+  });
+
+  it("has a caption, scope=col headers, and a Result column with accessible glyphs", () => {
+    const done = renderRecentTable([
+      entry("est_ok", "2026-05-27T10:14:00Z", 100),
+    ]);
+    expect(done).toContain("<caption");
+    expect(done).toContain('scope="col"');
+    expect(done).toContain("Result");
+    expect(done).not.toContain("<th>Done</th>");
+    // A succeeded run's glyph carries an accessible label.
+    expect(done).toContain('aria-label="succeeded"');
+
+    const pending = renderRecentTable([
+      entry("est_pending", "2026-05-27T10:14:00Z", null),
+    ]);
+    expect(pending).toContain('aria-label="pending"');
+
+    const failed = renderRecentTable([
+      { ...entry("est_fail", "2026-05-27T10:14:00Z", 100), actual: { tokensIn: 1, tokensOut: 1, total: 100, durationMs: 1, success: false } },
+    ]);
+    expect(failed).toContain('aria-label="failed"');
+  });
+
   it("escapes a markup-shaped scenario", () => {
     const html = renderRecentTable([
       entry("est_x", "2026-05-27T10:14:00Z", 100, "<b>x</b>"),

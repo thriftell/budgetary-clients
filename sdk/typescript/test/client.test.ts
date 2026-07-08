@@ -248,3 +248,14 @@ describe("BudgetaryClient base URL normalization", () => {
     expect(handle.requests[0]!.url).toBe(`${TEST_BASE_URL}/v1/estimate`);
   });
 });
+
+describe("BudgetaryClient constructor validation", () => {
+  it("throws on a missing / empty / whitespace apiKey", () => {
+    expect(() => new BudgetaryClient({ apiKey: "" })).toThrow(/apiKey/);
+    expect(() => new BudgetaryClient({ apiKey: "   " })).toThrow(/apiKey/);
+  });
+
+  it("accepts a non-empty apiKey", () => {
+    expect(() => new BudgetaryClient({ apiKey: "bg_test_x" })).not.toThrow();
+  });
+});

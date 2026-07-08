@@ -35,13 +35,14 @@ function entry(
   };
 }
 
-function countCircles(svg: string): number {
-  const matches = svg.match(/<circle\b/g);
+// Each data point is one translated marker group `<g transform="translate(…)">`.
+function countMarkers(svg: string): number {
+  const matches = svg.match(/<g transform="translate\(/g);
   return matches ? matches.length : 0;
 }
 
 describe("renderCalibrationChart", () => {
-  it("renders one <circle> per plottable entry", () => {
+  it("renders one marker per plottable entry", () => {
     const entries = [
       entry("e1", "confident", 1_000, 1_200),
       entry("e2", "uncertain", 5_000, 12_000),
@@ -49,7 +50,7 @@ describe("renderCalibrationChart", () => {
       entry("e4", "confident", 80_000, 75_000),
     ];
     const svg = renderCalibrationChart(entries);
-    expect(countCircles(svg)).toBe(4);
+    expect(countMarkers(svg)).toBe(4);
   });
 
   it("drops entries with no actuals or with zero/negative tokens", () => {
@@ -61,7 +62,7 @@ describe("renderCalibrationChart", () => {
       entry("e5", "confident", 1_000, 1_500),
     ];
     const svg = renderCalibrationChart(entries);
-    expect(countCircles(svg)).toBe(2);
+    expect(countMarkers(svg)).toBe(2);
   });
 
   it("includes a y=x reference line on log-log scale", () => {
@@ -76,7 +77,9 @@ describe("renderCalibrationChart", () => {
   it("renders the empty-state message when fewer than 2 points are plottable", () => {
     const empty = renderCalibrationChart([]);
     expect(empty).toContain("No calibration data yet");
-    expect(countCircles(empty)).toBe(0);
+    // The message is the accessible name too (a screen reader reads the guidance).
+    expect(empty).toContain('aria-label="No calibration data yet');
+    expect(countMarkers(empty)).toBe(0);
 
     const onePoint = renderCalibrationChart([
       entry("e1", "confident", 1_000, 1_200),
@@ -84,7 +87,40 @@ describe("renderCalibrationChart", () => {
     // One point is not "no data" — the message says so honestly now.
     expect(onePoint).toContain("at least 2 are needed");
     expect(onePoint).not.toContain("No calibration data yet");
-    expect(countCircles(onePoint)).toBe(0);
+    expect(countMarkers(onePoint)).toBe(0);
+  });
+
+  it("distinguishes scenarios by SHAPE, not color alone (non-color channel)", () => {
+    const svg = renderCalibrationChart([
+      entry("e1", "confident", 1_000, 1_200), // circle
+      entry("e2", "uncertain", 5_000, 6_000), // triangle (polygon)
+      entry("e3", "sparse_evidence", 20_000, 22_000), // square (rect)
+    ]);
+    // A marker circle, a polygon (triangle), and a rect (square) all appear.
+    expect(svg).toMatch(/<g transform="translate\([^)]*\)"><circle\b/);
+    expect(svg).toContain("<polygon");
+    expect(svg).toMatch(/<g transform="translate\([^)]*\)"><rect\b/);
+  });
+
+  it("labels the data-bearing chart and points at a described-by summary", () => {
+    const svg = renderCalibrationChart([
+      entry("e1", "confident", 1_000, 1_200),
+      entry("e2", "uncertain", 10_000, 12_000),
+    ]);
+    expect(svg).toContain('aria-label="Calibration scatter plot of 2');
+    expect(svg).toContain('aria-describedby="b-chart-summary"');
+  });
+
+  it("draws a p10–p90 whisker per point and carries the range in the tooltip", () => {
+    const svg = renderCalibrationChart([
+      entry("e1", "confident", 1_000, 1_200),
+      entry("e2", "uncertain", 10_000, 12_000),
+    ]);
+    // Each whisker is a horizontal band line (round caps, 0.35 opacity).
+    const whiskers = svg.match(/<line[^>]*stroke-linecap="round"[^>]*opacity="0.35"/g) ?? [];
+    expect(whiskers.length).toBe(2);
+    // The band, not just the point, reaches the tooltip.
+    expect(svg).toContain("p10–p90");
   });
 
   it("colors points per scenario", () => {
@@ -106,12 +142,11 @@ describe("renderCalibrationChart", () => {
       entry("e2", "uncertain", 50_000, 60_000),
     ];
     const svg = renderCalibrationChart(entries);
-    const xs = Array.from(svg.matchAll(/cx="(\d+(?:\.\d+)?)"/g)).map((m) =>
-      Number(m[1]),
+    const coords = Array.from(
+      svg.matchAll(/<g transform="translate\((\d+(?:\.\d+)?) (\d+(?:\.\d+)?)\)"/g),
     );
-    const ys = Array.from(svg.matchAll(/cy="(\d+(?:\.\d+)?)"/g)).map((m) =>
-      Number(m[1]),
-    );
+    const xs = coords.map((m) => Number(m[1]));
+    const ys = coords.map((m) => Number(m[2]));
     expect(xs.length).toBe(2);
     expect(ys.length).toBe(2);
     for (const x of xs) {

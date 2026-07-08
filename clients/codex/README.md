@@ -35,8 +35,12 @@ export BUDGETARY_API_KEY=bg_live_...
 
 # or, persistently (recommended for Codex, independent of the launching shell):
 mkdir -p ~/.budgetary
-echo '{ "api_key": "bg_live_..." }' > ~/.budgetary/config.json
+# Write the key with an EDITOR so it never lands in your shell history:
+"${EDITOR:-nano}" ~/.budgetary/config.json   # add: { "api_key": "bg_live_..." }
+chmod 600 ~/.budgetary/config.json            # owner-only
 ```
+
+> Avoid `echo '{ "api_key": "bg_live_..." }' > ~/.budgetary/config.json` — that records the secret in your shell history. Use an editor (above), and `chmod 600` the file so it isn't world-readable.
 
 If no key is configured, the `estimate` tool returns a short configure-your-key hint instead of an estimate — it never calls the API and never crashes Codex. The API key never appears in `pending.json`, in stdout, or in any error message.
 
@@ -47,18 +51,28 @@ The plugin ships one skill, `estimate`, which calls the `estimate` MCP tool. Inv
 Sample output:
 
 ```text
-Estimated cost: 48,000 tokens (p10–p90: 12,500–220,000)
-Scenario: confident   (confidence 0.74)
+Estimated cost: ~48,000 tokens (range 12,500–220,000, p10–p90)
+Scenario: confident — well-supported, the range is reliable.
+Confidence: 0.74 (moderate)
 Model: gpt-5.4
 
 Pending estimate stored.
+```
+
+A low-confidence estimate leads with the range and a caution instead of a precise-looking number:
+
+```text
+Estimated range: 12,500–220,000 tokens (p10–p90), midpoint ~48,000
+⚠ Wide range — treat the midpoint as a rough guess, not a number to rely on.
+Scenario: uncertain — supported, but the range is wide.
+Confidence: 0.35 (low)
 ```
 
 Out-of-domain queries return a void response:
 
 ```text
 Budgetary cannot confidently estimate this query (out of domain).
-No charge — proceed at your own risk.
+This estimate wasn't billed. Proceed without a prediction — at your own judgment.
 ```
 
 ## How telemetry works

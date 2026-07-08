@@ -47,6 +47,13 @@ export class BudgetaryClient {
   private readonly http: HttpClient;
 
   constructor(opts: BudgetaryClientOptions) {
+    // Fail fast on a missing key rather than sending `Bearer ` and surfacing an
+    // opaque 401 on the first call.
+    if (typeof opts.apiKey !== "string" || opts.apiKey.trim().length === 0) {
+      throw new Error(
+        "BudgetaryClient: `apiKey` is required — pass a non-empty Budgetary API key.",
+      );
+    }
     const config: HttpClientConfig = {
       apiKey: opts.apiKey,
       baseUrl: opts.baseUrl ?? DEFAULT_BASE_URL,

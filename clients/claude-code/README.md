@@ -51,7 +51,7 @@ You can tag each estimate with the language you're working in so your estimate h
 
 It's a free-form display name (`TypeScript`, `Python`, `Go`, …) that the server tidies up. Like the host tag, you **declare** it in the environment — the model never sets it, it's never guessed from your task, and there is no `language` argument on the `estimate` tool. It's entirely optional: leave it unset and estimates are recorded without a language.
 
-> It is deliberately **not** an install-time plugin setting. Claude Code requires every declared plugin config value to be present at launch, so an optional language wired that way would block the whole session whenever it was left blank. Reading it from the environment / config keeps it fail-open. (A plain MCP server also can't see which file you have open — only the messages Claude Code sends it — so a declared per-session value is the signal it can rely on.)
+> It is deliberately **not** a plugin config field. A plugin config a host treats as required would block the whole session whenever it was left blank; `language` is instead read from the environment / config file so it is always optional and fail-open. (The `api_key` field above is likewise optional — declared **without** `required`, so a bare install with a blank prompt still runs and resolves the key from `BUDGETARY_API_KEY` or `~/.budgetary/config.json`, or prints the configure-key hint if there is none.) A plain MCP server also can't see which file you have open — only the messages Claude Code sends it — so a declared per-session value is the signal it can rely on.
 
 ## Commands
 
@@ -60,19 +60,29 @@ It's a free-form display name (`TypeScript`, `Python`, `Go`, …) that the serve
 ```text
 /estimate refactor the payments module to remove the legacy webhook handler
 
-Estimated cost: 48,000 tokens (p10–p90: 12,500–220,000)
-Scenario: confident   (confidence 0.74)
+Estimated cost: ~48,000 tokens (range 12,500–220,000, p10–p90)
+Scenario: confident — well-supported, the range is reliable.
+Confidence: 0.74 (moderate)
 Model: claude-opus-4-7
 
 Pending estimate stored. Run the task and Budgetary will record the actuals
 when the session ends.
 ```
 
+A low-confidence estimate leads with the range and a caution instead of a precise-looking number:
+
+```text
+Estimated range: 12,500–220,000 tokens (p10–p90), midpoint ~48,000
+⚠ Wide range — treat the midpoint as a rough guess, not a number to rely on.
+Scenario: uncertain — supported, but the range is wide.
+Confidence: 0.35 (low)
+```
+
 Out-of-domain queries return a void response:
 
 ```text
 Budgetary cannot confidently estimate this query (out of domain).
-No charge — proceed at your own risk.
+This estimate wasn't billed. Proceed without a prediction — at your own judgment.
 ```
 
 The slash command and the model-invokable `estimate` tool are the same path: both call the Budgetary API, print the estimate verbatim, and append a pending entry to `~/.budgetary/pending.json`.

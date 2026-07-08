@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -11,13 +12,35 @@ import {
 import {
   runAutoActuals,
   runManualActuals,
+  runPendingList,
   runRolloutActuals,
   type SessionEndPayload,
 } from "./actuals.js";
 import { runEstimateTool } from "./tools/estimate.js";
 
 const SERVER_NAME = "budgetary";
-const SERVER_VERSION = "0.0.0";
+
+/**
+ * The handshake version, read from the package's own package.json so it always
+ * matches the published `@budgetary/mcp` rather than drifting from a hard-coded
+ * literal. `src/server.ts` and `dist/server.js` are both one level below the
+ * package root, so `../package.json` resolves in both. Falls back to `0.0.0` if
+ * it can't be read (never throws at import time).
+ */
+function readServerVersion(): string {
+  try {
+    const pkg = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { version?: unknown };
+    return typeof pkg.version === "string" && pkg.version.length > 0
+      ? pkg.version
+      : "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
+export const SERVER_VERSION = readServerVersion();
 
 /** The one and only model-invokable tool name. */
 export const TOOL_NAME = "estimate";
@@ -116,6 +139,7 @@ async function runReportActualCli(): Promise<number> {
   try {
     return await runManualActuals({
       env: process.env,
+      cwd: process.cwd(),
       out: (line) => process.stdout.write(`${line}\n`),
       prompt: (question) => rl.question(question),
     });
@@ -221,15 +245,25 @@ async function runOnSessionEndCli(rest: string[]): Promise<number> {
   });
 }
 
+function runPendingCli(): number {
+  return runPendingList({
+    env: process.env,
+    cwd: process.cwd(),
+    out: (line) => process.stdout.write(`${line}\n`),
+  });
+}
+
 /**
  * CLI entry point. Subcommands:
  *   (none)                        → run the MCP stdio server (returns null: do not exit)
+ *   pending                       → list pending estimates awaiting actuals (read-only)
  *   report-actual                 → manual, human-entered actuals
  *   on-session-end                → auto actuals from a session-end payload on stdin (hook)
  *   on-session-end --transcript P → submit actuals from a rollout/transcript file P
  */
 export async function main(argv: string[]): Promise<number | null> {
   const sub = argv[0];
+  if (sub === "pending") return runPendingCli();
   if (sub === "report-actual") return runReportActualCli();
   if (sub === "on-session-end") return runOnSessionEndCli(argv.slice(1));
   await runStdioServer();

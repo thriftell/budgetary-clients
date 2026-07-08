@@ -13,6 +13,7 @@ import { BudgetaryError } from "@budgetary/sdk";
 import {
   runAutoActuals,
   runManualActuals,
+  runPendingList,
   runRolloutActuals,
   submitActuals,
   type ActualCounts,
@@ -194,7 +195,7 @@ describe("runManualActuals", () => {
     expect(out.join("\n")).toContain("Actuals submitted");
   });
 
-  it("rejects non-integer token counts without submitting", async () => {
+  it("rejects non-integer token counts (after re-prompting) without submitting", async () => {
     writePending(home, {
       version: 1,
       entries: [
@@ -208,15 +209,175 @@ describe("runManualActuals", () => {
       env: ENV,
       home,
       out: (l) => out.push(l),
-      prompt: scriptedPrompt(["not-a-number", "36210", "y", ""]),
+      // Three invalid answers exhaust the re-prompt retries.
+      prompt: scriptedPrompt(["nope", "still-bad", "x"]),
       clientFactory: () => asClient(fake),
     });
 
     expect(code).toBe(2);
     expect(fake.submitActuals).not.toHaveBeenCalled();
-    // Entry left untouched.
     expect(readPending(home).entries).toHaveLength(1);
     expect(out.join("\n")).toContain("non-negative whole number");
+  });
+
+  it("accepts comma-grouped numbers like 48,000", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_commas", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient();
+    const out: string[] = [];
+
+    const code = await runManualActuals({
+      env: ENV,
+      home,
+      out: (l) => out.push(l),
+      prompt: scriptedPrompt(["48,000", "12,500", "y", "420,000"]),
+      clientFactory: () => asClient(fake),
+    });
+
+    expect(code).toBe(0);
+    const sent = fake.submitActuals.mock.calls[0]![0];
+    expect(sent.tokensIn).toBe(48000);
+    expect(sent.tokensOut).toBe(12500);
+    expect(sent.durationMs).toBe(420000);
+  });
+
+  it("rejects malformed grouping (1,2,3) rather than coercing it to 123", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_mal", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient();
+    const out: string[] = [];
+
+    const code = await runManualActuals({
+      env: ENV,
+      home,
+      out: (l) => out.push(l),
+      // "1,2,3" is not a well-formed grouped number; three of them exhaust retries.
+      prompt: scriptedPrompt(["1,2,3", "1,2,3", "1,2,3"]),
+      clientFactory: () => asClient(fake),
+    });
+
+    expect(code).toBe(2);
+    expect(fake.submitActuals).not.toHaveBeenCalled();
+  });
+
+  it("checks the API key BEFORE prompting for counts", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_nokey", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient();
+    const out: string[] = [];
+    let prompted = false;
+
+    const code = await runManualActuals({
+      env: {} as NodeJS.ProcessEnv, // no key anywhere
+      home,
+      out: (l) => out.push(l),
+      prompt: async () => {
+        prompted = true;
+        return "1";
+      },
+      clientFactory: () => asClient(fake),
+    });
+
+    expect(code).toBe(1);
+    expect(prompted).toBe(false); // never asked for counts
+    expect(out.join("\n")).toContain("no API key");
+    expect(fake.submitActuals).not.toHaveBeenCalled();
+  });
+
+  it("scopes to THIS project's estimate when a cwd is given", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_mine", query: "mine", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_other", query: "other", project_id: "0000000other0000", created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient();
+    const out: string[] = [];
+
+    await runManualActuals({
+      env: ENV,
+      home,
+      cwd,
+      out: (l) => out.push(l),
+      prompt: scriptedPrompt(["1", "2", "y", ""]),
+      clientFactory: () => asClient(fake),
+    });
+
+    // The globally-newest is est_other, but project binding closes est_mine.
+    expect(fake.submitActuals.mock.calls[0]![0].estimateId).toBe("est_mine");
+    expect(readPending(home).entries.map((e) => e.estimate_id)).toEqual(["est_other"]);
+  });
+
+  it("keeps the entry on a user-fixable rejection (403), advising a fix not a retry", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_403", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient(async () => {
+      throw new BudgetaryError({ code: "permission_denied", message: "no active plan", httpStatus: 403, requestId: "r" });
+    });
+    const out: string[] = [];
+
+    const code = await runManualActuals({
+      env: ENV,
+      home,
+      out: (l) => out.push(l),
+      prompt: scriptedPrompt(["1", "2", "y", ""]),
+      clientFactory: () => asClient(fake),
+    });
+
+    expect(code).toBe(1);
+    const text = out.join("\n");
+    expect(text).toContain("rejected");
+    expect(text.toLowerCase()).not.toContain("try again");
+    expect(text).toContain("Fix your");
+    // Fixing the plan lets the same submit succeed — the entry survives, unbumped.
+    const entries = readPending(home).entries;
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.attempts).toBe(0);
+  });
+
+  it("discards the entry on a terminal rejection (400/404) so the queue can drain", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_gone", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient(async () => {
+      throw new BudgetaryError({ code: "not_found", message: "estimate not found", httpStatus: 404, requestId: "r" });
+    });
+    const out: string[] = [];
+
+    const code = await runManualActuals({
+      env: ENV,
+      home,
+      out: (l) => out.push(l),
+      prompt: scriptedPrompt(["1", "2", "y", ""]),
+      clientFactory: () => asClient(fake),
+    });
+
+    expect(code).toBe(1);
+    const text = out.join("\n");
+    expect(text).toContain("discarded");
+    expect(text.toLowerCase()).not.toContain("try again");
+    // A terminal rejection must not pin the queue — the entry is dropped.
+    expect(readPending(home).entries).toEqual([]);
   });
 
   it("keeps the entry and increments attempts on a single submit failure", async () => {
@@ -290,6 +451,34 @@ describe("runManualActuals", () => {
     expect(code).toBe(0);
     expect(fake.submitActuals).not.toHaveBeenCalled();
     expect(out.join("\n")).toContain("No pending");
+  });
+});
+
+describe("runPendingList", () => {
+  it("says the loop is closed when there are no pending estimates", () => {
+    writePending(home, { version: 1, entries: [] });
+    const out: string[] = [];
+    const code = runPendingList({ env: ENV, home, out: (l) => out.push(l) });
+    expect(code).toBe(0);
+    expect(out.join("\n")).toContain("loop is closed");
+  });
+
+  it("lists pending estimates and marks the ones for this project", () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_mine", query: "refactor the parser", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_other", query: "another project task", project_id: "0000000other0000", created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const out: string[] = [];
+    const code = runPendingList({ env: ENV, home, cwd, now: () => NOW, out: (l) => out.push(l) });
+    expect(code).toBe(0);
+    const text = out.join("\n");
+    expect(text).toContain("2 pending Budgetary estimates");
+    expect(text).toContain("refactor the parser");
+    expect(text).toContain("(this project)");
+    expect(text).toContain("report-actual");
   });
 });
 
@@ -563,7 +752,7 @@ describe("submitActuals — outcome", () => {
     expect(outcome).toMatchObject({ submitted: true, retryable: false, gaveUp: false });
   });
 
-  it("returns retryable:false for a 4xx rejection", async () => {
+  it("returns terminal:true and drops the entry for a terminal 4xx (400/404)", async () => {
     const { store, entry } = oneEntryStore();
     const fake = makeFakeClient(async () => {
       throw new BudgetaryError({ code: "invalid_request", message: "bad", httpStatus: 400, requestId: "r" });
@@ -571,6 +760,20 @@ describe("submitActuals — outcome", () => {
     const outcome = await submitActuals({ store, client: asClient(fake), entry, counts });
     expect(outcome.submitted).toBe(false);
     expect(outcome.retryable).toBe(false);
+    expect(outcome.terminal).toBe(true);
+    expect(store.read().entries).toEqual([]); // dropped so it can't block the queue
+  });
+
+  it("keeps the entry (terminal:false) for a user-fixable 401/403", async () => {
+    const { store, entry } = oneEntryStore();
+    const fake = makeFakeClient(async () => {
+      throw new BudgetaryError({ code: "authentication_failed", message: "bad key", httpStatus: 401, requestId: "r" });
+    });
+    const outcome = await submitActuals({ store, client: asClient(fake), entry, counts });
+    expect(outcome.submitted).toBe(false);
+    expect(outcome.retryable).toBe(false);
+    expect(outcome.terminal).toBe(false);
+    expect(store.read().entries).toHaveLength(1); // kept for the user to fix + resubmit
   });
 
   it("returns retryable:true for a 5xx", async () => {
@@ -640,6 +843,45 @@ describe("runAutoActuals", () => {
     // An empty trace is never attached.
     expect(sent.trace).toBeUndefined();
     expect(readPending(home).entries).toEqual([]);
+  });
+
+  it("warns (does not silently drop) when the server terminally rejects an auto actual", async () => {
+    // INV-2: a terminal 4xx drops the entry to drain the queue, but this silent
+    // hook path must leave a signal rather than lose a measured actual quietly.
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_4xx", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient(async () => {
+      throw new BudgetaryError({
+        code: "not_found",
+        message: "estimate_id not visible to this key",
+        httpStatus: 404,
+        requestId: "r",
+      });
+    });
+    const errs: string[] = [];
+
+    const code = await runAutoActuals({
+      payload: PAYLOAD,
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      stderr: { write: (s) => errs.push(s) },
+      clientFactory: () => asClient(fake),
+      readUsage: () => ({ tokensIn: 5, tokensOut: 5, trace: [] }),
+    });
+
+    expect(code).toBe(0);
+    // The entry is dropped (queue-drain)...
+    expect(readPending(home).entries).toEqual([]);
+    // ...but NOT silently — the rejection is surfaced on stderr.
+    const text = errs.join("");
+    expect(text).toContain("rejected actuals for est_4xx");
+    expect(text).toContain("dropped");
   });
 
   it("closes only THIS session's estimate even when another project's entry is newer", async () => {

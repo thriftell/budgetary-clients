@@ -10,10 +10,11 @@ import type {
 } from "@budgetary/sdk";
 import {
   BudgetaryAuthError,
+  BudgetaryError,
   BudgetaryRateLimitError,
 } from "@budgetary/sdk";
 
-import { runEstimateTool } from "../src/tools/estimate.js";
+import { projectIdFromCwd, runEstimateTool } from "../src/tools/estimate.js";
 
 interface FakeClient {
   estimate: ReturnType<typeof vi.fn>;
@@ -103,8 +104,11 @@ describe("runEstimateTool — happy path", () => {
     expect(opts.context.host).toBe("claude-code");
     expect(opts.context.projectId).toMatch(/^[0-9a-f]{16}$/);
 
-    expect(result.text).toContain("Estimated cost: 48,000 tokens");
-    expect(result.text).toContain("p10–p90: 12,500–220,000");
+    // Confident → point-led, but the range is always shown (band, not a point).
+    expect(result.text).toContain("Estimated cost:");
+    expect(result.text).toContain("48,000");
+    expect(result.text).toContain("12,500–220,000");
+    expect(result.text).toContain("p10–p90");
     expect(result.text).toContain("Scenario: confident");
     expect(result.text).toContain("Pending estimate stored");
     // Never leak the key.
@@ -253,6 +257,159 @@ describe("runEstimateTool — 429 rate limit", () => {
     expect(result.isError).toBe(true);
     expect(result.text).toContain("rate limit");
     expect(result.text).toContain("30 seconds");
+  });
+});
+
+describe("runEstimateTool — honest failures & host-aware onboarding", () => {
+  it("413: renders a rejection + the fix, not 'couldn't be reached'", async () => {
+    const fake = makeFakeClient(async () => {
+      throw new BudgetaryError({
+        code: "payload_too_large",
+        message: "query exceeds 8000 characters",
+        httpStatus: 413,
+        requestId: "req_413",
+      });
+    });
+
+    const result = await runEstimateTool({
+      query: "way too long",
+      env: { BUDGETARY_API_KEY: "bg_test_dummy" } as NodeJS.ProcessEnv,
+      cwd,
+      home,
+      clientFactory: () => asClient(fake),
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("rejected the request");
+    expect(result.text).toContain("Shorten");
+    expect(result.text).not.toContain("couldn't be reached");
+  });
+
+  it("5xx: still advises retry (couldn't be reached)", async () => {
+    const fake = makeFakeClient(async () => {
+      throw new BudgetaryError({
+        code: "internal_error",
+        message: "boom",
+        httpStatus: 500,
+        requestId: "req_500",
+      });
+    });
+    const result = await runEstimateTool({
+      query: "x",
+      env: { BUDGETARY_API_KEY: "bg_test_dummy" } as NodeJS.ProcessEnv,
+      cwd,
+      home,
+      clientFactory: () => asClient(fake),
+    });
+    expect(result.text).toContain("couldn't be reached");
+  });
+
+  it("footer is host-aware: codex points at on-session-end --transcript", async () => {
+    const fake = makeFakeClient(async () => happyEstimate());
+    const result = await runEstimateTool({
+      query: "x",
+      env: { BUDGETARY_API_KEY: "bg_test_dummy", BUDGETARY_HOST: "codex" } as NodeJS.ProcessEnv,
+      cwd,
+      home,
+      clientFactory: () => asClient(fake),
+    });
+    expect(result.text).toContain("on-session-end --transcript");
+  });
+
+  it("footer is host-aware: claude-code mentions the plugin, default points at report-actual", async () => {
+    const fake = makeFakeClient(async () => happyEstimate());
+    const cc = await runEstimateTool({
+      query: "x",
+      env: { BUDGETARY_API_KEY: "bg_test_dummy", BUDGETARY_HOST: "claude-code" } as NodeJS.ProcessEnv,
+      cwd,
+      home,
+      clientFactory: () => asClient(fake),
+    });
+    expect(cc.text).toContain("Budgetary plugin");
+
+    const other = await runEstimateTool({
+      query: "x",
+      env: { BUDGETARY_API_KEY: "bg_test_dummy" } as NodeJS.ProcessEnv, // host defaults to mcp
+      cwd: mkdtempSync(join(tmpdir(), "budgetary-cwd2-")),
+      home: mkdtempSync(join(tmpdir(), "budgetary-home2-")),
+      clientFactory: () => asClient(fake),
+    });
+    expect(other.text).toContain("report-actual");
+    expect(other.text).not.toContain("on-session-end --transcript");
+  });
+
+  it("does NOT claim 'stored' when the pending store is unwritable", async () => {
+    // A foreign top-level shape makes the store unwritable (won't clobber it),
+    // so append is refused and the footer must be honest.
+    mkdirSync(join(home, ".budgetary"), { recursive: true });
+    writeFileSync(join(home, ".budgetary", "pending.json"), JSON.stringify({ version: 99 }), "utf8");
+    const fake = makeFakeClient(async () => happyEstimate());
+
+    const result = await runEstimateTool({
+      query: "x",
+      env: { BUDGETARY_API_KEY: "bg_test_dummy" } as NodeJS.ProcessEnv,
+      cwd,
+      home,
+      clientFactory: () => asClient(fake),
+    });
+
+    expect(result.isError).toBe(false);
+    expect(result.text).not.toContain("Pending estimate stored");
+    expect(result.text).toContain("Couldn't save");
+  });
+
+  it("no-key guidance is host-aware on claude-code (/plugin configure)", async () => {
+    const fake = makeFakeClient(async () => happyEstimate());
+    const result = await runEstimateTool({
+      query: "x",
+      env: { BUDGETARY_HOST: "claude-code" } as NodeJS.ProcessEnv,
+      cwd,
+      home,
+      clientFactory: () => asClient(fake),
+    });
+    expect(fake.estimate).not.toHaveBeenCalled();
+    expect(result.text).toContain("/plugin configure budgetary@budgetary");
+  });
+
+  it("nudges when earlier estimates for this project still await actuals", async () => {
+    // Pre-seed an older pending estimate for the same project.
+    mkdirSync(join(home, ".budgetary"), { recursive: true });
+    writeFileSync(
+      join(home, ".budgetary", "pending.json"),
+      JSON.stringify({
+        version: 1,
+        entries: [
+          { estimate_id: "est_old", query: "earlier task", project_id: projectIdFromCwd(cwd), created_at: "2026-05-27T09:00:00Z", attempts: 0 },
+        ],
+      }),
+      "utf8",
+    );
+    const fake = makeFakeClient(async () => happyEstimate());
+    const result = await runEstimateTool({
+      query: "new task",
+      env: { BUDGETARY_API_KEY: "bg_test_dummy" } as NodeJS.ProcessEnv,
+      cwd,
+      home,
+      clientFactory: () => asClient(fake),
+    });
+    expect(result.text).toContain("still await actuals");
+    expect(result.text).toContain("pending");
+  });
+
+  it("distinguishes an unreadable config from no key at all", async () => {
+    mkdirSync(join(home, ".budgetary"), { recursive: true });
+    writeFileSync(join(home, ".budgetary", "config.json"), "{ not json", "utf8");
+    const fake = makeFakeClient(async () => happyEstimate());
+
+    const result = await runEstimateTool({
+      query: "x",
+      env: {} as NodeJS.ProcessEnv,
+      cwd,
+      home,
+      clientFactory: () => asClient(fake),
+    });
+    expect(fake.estimate).not.toHaveBeenCalled();
+    expect(result.text).toContain("couldn't read it");
   });
 });
 

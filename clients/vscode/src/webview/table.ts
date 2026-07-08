@@ -1,10 +1,24 @@
 import type { LedgerEntry } from "@budgetary/sdk";
 
-import { escapeHtml, formatTokens, truncateEstimateId } from "../format";
+import {
+  escapeHtml,
+  formatTimestamp,
+  formatTokens,
+  truncateEstimateId,
+} from "../format";
+import { scenarioLabel } from "./scenario";
 
-function donelyCell(entry: LedgerEntry): string {
-  if (entry.actual === null) return "—";
-  return entry.actual.success ? "✓" : "✗";
+/** How many rows the dashboard fetches (getLedger limit); shown in the caption. */
+const ROW_CAP = 50;
+const QUERY_MAX = 48;
+
+function resultCell(entry: LedgerEntry): string {
+  // A glyph with an accessible label, so a screen reader announces the outcome
+  // instead of an ambiguous symbol.
+  if (entry.actual === null) return `<span aria-label="pending">○</span>`;
+  return entry.actual.success
+    ? `<span aria-label="succeeded">✓</span>`
+    : `<span aria-label="failed">✗</span>`;
 }
 
 function predictedCell(entry: LedgerEntry): string {
@@ -12,20 +26,42 @@ function predictedCell(entry: LedgerEntry): string {
   return formatTokens(entry.predicted.p50);
 }
 
+function rangeCell(entry: LedgerEntry): string {
+  if (!entry.predicted) return "—";
+  const { p10, p90 } = entry.predicted;
+  if (!Number.isFinite(p10) || !Number.isFinite(p90) || p10 <= 0 || p90 <= 0) {
+    return "—";
+  }
+  // Order defensively so odd wire data never renders an inverted range (the
+  // chart clamps the same way).
+  return `${formatTokens(Math.min(p10, p90))}–${formatTokens(Math.max(p10, p90))}`;
+}
+
 function actualCell(entry: LedgerEntry): string {
   if (entry.actual === null) return "—";
   return formatTokens(entry.actual.total);
 }
 
+function queryCell(entry: LedgerEntry): string {
+  const q = entry.queryExcerpt ?? "";
+  if (q.length === 0) return "—";
+  const shown = q.length > QUERY_MAX ? `${q.slice(0, QUERY_MAX)}…` : q;
+  return escapeHtml(shown);
+}
+
 function row(entry: LedgerEntry): string {
   const id = escapeHtml(truncateEstimateId(entry.estimateId, 12));
-  const scenario = escapeHtml(entry.scenario);
+  // Humanized scenario for display; the raw value stays in the class hook.
+  const scenario = escapeHtml(scenarioLabel(entry.scenario));
   return `<tr>
+    <td class="b-cell-when">${escapeHtml(formatTimestamp(entry.createdAt))}</td>
+    <td class="b-cell-query">${queryCell(entry)}</td>
     <td class="b-cell-id">${id}</td>
     <td class="b-cell-num">${predictedCell(entry)}</td>
+    <td class="b-cell-num">${rangeCell(entry)}</td>
     <td class="b-cell-num">${actualCell(entry)}</td>
     <td class="b-cell-scenario b-scenario-${escapeHtml(entry.scenario)}">${scenario}</td>
-    <td class="b-cell-done">${donelyCell(entry)}</td>
+    <td class="b-cell-done">${resultCell(entry)}</td>
   </tr>`;
 }
 
@@ -48,14 +84,23 @@ export function renderRecentTable(entries: readonly LedgerEntry[]): string {
     return ta === tb ? 0 : tb - ta;
   });
 
+  // Honest about the cap: the dashboard fetches at most ROW_CAP rows, so when we
+  // render exactly that many there are likely older estimates not shown.
+  const capNote =
+    sorted.length >= ROW_CAP ? ` Showing the ${ROW_CAP} most recent.` : "";
+
   return `<table class="b-table">
+  <caption class="b-caption">Recent estimates — predicted vs. actual, newest first.${capNote}</caption>
   <thead>
     <tr>
-      <th>Estimate</th>
-      <th class="b-cell-num">Predicted p50</th>
-      <th class="b-cell-num">Actual</th>
-      <th>Scenario</th>
-      <th>Done</th>
+      <th scope="col">When</th>
+      <th scope="col">Query</th>
+      <th scope="col">Estimate</th>
+      <th scope="col" class="b-cell-num">Predicted p50</th>
+      <th scope="col" class="b-cell-num">Range (p10–p90)</th>
+      <th scope="col" class="b-cell-num">Actual</th>
+      <th scope="col">Scenario</th>
+      <th scope="col">Result</th>
     </tr>
   </thead>
   <tbody>
