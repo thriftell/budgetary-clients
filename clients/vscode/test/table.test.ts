@@ -56,6 +56,28 @@ describe("renderRecentTable", () => {
     expect(html).toContain("1–3");
   });
 
+  it("has a caption, scope=col headers, and a Result column with accessible glyphs", () => {
+    const done = renderRecentTable([
+      entry("est_ok", "2026-05-27T10:14:00Z", 100),
+    ]);
+    expect(done).toContain("<caption");
+    expect(done).toContain('scope="col"');
+    expect(done).toContain("Result");
+    expect(done).not.toContain("<th>Done</th>");
+    // A succeeded run's glyph carries an accessible label.
+    expect(done).toContain('aria-label="succeeded"');
+
+    const pending = renderRecentTable([
+      entry("est_pending", "2026-05-27T10:14:00Z", null),
+    ]);
+    expect(pending).toContain('aria-label="pending"');
+
+    const failed = renderRecentTable([
+      { ...entry("est_fail", "2026-05-27T10:14:00Z", 100), actual: { tokensIn: 1, tokensOut: 1, total: 100, durationMs: 1, success: false } },
+    ]);
+    expect(failed).toContain('aria-label="failed"');
+  });
+
   it("escapes a markup-shaped scenario", () => {
     const html = renderRecentTable([
       entry("est_x", "2026-05-27T10:14:00Z", 100, "<b>x</b>"),

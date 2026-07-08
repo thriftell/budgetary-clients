@@ -1,8 +1,9 @@
 import type { LedgerEntry } from "@budgetary/sdk";
 
 import { escapeHtml } from "../format";
-import { renderCalibrationChart } from "./chart";
+import { CHART_SUMMARY_ID, renderCalibrationChart } from "./chart";
 import { renderRecentTable } from "./table";
+import { LEGEND_STYLES, legendSwatchSvg } from "./scenario";
 
 const STYLES = `
   :root { color-scheme: light dark; }
@@ -51,22 +52,45 @@ const STYLES = `
     margin-bottom: 24px;
     background: var(--vscode-editorWidget-background);
   }
-  section.b-chart svg { width: 100%; height: auto; max-height: 480px; }
+  /* Only the chart itself (a direct child) stretches — not legend swatch SVGs. */
+  section.b-chart > svg { width: 100%; height: auto; max-height: 480px; }
+  .b-legend-mark { width: 14px; height: 14px; }
+  section h2 {
+    margin: 0 0 12px;
+    font-size: 13px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--vscode-descriptionForeground);
+  }
+  .b-visually-hidden {
+    position: absolute;
+    width: 1px; height: 1px;
+    padding: 0; margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+  }
   .b-legend {
     display: flex;
     gap: 18px;
-    margin-top: 12px;
+    margin: 12px 0 0;
+    padding: 0;
+    list-style: none;
     font-size: 12px;
     color: var(--vscode-descriptionForeground);
     flex-wrap: wrap;
   }
-  .b-swatch {
-    display: inline-block;
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    margin-right: 6px;
-    vertical-align: middle;
+  .b-legend li { display: flex; align-items: center; }
+  .b-legend-mark { margin-right: 6px; vertical-align: middle; }
+  .b-legend-note { margin-left: auto; }
+  .b-caption {
+    caption-side: top;
+    text-align: left;
+    padding: 0 0 8px;
+    font-size: 12px;
+    color: var(--vscode-descriptionForeground);
   }
   table.b-table {
     width: 100%;
@@ -115,13 +139,14 @@ const STYLES = `
   }
 `;
 
-const LEGEND = `<div class="b-legend">
-  <span><span class="b-swatch" style="background: var(--vscode-charts-blue);"></span>confident</span>
-  <span><span class="b-swatch" style="background: var(--vscode-charts-yellow);"></span>uncertain</span>
-  <span><span class="b-swatch" style="background: var(--vscode-charts-orange);"></span>sparse_evidence</span>
-  <span><span class="b-swatch" style="background: var(--vscode-foreground); opacity: 0.6;"></span>other</span>
-  <span style="margin-left:auto;">dashed line: y = x (perfect calibration)</span>
-</div>`;
+// Built from the single shared source of truth (scenario.ts), so the legend's
+// colors AND shapes always match the chart markers — including out_of_domain.
+const LEGEND = `<ul class="b-legend" aria-label="Scenario legend">
+  ${LEGEND_STYLES.map(
+    (s) => `<li>${legendSwatchSvg(s)}<span>${escapeHtml(s.label)}</span></li>`,
+  ).join("\n  ")}
+  <li class="b-legend-note">dashed line: y = x (perfect calibration)</li>
+</ul>`;
 
 function shell(nonce: string, title: string, body: string): string {
   const csp = `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';`;
@@ -134,16 +159,52 @@ function shell(nonce: string, title: string, body: string): string {
   <style>${STYLES}</style>
 </head>
 <body>
+<div class="b-visually-hidden" id="b-status" role="status" aria-live="polite"></div>
 ${body}
 </body>
 </html>`;
 }
 
+/**
+ * Wires the #refresh button and preserves context across the full-document
+ * reload each refresh performs: scroll position and button focus are saved to
+ * (and restored from) the webview state, and an aria-live region announces
+ * "Refreshing…" / "Dashboard updated" so the reload isn't silent to a screen
+ * reader. Guarded by `if (btn)` so panels without a refresh button are inert.
+ */
 function refreshScript(nonce: string): string {
   return `<script nonce="${nonce}">
-const vscode = acquireVsCodeApi();
-const btn = document.getElementById("refresh");
-if (btn) btn.addEventListener("click", () => vscode.postMessage({ type: "refresh" }));
+(function () {
+  const vscode = acquireVsCodeApi();
+  const prev = vscode.getState() || {};
+  const status = document.getElementById("b-status");
+  if (typeof prev.scrollY === "number") window.scrollTo(0, prev.scrollY);
+  if (prev.pendingRefresh) {
+    // Announce honestly: the dashboard rendered (has the chart heading) → updated;
+    // otherwise the refresh landed on an error/configure page → say so.
+    const ok = !!document.getElementById("b-chart-h");
+    if (status) status.textContent = ok ? "Dashboard updated." : "Refresh didn't complete — see the message.";
+    vscode.setState(Object.assign({}, vscode.getState() || {}, { pendingRefresh: false }));
+  }
+  const btn = document.getElementById("refresh");
+  if (btn) {
+    if (prev.refreshFocused) {
+      btn.focus();
+      // Consume the flag so a later, unrelated reload doesn't steal focus back.
+      vscode.setState(Object.assign({}, vscode.getState() || {}, { refreshFocused: false }));
+    }
+    btn.addEventListener("click", function () {
+      vscode.setState({ scrollY: window.scrollY, refreshFocused: true, pendingRefresh: true });
+      if (status) status.textContent = "Refreshing…";
+      vscode.postMessage({ type: "refresh" });
+    });
+  }
+  window.addEventListener("scroll", function () {
+    const s = vscode.getState() || {};
+    s.scrollY = window.scrollY;
+    vscode.setState(s);
+  }, { passive: true });
+})();
 </script>`;
 }
 
@@ -158,11 +219,14 @@ export function renderDashboard(
     </div>
     <button class="b-refresh" id="refresh" type="button">⟳ Refresh</button>
   </header>
-  <section class="b-chart">
+  <section class="b-chart" aria-labelledby="b-chart-h">
+    <h2 id="b-chart-h">Calibration</h2>
     ${renderCalibrationChart(entries)}
+    <p class="b-visually-hidden" id="${CHART_SUMMARY_ID}">Each mark plots one estimate's predicted midpoint (x) against its actual token total (y), on logarithmic scales; the dashed diagonal is perfect calibration and the horizontal whisker is the p10–p90 range. The same estimates are listed in the table below.</p>
     ${LEGEND}
   </section>
-  <section class="b-recent">
+  <section class="b-recent" aria-labelledby="b-recent-h">
+    <h2 id="b-recent-h">Recent estimates</h2>
     ${renderRecentTable(entries)}
   </section>
   ${refreshScript(nonce)}`;
