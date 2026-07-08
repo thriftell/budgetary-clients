@@ -7,6 +7,7 @@ export type {
 export {
   BudgetaryError,
   BudgetaryAuthError,
+  BudgetaryPermissionError,
   BudgetaryRateLimitError,
   BudgetaryNotFoundError,
   BudgetaryValidationError,

@@ -53,7 +53,14 @@ export async function withRetry<T>(
         err.retryAfterSeconds !== null &&
         err.retryAfterSeconds !== undefined
       ) {
-        delay = Math.max(err.retryAfterSeconds * 1000, computed);
+        // Respect the server's Retry-After as a floor, but never sleep past
+        // `maxDelay`: an oversized or hostile header must not hang the client
+        // for minutes. `computed` is already <= maxDelay, so the outer min only
+        // ever clamps the Retry-After value.
+        delay = Math.min(
+          Math.max(err.retryAfterSeconds * 1000, computed),
+          maxDelay,
+        );
       }
       await sleep(delay);
       attempt += 1;

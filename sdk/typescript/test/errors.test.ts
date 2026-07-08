@@ -4,6 +4,7 @@ import {
   BudgetaryAuthError,
   BudgetaryClient,
   BudgetaryNotFoundError,
+  BudgetaryPermissionError,
   BudgetaryRateLimitError,
   BudgetaryServerError,
   BudgetaryValidationError,
@@ -43,7 +44,7 @@ interface ErrorCase {
 const cases: ErrorCase[] = [
   { status: 400, code: "invalid_request", ctor: BudgetaryValidationError },
   { status: 401, code: "authentication_failed", ctor: BudgetaryAuthError },
-  { status: 403, code: "permission_denied", ctor: BudgetaryAuthError },
+  { status: 403, code: "permission_denied", ctor: BudgetaryPermissionError },
   { status: 404, code: "not_found", ctor: BudgetaryNotFoundError },
   { status: 409, code: "idempotency_conflict", ctor: BudgetaryValidationError },
   { status: 413, code: "payload_too_large", ctor: BudgetaryValidationError },
@@ -89,5 +90,22 @@ describe("HTTP status to error mapping", () => {
     expect(rate.code).toBe("rate_limited");
     expect(rate.httpStatus).toBe(429);
     expect(rate.retryAfterSeconds).toBe(7);
+  });
+
+  it("distinguishes 403 (gated) from 401 (bad key)", async () => {
+    handle.use(
+      http.post(`${TEST_BASE_URL}/v1/estimate`, () =>
+        HttpResponse.json(errorBody("permission_denied", "no scope"), {
+          status: 403,
+        }),
+      ),
+    );
+    const err = await client()
+      .estimate("test", { clientRequestId: null })
+      .catch((e: unknown) => e);
+    // A 403 must NOT read as a bad key — the two are separate classes so callers
+    // can branch "re-authenticate" vs "your key lacks scope".
+    expect(err).toBeInstanceOf(BudgetaryPermissionError);
+    expect(err).not.toBeInstanceOf(BudgetaryAuthError);
   });
 });

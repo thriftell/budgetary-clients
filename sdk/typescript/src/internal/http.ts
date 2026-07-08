@@ -3,6 +3,7 @@ import {
   BudgetaryError,
   BudgetaryNetworkError,
   BudgetaryNotFoundError,
+  BudgetaryPermissionError,
   BudgetaryRateLimitError,
   BudgetaryServerError,
   BudgetaryValidationError,
@@ -64,7 +65,10 @@ export function toSnakeCase(value: unknown): unknown {
   if (isPlainObject(value)) {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value)) {
-      out[snakeKey(k)] = toSnakeCase(v);
+      // `metadata` is a caller-owned, free-form map (contract §4.2): its keys are
+      // data, not protocol, so they must reach the wire byte-for-byte — never
+      // snake-cased. Every other key is a known protocol field and is recursed.
+      out[snakeKey(k)] = k === "metadata" ? v : toSnakeCase(v);
     }
     return out;
   }
@@ -118,7 +122,8 @@ function buildError(
     body?.error?.request_id ?? headers.get("x-request-id") ?? null;
   const args = { code, message, httpStatus: status, requestId };
 
-  if (status === 401 || status === 403) return new BudgetaryAuthError(args);
+  if (status === 401) return new BudgetaryAuthError(args);
+  if (status === 403) return new BudgetaryPermissionError(args);
   if (status === 404) return new BudgetaryNotFoundError(args);
   if (status === 400 || status === 409 || status === 413) {
     return new BudgetaryValidationError(args);
@@ -217,8 +222,18 @@ export class HttpClient {
       throw mapNetworkError(err);
     }
 
+    let text: string;
+    try {
+      text = await response.text();
+    } catch (err) {
+      // The body read can stall or time out after the headers arrived (the
+      // AbortSignal also covers the body). Classify it as a network error —
+      // exactly like a failure of the fetch call itself — instead of letting a
+      // raw undici/stream error escape unclassified.
+      throw mapNetworkError(err);
+    }
+
     let parsed: unknown = null;
-    const text = await response.text();
     if (text.length > 0) {
       try {
         parsed = JSON.parse(text);
