@@ -29,9 +29,9 @@ describe("renderEstimate — honest presentation", () => {
     expect(text).not.toContain("Estimated range:");
   });
 
-  it("uncertain: leads with the RANGE + a caution, and differs from the confident render", () => {
+  it("uncertain: leads with the RANGE + a caution, and differs from a confident render", () => {
     const uncertain = renderEstimate(estimate({ scenario: "uncertain", confidence: 0.35 }));
-    const confident = renderEstimate(estimate({ scenario: "confident", confidence: 0.35 }));
+    const confident = renderEstimate(estimate({ scenario: "confident", confidence: 0.9 }));
     expect(uncertain).toContain("Estimated range:");
     expect(uncertain).toContain("⚠");
     expect(uncertain).toContain("Wide range");
@@ -39,6 +39,18 @@ describe("renderEstimate — honest presentation", () => {
     // A low-confidence estimate must not render like a confident precise one.
     expect(uncertain).not.toEqual(confident);
     expect(uncertain).not.toContain("Estimated cost:");
+  });
+
+  it("a 'confident' scenario with LOW confidence leads with the range (honesty override)", () => {
+    // scenario and confidence are independent on the wire; the two signals must
+    // never disagree on screen.
+    const text = renderEstimate(estimate({ scenario: "confident", confidence: 0.2 }));
+    expect(text).toContain("Estimated range:");
+    expect(text).toContain("⚠");
+    expect(text).toContain("Low confidence");
+    expect(text).toContain("Confidence: 0.20 (very low)");
+    expect(text).not.toContain("Estimated cost:");
+    expect(text).not.toContain("the range is reliable");
   });
 
   it("sparse_evidence: leads with the range and its own caution", () => {

@@ -50,11 +50,18 @@ function scenarioView(scenario: string): ScenarioView {
   }
 }
 
-/** Decode the bare confidence decimal into a plain-language band. */
-function confidenceLabel(confidence: number): string {
-  const c = Number.isFinite(confidence)
+/** Confidence below which we always lead with the range, whatever the scenario. */
+const LOW_CONFIDENCE = 0.5;
+
+function clampConfidence(confidence: number): number {
+  return Number.isFinite(confidence)
     ? Math.min(1, Math.max(0, confidence))
     : 0;
+}
+
+/** Decode the bare confidence decimal into a plain-language band. */
+function confidenceLabel(confidence: number): string {
+  const c = clampConfidence(confidence);
   let word: string;
   if (c >= 0.75) word = "high";
   else if (c >= 0.5) word = "moderate";
@@ -73,18 +80,32 @@ export function renderEstimate(estimate: EstimateResponse): string {
 
   const { p10, p50, p90 } = estimate.distribution;
   const view = scenarioView(estimate.scenario);
+  // A low confidence ALWAYS leads with the range and drops the reassuring
+  // framing — the scenario and confidence must never disagree on screen.
+  const lowConfidence = clampConfidence(estimate.confidence) < LOW_CONFIDENCE;
+  const leadWithRange = view.leadWithRange || lowConfidence;
   const lines: string[] = [];
-  if (view.leadWithRange) {
+  if (leadWithRange) {
     lines.push(
       `Estimated range: ${commas(p10)}–${commas(p90)} tokens (p10–p90), midpoint ~${commas(p50)}`,
     );
-    lines.push(`⚠ ${view.caution}`);
+    lines.push(
+      `⚠ ${
+        view.leadWithRange
+          ? view.caution
+          : "Low confidence — rely on the range, not the midpoint."
+      }`,
+    );
   } else {
     lines.push(
       `Estimated cost: ~${commas(p50)} tokens (range ${commas(p10)}–${commas(p90)}, p10–p90)`,
     );
   }
-  lines.push(`Scenario: ${view.meaning}`);
+  const meaning =
+    lowConfidence && !view.leadWithRange
+      ? "confident scenario, but low confidence — treat the range as the answer."
+      : view.meaning;
+  lines.push(`Scenario: ${meaning}`);
   lines.push(`Confidence: ${confidenceLabel(estimate.confidence)}`);
   lines.push(`Model: ${estimate.model}`);
   lines.push("");

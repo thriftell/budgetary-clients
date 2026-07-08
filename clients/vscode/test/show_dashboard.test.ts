@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as vscodeStub from "./vscode-stub";
 import { load, showDashboard } from "../src/commands/show_dashboard";
+import { BudgetaryAuthError } from "@budgetary/sdk";
 
 // A controllable `getLedger`: every call returns a fresh deferred we resolve by
 // hand, so we can drive two loads to overlap deterministically.
@@ -28,14 +29,19 @@ const ctl = vi.hoisted(() => {
   };
 });
 
-vi.mock("@budgetary/sdk", () => ({
-  BudgetaryClient: class {
-    getLedger(): Promise<unknown> {
-      return ctl.next();
-    }
-  },
-  BudgetaryError: class BudgetaryError extends Error {},
-}));
+vi.mock("@budgetary/sdk", () => {
+  class BudgetaryError extends Error {}
+  class BudgetaryAuthError extends BudgetaryError {}
+  return {
+    BudgetaryClient: class {
+      getLedger(): Promise<unknown> {
+        return ctl.next();
+      }
+    },
+    BudgetaryError,
+    BudgetaryAuthError,
+  };
+});
 
 interface FakePanel {
   _disposed: boolean;
@@ -130,6 +136,27 @@ describe("dashboard load sequencing", () => {
 
     expect(fp._html).toContain("est_new");
     expect(fp._html).not.toContain("est_old");
+  });
+
+  it("renders the configure-key panel on an auth error (not a generic error)", async () => {
+    const fp = makeFakePanel();
+    activePanel = fp;
+    vscodeStub.window.createWebviewPanel = () => fp;
+
+    showDashboard({} as never); // deferreds[0]
+    ctl.deferreds[0]!.reject(
+      new BudgetaryAuthError({
+        code: "authentication_failed",
+        message: "key rejected",
+        httpStatus: 401,
+        requestId: "r",
+      }),
+    );
+    await tick();
+
+    expect(fp._html).toContain("No API key configured");
+    expect(fp._html).toContain('id="refresh"');
+    expect(fp._html).not.toContain("Could not load ledger");
   });
 
   it("a load resolving after the panel is disposed neither writes nor throws", async () => {

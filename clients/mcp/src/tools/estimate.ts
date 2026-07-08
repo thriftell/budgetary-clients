@@ -13,7 +13,7 @@ import {
 import {
   noKeyGuidance,
   pendingFilePath,
-  resolveConfig,
+  resolveConfigStatus,
   resolveLanguage,
 } from "../config.js";
 import {
@@ -21,6 +21,7 @@ import {
   renderEstimate,
   renderPermissionDenied,
   renderRateLimited,
+  renderRequestRejected,
   renderTransportError,
 } from "../format.js";
 import { PendingStore, type PendingEntry } from "../store.js";
@@ -65,13 +66,19 @@ export async function runEstimateTool(
     return { text: "Budgetary: a task description is required.", isError: true };
   }
 
-  const resolved = resolveConfig(args.env, args.home);
-  if (resolved === null) {
-    // Guidance, not an error: the host should surface it and let the user act.
-    return { text: noKeyGuidance(), isError: false };
-  }
-
   const host = args.env.BUDGETARY_HOST ?? DEFAULT_HOST;
+
+  const status = resolveConfigStatus(args.env, args.home);
+  if (status.kind !== "ok") {
+    // Guidance, not an error: the host should surface it and let the user act.
+    // Host-aware, and honest about a broken config vs. no key at all.
+    return {
+      text: noKeyGuidance(host, status.kind === "unreadable" ? "unreadable" : "no-key"),
+      isError: false,
+    };
+  }
+  const resolved = status.config;
+
   const projectId = projectIdFromCwd(args.cwd);
 
   // Optional, deterministically-declared language tag — resolved from the
@@ -94,11 +101,18 @@ export async function runEstimateTool(
       context,
     });
   } catch (err) {
-    return { text: renderEstimateError(err), isError: true };
+    return { text: renderEstimateError(err, host, resolved.source), isError: true };
   }
 
+  // Only claim "stored" when the append actually succeeded; the footer degrades
+  // to an honest "couldn't be stored" line otherwise. The store gets a logger so
+  // the underlying cause is visible on stderr, not swallowed.
+  let stored = true;
   if (!response.void) {
-    const store = new PendingStore({ path: pendingFilePath(args.home) });
+    const store = new PendingStore({
+      path: pendingFilePath(args.home),
+      logger: { warn: (m) => process.stderr.write(`${m}\n`) },
+    });
     const entry: PendingEntry = {
       estimate_id: response.estimateId,
       query,
@@ -106,27 +120,53 @@ export async function runEstimateTool(
       created_at: (args.now ?? (() => new Date()))().toISOString(),
       attempts: 0,
     };
-    store.append(entry);
+    stored = store.append(entry);
   }
 
-  return { text: renderEstimate(response), isError: false };
+  let text = renderEstimate(response, { host, stored });
+  // Nudge: if earlier estimates for THIS project were never closed out, surface
+  // it once (a lost actual shouldn't stay invisible). Best-effort — never fatal.
+  if (stored) {
+    const others = new PendingStore({ path: pendingFilePath(args.home) })
+      .read()
+      .entries.filter(
+        (e) => e.project_id === projectId && e.estimate_id !== response.estimateId,
+      ).length;
+    if (others > 0) {
+      text +=
+        `\n\n(${others} earlier ${others === 1 ? "estimate" : "estimates"} for ` +
+        "this project still await actuals — run `npx @budgetary/mcp pending`.)";
+    }
+  }
+  return { text, isError: false };
 }
 
-function renderEstimateError(err: unknown): string {
+function renderEstimateError(
+  err: unknown,
+  host: string,
+  source: "env" | "config",
+): string {
   if (err instanceof BudgetaryRateLimitError) {
     return renderRateLimited(err.retryAfterSeconds);
   }
   if (err instanceof BudgetaryError) {
-    // The SDK maps both 401 and 403 to BudgetaryAuthError, so distinguish by
-    // HTTP status / wire code rather than by class.
+    // The SDK maps 401 → BudgetaryAuthError and 403 → BudgetaryPermissionError
+    // (both extend BudgetaryError). Distinguish by HTTP status / wire code so
+    // this stays correct regardless of the class hierarchy.
     if (err.httpStatus === 403 || err.code === "permission_denied") {
       return renderPermissionDenied();
     }
     if (err.httpStatus === 401 || err.code === "authentication_failed") {
-      return renderAuthFailed();
+      return renderAuthFailed(host, source);
     }
     if (err.httpStatus === 429 || err.code === "rate_limited") {
       return renderRateLimited(null);
+    }
+    // A 4xx the server deliberately rejected — state the reason + fix, never
+    // "couldn't be reached, try again" (which is reserved for network / 5xx).
+    const s = err.httpStatus;
+    if (s !== null && s >= 400 && s < 500) {
+      return renderRequestRejected(err.message, err.requestId, s);
     }
     return renderTransportError(err.message, err.requestId);
   }

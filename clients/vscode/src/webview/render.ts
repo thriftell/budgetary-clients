@@ -173,15 +173,15 @@ export function renderConfigureKey(nonce: string): string {
   const body = `
   <header class="b-header">
     <h1>Budgetary <span class="b-subtitle">configure your key</span></h1>
+    <button class="b-refresh" id="refresh" type="button">↻ I've set my key — re-check</button>
   </header>
   <div class="b-message">
     <h2>No API key configured</h2>
-    <p>The Budgetary VS Code extension reads your ledger from the hosted API and needs an API key to do so. You can configure it in either of two ways:</p>
-    <p><strong>1. Environment variable</strong></p>
-    <p><code>export BUDGETARY_API_KEY=bg_live_...</code></p>
-    <p><strong>2. Config file at <code>~/.budgetary/config.json</code></strong></p>
+    <p>The Budgetary dashboard reads your ledger from the hosted API and needs an API key. Get one at <a href="https://budgetary.tools">budgetary.tools</a>, then set it one of two ways:</p>
+    <p><strong>1. Config file at <code>~/.budgetary/config.json</code></strong> — recommended; shared with the Claude Code and Codex clients, so you set it once:</p>
     <p><code>{ "api_key": "bg_live_..." }</code></p>
-    <p>This is the same config the Claude Code plugin uses, so you only need to set it once.</p>
+    <p><strong>2. Environment variable</strong> <code>export BUDGETARY_API_KEY=bg_live_...</code> — note VS Code must be <strong>restarted</strong> (or launched from that shell) to pick up a new environment variable.</p>
+    <p>Then press <strong>re-check</strong> above.</p>
   </div>
   ${refreshScript(nonce)}`;
   return shell(nonce, "Budgetary — Configure Key", body);

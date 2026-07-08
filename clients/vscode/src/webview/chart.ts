@@ -116,7 +116,7 @@ function emptyState(plottable: number): string {
   // "one point, need one more" so the message isn't misleading with 1 datum.
   const msg =
     plottable === 0
-      ? "No calibration data yet. Run /estimate in Claude Code to start collecting points."
+      ? "No calibration data yet. Run an estimate and record its actuals to start collecting points."
       : "Only one completed estimate so far — at least 2 are needed to plot calibration.";
   return `<svg viewBox="0 0 ${VIEW_W} ${VIEW_H}" role="img" aria-label="Empty calibration chart">
   <text x="${VIEW_W / 2}" y="${VIEW_H / 2}" text-anchor="middle" dominant-baseline="middle" fill="${AXIS_COLOR}" opacity="0.7" font-size="14">${msg}</text>

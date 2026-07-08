@@ -73,7 +73,18 @@ describe("renderConfigureKey", () => {
     expect(html).not.toContain("<svg");
     expect(html).not.toContain("<table");
     expect(html).toContain("No API key configured");
-    expect(html).not.toMatch(/https?:\/\//);
+    // The only external URL allowed is the key-issuance link (a navigation
+    // target, never a loaded resource — no external src= is present).
+    expect(html).not.toMatch(/src="https?:\/\//);
+  });
+
+  it("has a working #refresh (re-check) button, a key link, and a restart note", () => {
+    const html = renderConfigureKey(NONCE);
+    // The refresh script wires #refresh → postMessage; the button must exist.
+    expect(html).toContain('id="refresh"');
+    expect(html).toContain('postMessage({ type: "refresh" })');
+    expect(html).toContain('href="https://budgetary.tools"');
+    expect(html.toLowerCase()).toContain("restart");
   });
 });
 

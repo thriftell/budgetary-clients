@@ -35,8 +35,12 @@ export BUDGETARY_API_KEY=bg_live_...
 
 # or, persistently (recommended for Codex, independent of the launching shell):
 mkdir -p ~/.budgetary
-echo '{ "api_key": "bg_live_..." }' > ~/.budgetary/config.json
+# Write the key with an EDITOR so it never lands in your shell history:
+"${EDITOR:-nano}" ~/.budgetary/config.json   # add: { "api_key": "bg_live_..." }
+chmod 600 ~/.budgetary/config.json            # owner-only
 ```
+
+> Avoid `echo '{ "api_key": "bg_live_..." }' > ~/.budgetary/config.json` — that records the secret in your shell history. Use an editor (above), and `chmod 600` the file so it isn't world-readable.
 
 If no key is configured, the `estimate` tool returns a short configure-your-key hint instead of an estimate — it never calls the API and never crashes Codex. The API key never appears in `pending.json`, in stdout, or in any error message.
 
