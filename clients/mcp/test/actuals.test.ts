@@ -845,6 +845,45 @@ describe("runAutoActuals", () => {
     expect(readPending(home).entries).toEqual([]);
   });
 
+  it("warns (does not silently drop) when the server terminally rejects an auto actual", async () => {
+    // INV-2: a terminal 4xx drops the entry to drain the queue, but this silent
+    // hook path must leave a signal rather than lose a measured actual quietly.
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_4xx", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient(async () => {
+      throw new BudgetaryError({
+        code: "not_found",
+        message: "estimate_id not visible to this key",
+        httpStatus: 404,
+        requestId: "r",
+      });
+    });
+    const errs: string[] = [];
+
+    const code = await runAutoActuals({
+      payload: PAYLOAD,
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      stderr: { write: (s) => errs.push(s) },
+      clientFactory: () => asClient(fake),
+      readUsage: () => ({ tokensIn: 5, tokensOut: 5, trace: [] }),
+    });
+
+    expect(code).toBe(0);
+    // The entry is dropped (queue-drain)...
+    expect(readPending(home).entries).toEqual([]);
+    // ...but NOT silently — the rejection is surfaced on stderr.
+    const text = errs.join("");
+    expect(text).toContain("rejected actuals for est_4xx");
+    expect(text).toContain("dropped");
+  });
+
   it("closes only THIS session's estimate even when another project's entry is newer", async () => {
     // The globally-newest entry belongs to a DIFFERENT project (another running
     // session); binding by project_id must skip it, not mis-pair this session's

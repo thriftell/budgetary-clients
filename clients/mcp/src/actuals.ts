@@ -314,7 +314,7 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
   // still submits with no `trace` rather than failing or shipping invented steps.
   const trace = capTrace(usage.trace) ?? undefined;
 
-  await submitActuals({
+  const outcome = await submitActuals({
     store,
     client,
     entry,
@@ -327,6 +327,18 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
     },
     logger: { warn: (m) => args.stderr.write(`${m}\n`) },
   });
+  // A terminal rejection drops the entry inside submitActuals WITHOUT a warning
+  // (the give-up branch warns; the manual/rollout paths report their own drops).
+  // This silent hook path must still leave a trace when a measured actual is lost
+  // to a rejection — otherwise it vanishes from the pending queue with no signal
+  // at all (INV-2: fail loud on failure).
+  if (outcome.terminal) {
+    const detail = outcome.error instanceof Error ? outcome.error.message : "";
+    args.stderr.write(
+      `Budgetary: the server rejected actuals for ${entry.estimate_id}` +
+        `${detail ? ` (${detail})` : ""} — it won't succeed on retry and was dropped.\n`,
+    );
+  }
   return 0;
 }
 
