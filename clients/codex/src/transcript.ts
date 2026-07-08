@@ -1,3 +1,10 @@
+// Reference parser for the Codex rollout `token_count` shape. The SHIPPED copy
+// of this logic now lives in the published runtime at
+// clients/mcp/src/transcript.ts (readCodexTotals), which `npx @budgetary/mcp
+// on-session-end --transcript <path>` uses to close the loop on Codex. Keep the
+// two in sync; this file remains the CI-tested reference for the (future) Codex
+// Stop hook handler under src/hooks/.
+//
 // Codex's Stop hook payload, like Claude Code's SessionEnd, does not include
 // session-level token totals — only `transcript_path` pointing at the rollout
 // JSONL at `~/.codex/sessions/rollout-<ts>-<uuid>.jsonl`.
@@ -89,12 +96,15 @@ function tokenCountTotals(
 function usageTotals(u: Record<string, unknown>): TranscriptTotals | null {
   const input = toFiniteNonNeg(u.input_tokens);
   const output = toFiniteNonNeg(u.output_tokens);
-  if (input === null && output === null) return null;
+  // Fail closed: require BOTH components (kept in sync with the shipped runtime
+  // copy in clients/mcp/src/transcript.ts). A record with only one measurable
+  // half must not submit a fabricated 0 for the other.
+  if (input === null || output === null) return null;
   // input_tokens INCLUDES cached input → subtract to reach the cache-excluded
   // basis. Clamp at 0 so a malformed record can never yield a negative count.
   const cached = toFiniteNonNeg(cachedInputTokens(u)) ?? 0;
-  const tokensIn = Math.max(0, (input ?? 0) - cached);
-  return { tokensIn, tokensOut: output ?? 0 };
+  const tokensIn = Math.max(0, input - cached);
+  return { tokensIn, tokensOut: output };
 }
 
 /** The cached-input figure, from either the rollout field or the API-shaped nesting. */

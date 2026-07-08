@@ -74,13 +74,47 @@ function removeById(file: PendingStoreFile, estimateId: string): boolean {
   return true;
 }
 
+/** The outcome of one {@link submitActuals} call, so callers can report it honestly. */
+export interface SubmitOutcome {
+  /** THIS call's POST succeeded and the entry was removed. */
+  submitted: boolean;
+  /**
+   * When not submitted, whether a later attempt could plausibly succeed —
+   * `true` for network / 5xx / 429, `false` for a 4xx the server rejected. A
+   * caller must NOT advise retrying a non-retryable rejection.
+   */
+  retryable: boolean;
+  /** True iff attempts reached {@link MAX_ATTEMPTS} and the entry was dropped (already warned). */
+  gaveUp: boolean;
+  /** The error that prevented submission, for honest reporting. Never carries the key. */
+  error?: unknown;
+}
+
 /**
- * The single submit path shared by the auto (hook) and manual (CLI) flows.
+ * Whether a failed submit could plausibly succeed on a later attempt. The SDK
+ * already retries 5xx/429 internally; by the time an error reaches here it is
+ * either a transient network failure, an exhausted-retry 5xx/429, or a 4xx the
+ * server deliberately rejected. Only the former are worth another attempt.
+ */
+function isRetryableSubmitError(err: unknown): boolean {
+  if (err instanceof BudgetaryError) {
+    const s = err.httpStatus;
+    return s === null || s >= 500 || s === 429;
+  }
+  // A non-Budgetary (unexpected) error is treated as transient.
+  return true;
+}
+
+/**
+ * The single submit path shared by the auto (hook), manual, and rollout flows.
  *
  * On success: remove the entry. On failure: increment `attempts`, and after
  * {@link MAX_ATTEMPTS} drop the entry and log one warning. This is the only
  * function in the package that calls `client.submitActuals`, and it requires
- * the counts to be passed in explicitly.
+ * the counts to be passed in explicitly. Returns a {@link SubmitOutcome} so a
+ * foreground caller can report exactly what happened — success, a retryable
+ * transport failure, or a non-retryable rejection — instead of inferring it
+ * from the entry's presence (which a concurrent close could make a lie).
  *
  * The store is RE-READ immediately before every mutation, and the target is
  * located by `estimate_id` (never by position): `client.submitActuals` takes
@@ -88,7 +122,9 @@ function removeById(file: PendingStoreFile, estimateId: string): boolean {
  * Writing back a pre-read snapshot, or popping the last element, would lose that
  * concurrent work or close the wrong entry.
  */
-export async function submitActuals(args: SubmitActualsArgs): Promise<void> {
+export async function submitActuals(
+  args: SubmitActualsArgs,
+): Promise<SubmitOutcome> {
   const { store, client, entry, counts } = args;
   const logger = args.logger ?? { warn: () => {} };
 
@@ -106,12 +142,15 @@ export async function submitActuals(args: SubmitActualsArgs): Promise<void> {
     });
     const fresh = store.read();
     if (removeById(fresh, entry.estimate_id)) store.write(fresh);
+    return { submitted: true, retryable: false, gaveUp: false };
   } catch (err) {
+    const retryable = isRetryableSubmitError(err);
     const fresh = store.read();
     const idx = fresh.entries.findIndex(
       (e) => e.estimate_id === entry.estimate_id,
     );
-    if (idx === -1) return; // already closed (another session, or TTL-dropped)
+    // Already closed by another path — THIS call did not submit; say so.
+    if (idx === -1) return { submitted: false, retryable, gaveUp: false, error: err };
     const current = fresh.entries[idx]!;
     const updated: PendingEntry = {
       ...current,
@@ -124,10 +163,11 @@ export async function submitActuals(args: SubmitActualsArgs): Promise<void> {
       logger.warn(
         `Budgetary: giving up on actuals for ${entry.estimate_id} after ${MAX_ATTEMPTS} attempts (${detail}).`,
       );
-      return;
+      return { submitted: false, retryable, gaveUp: true, error: err };
     }
     fresh.entries[idx] = updated;
     store.write(fresh);
+    return { submitted: false, retryable, gaveUp: false, error: err };
   }
 }
 
@@ -379,6 +419,151 @@ function parseNonNegInt(raw: string): number | null {
   const n = Number(trimmed);
   if (!Number.isInteger(n) || n < 0) return null;
   return n;
+}
+
+// ---------------------------------------------------------------------------
+// Rollout path: a human runs `on-session-end --transcript <path>` after a Codex
+// (or any) session to submit REAL, transcript-derived counts. Unlike the auto
+// hook path this is a foreground command, so it reports its outcome loudly —
+// what it submitted, or exactly why it didn't. Unlike the manual `report-actual`
+// path it reads the counts from the transcript rather than prompting, so a human
+// never types (and never fabricates) a token number.
+// ---------------------------------------------------------------------------
+
+export interface RolloutActualsArgs {
+  /** Path to the rollout / transcript JSONL file to read real counts from. */
+  transcriptPath: string;
+  /**
+   * Whether the run completed its objective. The transcript carries real token
+   * counts but not a trustworthy success signal, so the human supplies it
+   * (default true; `--failed` sets it false). This is the ONLY caller-declared
+   * field — the token counts are always measured, never entered.
+   */
+  success: boolean;
+  env: NodeJS.ProcessEnv;
+  home?: string;
+  /** The session's working directory, hashed to bind the actual to its own project. */
+  cwd: string;
+  now?: () => Date;
+  /** Write a line to the user. */
+  out: (line: string) => void;
+  clientFactory?: (opts: BudgetaryClientOptions) => BudgetaryClient;
+  /** Override transcript-usage reader (tests). */
+  readUsage?: (path: string, options?: ReadUsageOptions) => TranscriptUsage | null;
+}
+
+/**
+ * Submit actuals for THIS project's newest pending estimate from a real session
+ * transcript. Binds by `project_id` (the cwd hash) so it never closes another
+ * project's estimate, reuses the shared concurrency-safe {@link submitActuals},
+ * reports every outcome, and never exits 0 having silently done nothing.
+ * Returns a process exit code.
+ */
+export async function runRolloutActuals(
+  args: RolloutActualsArgs,
+): Promise<number> {
+  const store = new PendingStore({
+    path: pendingFilePath(args.home),
+    logger: { warn: args.out },
+  });
+  const file = store.read();
+  if (file.entries.length === 0) {
+    args.out("No pending Budgetary estimate to report.");
+    return 0;
+  }
+
+  const entry = newestForProject(file.entries, projectIdFromCwd(args.cwd));
+  if (entry === null) {
+    args.out("No pending Budgetary estimate for this project directory.");
+    args.out(
+      `(${file.entries.length} pending for other ${
+        file.entries.length === 1 ? "project" : "projects"
+      } — run this from the directory you estimated in, or use ` +
+        "`npx @budgetary/mcp report-actual`.)",
+    );
+    return 0;
+  }
+
+  // Check the key before reading the transcript: without one nothing can be
+  // submitted, so surface that first rather than after the work.
+  const resolved = resolveConfig(args.env, args.home);
+  if (resolved === null) {
+    args.out(noKeyGuidance());
+    return 1;
+  }
+
+  const usage = (args.readUsage ?? readTranscriptUsage)(args.transcriptPath, {
+    target: traceTargetEnabled(args.env),
+  });
+  if (usage === null) {
+    args.out(
+      `No token totals found in ${args.transcriptPath} — nothing submitted.`,
+    );
+    args.out(
+      "Budgetary reads Codex rollout `token_count` events and Claude Code " +
+        "transcripts; an unrecognized or empty file yields nothing (never a " +
+        "guessed count).",
+    );
+    return 1;
+  }
+
+  const factory =
+    args.clientFactory ??
+    ((opts: BudgetaryClientOptions) => new BudgetaryClient(opts));
+  const client = factory({ apiKey: resolved.apiKey, baseUrl: resolved.baseUrl });
+
+  const now = (args.now ?? (() => new Date()))();
+  // Fail-closed: an empty/over-cap trace becomes undefined and only the totals
+  // submit. A Codex rollout always yields an empty trace (no per-tool data).
+  const trace = capTrace(usage.trace) ?? undefined;
+
+  // The submit reports its own outcome, so success is asserted from THIS call —
+  // never inferred from the entry's absence (a concurrent close could make that
+  // a lie) — and a non-retryable rejection is never dressed up as "try again".
+  const outcome = await submitActuals({
+    store,
+    client,
+    entry,
+    counts: {
+      tokensIn: usage.tokensIn,
+      tokensOut: usage.tokensOut,
+      success: args.success,
+      durationMs: inferDurationMs({}, entry, now),
+      ...(trace ? { trace } : {}),
+    },
+    logger: { warn: args.out },
+  });
+
+  if (outcome.submitted) {
+    const commas = (n: number) => n.toLocaleString("en-US");
+    args.out(
+      `Actuals submitted: ${commas(usage.tokensIn)} in / ${commas(usage.tokensOut)} out, ` +
+        `recorded as ${args.success ? "successful" : "failed"}. ` +
+        "Thanks — this calibrates future estimates.",
+    );
+    if (args.success) {
+      args.out("(Re-run with `--failed` if the task didn't actually complete.)");
+    }
+    return 0;
+  }
+  if (outcome.gaveUp) {
+    // submitActuals already printed the give-up warning via the logger.
+    return 1;
+  }
+  const detail =
+    outcome.error instanceof Error ? outcome.error.message : "";
+  if (outcome.retryable) {
+    args.out(
+      `Couldn't reach Budgetary${detail ? ` (${detail})` : ""}; the estimate is ` +
+        "still pending. Resubmit after the next session or with `report-actual`.",
+    );
+  } else {
+    args.out(
+      `Budgetary rejected this submission${detail ? `: ${detail}` : ""}. It won't ` +
+        "succeed on retry; the estimate is left pending for you to inspect.",
+    );
+  }
+  return 1;
 }
 
 function parseBool(raw: string): boolean | null {

@@ -13,6 +13,7 @@ import { BudgetaryError } from "@budgetary/sdk";
 import {
   runAutoActuals,
   runManualActuals,
+  runRolloutActuals,
   submitActuals,
   type ActualCounts,
 } from "../src/actuals.js";
@@ -289,6 +290,314 @@ describe("runManualActuals", () => {
     expect(code).toBe(0);
     expect(fake.submitActuals).not.toHaveBeenCalled();
     expect(out.join("\n")).toContain("No pending");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Rollout path (on-session-end --transcript): the working Codex actuals path.
+// Reads REAL counts from a transcript file, reports loudly, binds by project.
+// ---------------------------------------------------------------------------
+
+describe("runRolloutActuals", () => {
+  it("submits real transcript counts for THIS project and reports success", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_rollout", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient();
+    const out: string[] = [];
+
+    const code = await runRolloutActuals({
+      transcriptPath: "/tmp/rollout.jsonl",
+      success: true,
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      out: (l) => out.push(l),
+      clientFactory: () => asClient(fake),
+      readUsage: () => ({ tokensIn: 629974, tokensOut: 28055, trace: [] }),
+    });
+
+    expect(code).toBe(0);
+    const sent = fake.submitActuals.mock.calls[0]![0];
+    expect(sent.estimateId).toBe("est_rollout");
+    expect(sent.tokensIn).toBe(629974);
+    expect(sent.tokensOut).toBe(28055);
+    expect(sent.success).toBe(true);
+    // A Codex rollout carries no per-tool trace; nothing is fabricated.
+    expect(sent.trace).toBeUndefined();
+    expect(readPending(home).entries).toEqual([]);
+    expect(out.join("\n")).toContain("Actuals submitted");
+  });
+
+  it("records success=false when --failed is passed", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_failed", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient();
+
+    await runRolloutActuals({
+      transcriptPath: "/tmp/r.jsonl",
+      success: false,
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      out: () => {},
+      clientFactory: () => asClient(fake),
+      readUsage: () => ({ tokensIn: 1, tokensOut: 1, trace: [] }),
+    });
+
+    expect(fake.submitActuals.mock.calls[0]![0].success).toBe(false);
+  });
+
+  it("binds to THIS project even when another project's entry is newer", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_mine", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_other", query: "q", project_id: "0000000other0000", created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient();
+
+    await runRolloutActuals({
+      transcriptPath: "/tmp/r.jsonl",
+      success: true,
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      out: () => {},
+      clientFactory: () => asClient(fake),
+      readUsage: () => ({ tokensIn: 5, tokensOut: 5, trace: [] }),
+    });
+
+    expect(fake.submitActuals.mock.calls[0]![0].estimateId).toBe("est_mine");
+    expect(readPending(home).entries.map((e) => e.estimate_id)).toEqual([
+      "est_other",
+    ]);
+  });
+
+  it("submits nothing and says so when the transcript yields no totals", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_none", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient();
+    const out: string[] = [];
+
+    const code = await runRolloutActuals({
+      transcriptPath: "/tmp/empty.jsonl",
+      success: true,
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      out: (l) => out.push(l),
+      clientFactory: () => asClient(fake),
+      readUsage: () => null,
+    });
+
+    expect(code).toBe(1);
+    expect(fake.submitActuals).not.toHaveBeenCalled();
+    expect(readPending(home).entries).toHaveLength(1);
+    expect(out.join("\n")).toContain("No token totals");
+  });
+
+  it("checks the API key before reading the transcript", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_nokey", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient();
+    const out: string[] = [];
+    let readCalled = false;
+
+    const code = await runRolloutActuals({
+      transcriptPath: "/tmp/r.jsonl",
+      success: true,
+      env: {} as NodeJS.ProcessEnv, // no key anywhere (config-file path, no file)
+      home,
+      cwd,
+      now: () => NOW,
+      out: (l) => out.push(l),
+      clientFactory: () => asClient(fake),
+      readUsage: () => {
+        readCalled = true;
+        return { tokensIn: 1, tokensOut: 1, trace: [] };
+      },
+    });
+
+    expect(code).toBe(1);
+    expect(readCalled).toBe(false); // key checked first — no wasted transcript read
+    expect(fake.submitActuals).not.toHaveBeenCalled();
+    expect(out.join("\n")).toContain("no API key");
+  });
+
+  it("does nothing when there is no pending estimate for this project", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_other", query: "q", project_id: "0000000other0000", created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient();
+    const out: string[] = [];
+
+    const code = await runRolloutActuals({
+      transcriptPath: "/tmp/r.jsonl",
+      success: true,
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      out: (l) => out.push(l),
+      clientFactory: () => asClient(fake),
+      readUsage: () => ({ tokensIn: 1, tokensOut: 1, trace: [] }),
+    });
+
+    expect(code).toBe(0);
+    expect(fake.submitActuals).not.toHaveBeenCalled();
+    expect(out.join("\n")).toContain("this project");
+  });
+
+  it("does NOT advise retry when the server rejects with a non-retryable 4xx", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_4xx", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient(async () => {
+      throw new BudgetaryError({
+        code: "invalid_request",
+        message: "estimate_id already finalized",
+        httpStatus: 400,
+        requestId: "r",
+      });
+    });
+    const out: string[] = [];
+
+    const code = await runRolloutActuals({
+      transcriptPath: "/tmp/r.jsonl",
+      success: true,
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      out: (l) => out.push(l),
+      clientFactory: () => asClient(fake),
+      readUsage: () => ({ tokensIn: 5, tokensOut: 5, trace: [] }),
+    });
+
+    expect(code).toBe(1);
+    const text = out.join("\n");
+    expect(text).toContain("rejected");
+    // The core posture: never advise retrying a request the server rejected.
+    expect(text.toLowerCase()).not.toContain("try again");
+    expect(text).not.toContain("Actuals submitted");
+  });
+
+  it("reports a retryable transport failure as still-pending (not a rejection)", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_5xx", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient(async () => {
+      throw new BudgetaryError({
+        code: "internal_error",
+        message: "boom",
+        httpStatus: 500,
+        requestId: "r",
+      });
+    });
+    const out: string[] = [];
+
+    const code = await runRolloutActuals({
+      transcriptPath: "/tmp/r.jsonl",
+      success: true,
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      out: (l) => out.push(l),
+      clientFactory: () => asClient(fake),
+      readUsage: () => ({ tokensIn: 5, tokensOut: 5, trace: [] }),
+    });
+
+    expect(code).toBe(1);
+    expect(out.join("\n")).toContain("still pending");
+    expect(out.join("\n")).not.toContain("Actuals submitted");
+  });
+});
+
+describe("submitActuals — outcome", () => {
+  function oneEntryStore(): { store: PendingStore; entry: import("../src/store.js").PendingEntry } {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_o", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const store = new PendingStore({ path: join(home, ".budgetary", "pending.json") });
+    return { store, entry: store.read().entries[0]! };
+  }
+  const counts: ActualCounts = { tokensIn: 1, tokensOut: 1, success: true, durationMs: 0 };
+
+  it("returns submitted on success", async () => {
+    const { store, entry } = oneEntryStore();
+    const outcome = await submitActuals({ store, client: asClient(makeFakeClient()), entry, counts });
+    expect(outcome).toMatchObject({ submitted: true, retryable: false, gaveUp: false });
+  });
+
+  it("returns retryable:false for a 4xx rejection", async () => {
+    const { store, entry } = oneEntryStore();
+    const fake = makeFakeClient(async () => {
+      throw new BudgetaryError({ code: "invalid_request", message: "bad", httpStatus: 400, requestId: "r" });
+    });
+    const outcome = await submitActuals({ store, client: asClient(fake), entry, counts });
+    expect(outcome.submitted).toBe(false);
+    expect(outcome.retryable).toBe(false);
+  });
+
+  it("returns retryable:true for a 5xx", async () => {
+    const { store, entry } = oneEntryStore();
+    const fake = makeFakeClient(async () => {
+      throw new BudgetaryError({ code: "internal_error", message: "boom", httpStatus: 500, requestId: "r" });
+    });
+    const outcome = await submitActuals({ store, client: asClient(fake), entry, counts });
+    expect(outcome.retryable).toBe(true);
+  });
+
+  it("reports submitted:false (no false success) when the entry was closed mid-flight", async () => {
+    const { store, entry } = oneEntryStore();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const fake = makeFakeClient(async () => {
+      await gate;
+      throw new BudgetaryError({ code: "internal_error", message: "boom", httpStatus: 500, requestId: "r" });
+    });
+    const submitting = submitActuals({ store, client: asClient(fake), entry, counts });
+    // Another path closes the entry mid-flight (e.g. a concurrent success).
+    const other = new PendingStore({ path: join(home, ".budgetary", "pending.json") });
+    other.write({ version: 1, entries: [] });
+    release();
+    const outcome = await submitting;
+    // The entry is gone, but THIS call did not submit — do not claim success.
+    expect(outcome.submitted).toBe(false);
   });
 });
 

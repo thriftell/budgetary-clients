@@ -47,8 +47,15 @@ export interface ReadUsageOptions {
 }
 
 /**
- * Best-effort parse of a Claude Code transcript JSONL file into session-level
- * token totals AND a per-tool execution trace, both on one shared basis.
+ * Best-effort parse of a session transcript JSONL file into session-level token
+ * totals AND (for Claude Code) a per-tool execution trace, both on one shared
+ * basis.
+ *
+ * TWO DIALECTS, detected by content. A Codex rollout carries cumulative
+ * `event_msg` → `token_count` events and is handled by {@link readCodexTotals}
+ * (totals only, empty trace — the rollout attributes no tokens per tool). A
+ * Claude Code transcript carries per-turn `message.usage` and is handled by the
+ * per-turn parse below. A file that is neither yields `null` (fail-closed).
  *
  * THE GRANULARITY FACT (verified against real Claude Code transcripts): token
  * `usage` is reported **per turn** (per assistant `message.id` / `requestId`),
@@ -95,6 +102,16 @@ export function readTranscriptUsage(
     return null;
   }
   if (raw.trim().length === 0) return null;
+
+  // Codex rollout dialect (event_msg → token_count → cumulative total) is
+  // detected by content and parsed to totals only: the rollout does not
+  // attribute tokens per tool, so the trace is empty (never a fabricated
+  // per-tool breakdown). A Claude Code transcript has no such events and falls
+  // through to the per-turn parse below.
+  const codex = readCodexTotals(raw);
+  if (codex !== null) {
+    return { tokensIn: codex.tokensIn, tokensOut: codex.tokensOut, trace: [] };
+  }
 
   // Group lines into turns. A turn is keyed by its assistant `message.id` so
   // the repeated per-content-block usage is counted once. Lines that carry
@@ -557,4 +574,89 @@ function toFiniteNonNeg(v: unknown): number | null {
   if (typeof v !== "number") return null;
   if (!Number.isFinite(v) || v < 0) return null;
   return Math.floor(v);
+}
+
+// ---------------------------------------------------------------------------
+// Codex rollout dialect — the SECOND transcript shape the runtime parses.
+//
+// Claude Code writes per-turn `message.usage`; Codex (codex-rs) writes
+// cumulative `event_msg` → `token_count` events whose final `total_token_usage`
+// is the whole-session running total. Ported verbatim from the verified
+// reference parser in clients/codex/src/transcript.ts (kept in sync there). Two
+// facts drive it:
+//   1. `total_token_usage` is CUMULATIVE, so we keep the LAST such record rather
+//      than summing lines (summing would multiply spend by the event count).
+//      `info` is `null` on some events (e.g. the first) — those are skipped.
+//   2. Codex/OpenAI `input_tokens` INCLUDES cached input — the opposite of the
+//      Anthropic basis — so we subtract `cached_input_tokens` (or the API-shaped
+//      `input_tokens_details.cached_tokens`) to land on the same cache-read-
+//      EXCLUDED basis the realized total and the Claude Code path use.
+//      `output_tokens` already includes reasoning and is used as-is.
+// ---------------------------------------------------------------------------
+
+/**
+ * Scan an already-read rollout for the FINAL cumulative `token_count` total on
+ * the cache-excluded basis, or `null` when the file carries no such event —
+ * i.e. it is not a Codex rollout, and the Claude Code path handles it instead.
+ */
+function readCodexTotals(raw: string): TranscriptTotals | null {
+  let latest: TranscriptTotals | null = null;
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (parsed === null || typeof parsed !== "object") continue;
+    const totals = codexTokenCountTotals(parsed as Record<string, unknown>);
+    if (totals !== null) latest = totals;
+  }
+  return latest;
+}
+
+/**
+ * Extract cache-excluded totals from a `token_count` event's cumulative
+ * `total_token_usage`, or `null` when the line is not such an event (or its
+ * `info` is `null`). Only the strict, confirmed shape is accepted.
+ */
+function codexTokenCountTotals(
+  obj: Record<string, unknown>,
+): TranscriptTotals | null {
+  if (obj.type !== "event_msg") return null;
+  const payload = obj.payload;
+  if (payload === null || typeof payload !== "object") return null;
+  const p = payload as Record<string, unknown>;
+  if (p.type !== "token_count") return null;
+  const info = p.info;
+  if (info === null || typeof info !== "object") return null;
+  const usage = (info as Record<string, unknown>).total_token_usage;
+  if (usage === null || typeof usage !== "object") return null;
+  return codexUsageTotals(usage as Record<string, unknown>);
+}
+
+function codexUsageTotals(u: Record<string, unknown>): TranscriptTotals | null {
+  const input = toFiniteNonNeg(u.input_tokens);
+  const output = toFiniteNonNeg(u.output_tokens);
+  // Fail closed: require BOTH components. A record with only one measurable half
+  // must not submit a fabricated 0 for the other — return null so the reader
+  // skips it and keeps the last fully-measured record instead.
+  if (input === null || output === null) return null;
+  // input_tokens INCLUDES cached input → subtract to reach the cache-excluded
+  // basis. Clamp at 0 so a malformed record can never yield a negative count.
+  const cached = toFiniteNonNeg(codexCachedInputTokens(u)) ?? 0;
+  const tokensIn = Math.max(0, input - cached);
+  return { tokensIn, tokensOut: output };
+}
+
+/** The cached-input figure, from either the rollout field or the API-shaped nesting. */
+function codexCachedInputTokens(u: Record<string, unknown>): unknown {
+  if (u.cached_input_tokens !== undefined) return u.cached_input_tokens;
+  const details = u.input_tokens_details;
+  if (details !== null && typeof details === "object") {
+    return (details as Record<string, unknown>).cached_tokens;
+  }
+  return undefined;
 }

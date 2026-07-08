@@ -74,17 +74,25 @@ fires would be dead weight, and fabricating a token count is never acceptable
 (the 0012 actuals invariant: actuals are real, measured, fail-closed, and never
 model-supplied).
 
-**Manual / future path.** The published `@budgetary/mcp` already implements the
-`on-session-end` subcommand (reads a transcript on stdin, totals
-`(tokens_in − cache_read) + tokens_out`, submits real counts, fails closed).
-Until Codex exposes a plugin session-end event, users can run it by hand:
+**Manual / future path.** The published `@budgetary/mcp` implements the
+`on-session-end` subcommand two ways: a host **hook** form (a JSON session-end
+payload on stdin, used by Claude Code) and a **foreground** form that takes a
+rollout/transcript file path directly. The runtime parser now recognizes the
+Codex rollout `token_count` shape (cumulative `total_token_usage`, cache reads
+excluded), so the foreground form closes the loop on Codex today:
 
 ```bash
-cat ~/.codex/sessions/rollout-<ts>-<uuid>.jsonl | npx -y @budgetary/mcp on-session-end
+# Real, transcript-derived counts from a Codex rollout — run from the project dir:
+npx -y @budgetary/mcp on-session-end --transcript ~/.codex/sessions/rollout-<ts>-<uuid>.jsonl
 ```
 
+It prints what it submitted, or exactly why it didn't; add `--failed` if the
+task didn't complete. (Piping a raw rollout to stdin — `cat rollout | … on-session-end`
+— does **not** work: stdin is the hook-payload channel, not a transcript, so a
+raw rollout there is rejected with a pointer to the `--transcript` form.)
+
 When Codex ships a real end-of-session plugin event, add a `hooks/hooks.json`
-that runs the same command — the reference handler is already under
+that runs the hook (stdin-payload) form — the reference handler is already under
 [`clients/codex/src/hooks/on_session_end.ts`](../clients/codex/src/hooks/on_session_end.ts)
 and CI-tested.
 
@@ -108,9 +116,12 @@ published package:
 # estimate tool is served over stdio:
 BUDGETARY_API_KEY=bg_test_... npx -y @budgetary/mcp   # then speak MCP, or load via Codex
 
-# actuals fail-closed — bad stdin / empty transcript => exit 0, nothing submitted:
-printf 'not json' | npx -y @budgetary/mcp on-session-end ; echo $?   # -> 0
-printf ''         | npx -y @budgetary/mcp on-session-end ; echo $?   # -> 0
+# actuals fail-closed on the hook (stdin) form — exit 0, nothing submitted:
+printf ''         | npx -y @budgetary/mcp on-session-end ; echo $?   # -> 0 (silent)
+printf 'not json' | npx -y @budgetary/mcp on-session-end ; echo $?   # -> 0 (prints a pointer to --transcript on stderr)
+
+# foreground form reads a real rollout and reports what it did (or why it didn't):
+npx -y @budgetary/mcp on-session-end --transcript ~/.codex/sessions/rollout-<ts>-<uuid>.jsonl
 ```
 
 ### Install <a id="install"></a>

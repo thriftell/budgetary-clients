@@ -212,6 +212,121 @@ describe("readTranscriptUsage — back-compat & robustness", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Codex rollout dialect: the runtime parses BOTH the Claude Code per-turn shape
+// and the Codex cumulative `token_count` shape, detected by content.
+// ---------------------------------------------------------------------------
+
+// A real codex-rs cumulative `token_count` event. `total_token_usage` is a
+// running total; `input_tokens` INCLUDES `cached_input_tokens`.
+function codexCumulative(o: {
+  input_tokens: number;
+  cached_input_tokens?: number;
+  output_tokens: number;
+}) {
+  const total_token_usage = { ...o, total_tokens: o.input_tokens + o.output_tokens };
+  return {
+    type: "event_msg",
+    payload: {
+      type: "token_count",
+      info: { total_token_usage, last_token_usage: total_token_usage },
+    },
+  };
+}
+
+describe("readTranscriptUsage — Codex rollout dialect", () => {
+  it("parses a token_count rollout to cache-excluded totals with an empty trace", () => {
+    // Two cumulative snapshots; only the last (authoritative) one is used.
+    const path = write([
+      codexCumulative({ input_tokens: 2944, cached_input_tokens: 2048, output_tokens: 252 }),
+      codexCumulative({ input_tokens: 9433942, cached_input_tokens: 8803968, output_tokens: 28055 }),
+    ]);
+    // tokensIn = 9433942 − 8803968; the rollout carries no per-tool data → [].
+    expect(readTranscriptUsage(path)).toEqual({
+      tokensIn: 629974,
+      tokensOut: 28055,
+      trace: [],
+    });
+  });
+
+  it("readTranscriptTotals returns the same cache-excluded totals for a rollout", () => {
+    const path = write([
+      codexCumulative({ input_tokens: 1000, cached_input_tokens: 600, output_tokens: 200 }),
+    ]);
+    expect(readTranscriptTotals(path)).toEqual({ tokensIn: 400, tokensOut: 200 });
+  });
+
+  it("keeps the LAST cumulative record and skips info:null events", () => {
+    const path = write([
+      codexCumulative({ input_tokens: 500, cached_input_tokens: 100, output_tokens: 40 }),
+      { type: "event_msg", payload: { type: "token_count", info: null } },
+    ]);
+    expect(readTranscriptUsage(path)).toEqual({ tokensIn: 400, tokensOut: 40, trace: [] });
+  });
+
+  it("reads the API-shaped input_tokens_details.cached_tokens nesting", () => {
+    const path = write([
+      {
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            total_token_usage: {
+              input_tokens: 900,
+              input_tokens_details: { cached_tokens: 300 },
+              output_tokens: 10,
+              total_tokens: 910,
+            },
+          },
+        },
+      },
+    ]);
+    expect(readTranscriptUsage(path)).toEqual({ tokensIn: 600, tokensOut: 10, trace: [] });
+  });
+
+  it("clamps to 0 rather than a negative count when cached exceeds input", () => {
+    const path = write([
+      codexCumulative({ input_tokens: 100, cached_input_tokens: 250, output_tokens: 5 }),
+    ]);
+    expect(readTranscriptUsage(path)).toEqual({ tokensIn: 0, tokensOut: 5, trace: [] });
+  });
+
+  it("still parses a Claude Code transcript (no token_count) via the per-turn path", () => {
+    const path = write([
+      line("msg_cc", toolUse("Read"), { input_tokens: 100, output_tokens: 20 }),
+    ]);
+    const usage = readTranscriptUsage(path)!;
+    expect(usage.tokensIn).toBe(100);
+    expect(usage.tokensOut).toBe(20);
+    expect(usage.trace).toEqual([{ tool: "Read", tokens: 120 }]);
+  });
+
+  it("fails closed to null on a file that is neither dialect", () => {
+    const path = write([
+      { type: "session_meta", payload: {} },
+      { type: "response_item", payload: { type: "function_call" } },
+    ]);
+    expect(readTranscriptUsage(path)).toBeNull();
+  });
+
+  it("skips a half-measured record (output missing) and keeps the last full one", () => {
+    // A malformed final record must not submit a fabricated tokensOut:0 — the
+    // reader falls back to the last fully-measured record.
+    const path = write([
+      codexCumulative({ input_tokens: 300, cached_input_tokens: 50, output_tokens: 25 }),
+      { type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: 999, cached_input_tokens: 0 } } } },
+    ]);
+    expect(readTranscriptUsage(path)).toEqual({ tokensIn: 250, tokensOut: 25, trace: [] });
+  });
+
+  it("returns null when the only record is half-measured (fail closed, no zeroed half)", () => {
+    const path = write([
+      { type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { output_tokens: 5 } } } },
+    ]);
+    expect(readTranscriptUsage(path)).toBeNull();
+  });
+});
+
 describe("capTrace — cap + fail-closed", () => {
   it("returns null for an empty trace", () => {
     expect(capTrace([])).toBeNull();

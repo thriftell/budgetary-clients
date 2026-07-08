@@ -6,7 +6,7 @@ A [Codex](https://developers.openai.com/codex) plugin that adds:
 
 It is the Codex twin of the [`budgetary` Claude Code plugin](../claude-code/README.md). Both share `~/.budgetary/pending.json` and the same API-key resolution, so a user with both installed configures once.
 
-Everything executable runs through the published [`@budgetary/mcp`](https://www.npmjs.com/package/@budgetary/mcp) package via `npx`, so the plugin needs no build artifacts: Codex loads only the manifests (`plugin.json`, `.mcp.json`, the skill), and there is no `dist/` or `node_modules` to build or bundle at install time. (The TypeScript under `src/` is the package's tested reference implementation; it is not on the plugin's runtime path — see [Actuals](#actuals-deferred) below.)
+Everything executable runs through the published [`@budgetary/mcp`](https://www.npmjs.com/package/@budgetary/mcp) package via `npx`, so the plugin needs no build artifacts: Codex loads only the manifests (`plugin.json`, `.mcp.json`, the skill), and there is no `dist/` or `node_modules` to build or bundle at install time. (The TypeScript under `src/` is the package's tested reference implementation; it is not on the plugin's runtime path — see [Actuals](#actuals) below.)
 
 ## Install
 
@@ -82,23 +82,25 @@ When the `estimate` tool runs, the MCP server appends a small entry to `~/.budge
 
 The estimate tool is the **only** model-invokable surface. There is deliberately no tool or code path that lets a model report token usage — realized token counts are only ever derived from a real session transcript (see below), never from a number a model supplies.
 
-## Actuals (deferred)
+## Actuals
 
-The Claude Code plugin closes the predicted-vs-actual loop with a `SessionEnd` hook that submits the **real**, transcript-derived token totals when a session ends. **Codex does not ship an equivalent plugin hook**, so this plugin is **estimate-only** today:
+The Claude Code plugin closes the predicted-vs-actual loop **automatically** with a `SessionEnd` hook that submits the **real**, transcript-derived token totals when a session ends. **Codex does not ship an equivalent plugin hook**, so on Codex the loop is closed **manually** (one command after the session) rather than automatically:
 
 - Codex's plugin model bundles **skills, MCP servers, and apps** — not hooks. Codex's plugin manifest **validation rejects a `hooks` field**, the plugin scaffolder does not wire any lifecycle events, and the `codex-cli 0.40.0` binary exposes no plugin session-end / stop event. (The published docs at `developers.openai.com/codex/plugins/build` list `SessionStart`/`SessionEnd`, but the shipping CLI and the official validator do not honor them — verified 2026-06-12. See [the runbook](../../docs/codex-plugin-runbook.md).)
 - We deliberately **do not ship a `SessionEnd`/`Stop` hook**, because a hook that the host never fires would be dead weight and an empty promise — and fabricating a token count is never acceptable.
 
-When Codex exposes a real end-of-session plugin event, wiring actuals is a one-line addition: a `hooks/hooks.json` running `npx -y @budgetary/mcp on-session-end` (the published package already implements that subcommand — it reads the session transcript, totals `(tokens_in − cache_read) + tokens_out`, and submits real counts, failing closed if it can't). The reference implementation of that handler lives under [`src/hooks/on_session_end.ts`](src/hooks/on_session_end.ts) and is exercised by CI, ready for the day the event lands.
-
-In the meantime, you can submit actuals **manually** after a session:
+**Submit actuals after a session** by pointing the published package at that session's rollout file:
 
 ```bash
-# Pipe a Codex rollout transcript (JSONL) to the published package:
-cat ~/.codex/sessions/rollout-<ts>-<uuid>.jsonl | npx -y @budgetary/mcp on-session-end
+# Real, transcript-derived counts from a Codex rollout (JSONL):
+npx -y @budgetary/mcp on-session-end --transcript ~/.codex/sessions/rollout-<ts>-<uuid>.jsonl
 ```
 
-This submits only real, transcript-derived counts (cache reads excluded); if the transcript yields no token totals it submits nothing and exits cleanly.
+Run it from the **same directory you estimated in** — the estimate is bound to that project. The command parses the rollout's cumulative `token_count` events, submits only real counts (cache reads excluded, `input_tokens − cached_input_tokens`), and prints what it submitted — or exactly why it didn't (no API key, no pending estimate for this project, or a file it couldn't read). The run is recorded as **successful** by default; add `--failed` if the task didn't complete.
+
+> If you have no rollout to point at, `npx -y @budgetary/mcp report-actual` prompts you for the counts by hand instead.
+
+When Codex exposes a real end-of-session plugin event, wiring this up automatically is a one-line addition — a `hooks/hooks.json` running the same `on-session-end` handler. The reference implementation lives under [`src/hooks/on_session_end.ts`](src/hooks/on_session_end.ts) and is exercised by CI, ready for the day the event lands.
 
 ## Privacy
 
@@ -119,7 +121,7 @@ Nothing else leaves the machine. The API key is never logged.
 | The estimate tool isn't available. | Confirm `npx -y @budgetary/mcp` runs in your shell, that the `budgetary` MCP server loaded (start a fresh Codex thread after install), and that an API key is configured. |
 | The plugin shows "failed to load". | Validate it with the bundled Codex plugin validator (`plugin-creator` skill → `validate_plugin.py`). Only `plugin.json` may live under `.codex-plugin/`; `skills/` and `.mcp.json` are at the plugin root. A `hooks` field in `plugin.json` is **rejected** — this plugin declares none. |
 | The plugin says "no API key configured". | Set `BUDGETARY_API_KEY` in the shell that launches Codex, or write `~/.budgetary/config.json`. |
-| Does it submit actuals automatically? | Not on Codex yet — see [Actuals](#actuals-deferred). Use the manual `on-session-end` command above. |
+| Does it submit actuals automatically? | Not on Codex yet — see [Actuals](#actuals). Close the loop manually after a session with `npx -y @budgetary/mcp on-session-end --transcript <rollout>` (or `report-actual`). |
 
 ## Submitting to the official directory
 
