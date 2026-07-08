@@ -6,7 +6,7 @@ A [Codex](https://developers.openai.com/codex) plugin that adds:
 
 It is the Codex twin of the [`budgetary` Claude Code plugin](../claude-code/README.md). Both share `~/.budgetary/pending.json` and the same API-key resolution, so a user with both installed configures once.
 
-Everything executable runs through the published [`@budgetary/mcp`](https://www.npmjs.com/package/@budgetary/mcp) package via `npx`, so the plugin needs no build artifacts: Codex loads only the manifests (`plugin.json`, `.mcp.json`, the skill), and there is no `dist/` or `node_modules` to build or bundle at install time. (The TypeScript under `src/` is the package's tested reference implementation; it is not on the plugin's runtime path — see [Actuals](#actuals) below.)
+Everything executable runs through the published [`@budgetary/mcp`](https://www.npmjs.com/package/@budgetary/mcp) package via `npx`, so the plugin needs no build artifacts: Codex loads only the manifests (`plugin.json`, `.mcp.json`, the skill), and there is no `dist/` or `node_modules` to build or bundle at install time. (The runtime — the `estimate` tool and the `on-session-end` handler — lives in the published `@budgetary/mcp` package; its source and tests are under [`clients/mcp/`](../mcp/) in this monorepo — see [Actuals](#actuals) below.)
 
 ## Install
 
@@ -114,7 +114,7 @@ Run it from the **same directory you estimated in** — the estimate is bound to
 
 > If you have no rollout to point at, `npx -y @budgetary/mcp report-actual` prompts you for the counts by hand instead.
 
-When Codex exposes a real end-of-session plugin event, wiring this up automatically is a one-line addition — a `hooks/hooks.json` running the same `on-session-end` handler. The reference implementation lives under [`src/hooks/on_session_end.ts`](src/hooks/on_session_end.ts) and is exercised by CI, ready for the day the event lands.
+When Codex exposes a real end-of-session plugin event, wiring this up automatically is a one-line addition — a `hooks/hooks.json` running the same `npx -y @budgetary/mcp on-session-end` handler the Claude Code plugin already uses. That handler ships in the published [`@budgetary/mcp`](https://www.npmjs.com/package/@budgetary/mcp) package (source and tests under [`clients/mcp/`](../mcp/)), ready for the day the event lands.
 
 ## Privacy
 

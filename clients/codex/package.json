@@ -6,24 +6,9 @@
   "private": true,
   "type": "module",
   "files": [
-    "dist",
-    "bin",
     ".codex-plugin",
     ".mcp.json",
     "skills",
     "README.md"
-  ],
-  "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "test": "vitest run",
-    "lint": "echo \"@budgetary/codex: lint placeholder\""
-  },
-  "dependencies": {
-    "@budgetary/sdk": "workspace:*"
-  },
-  "devDependencies": {
-    "@types/node": "^22.7.0",
-    "typescript": "^5.6.0",
-    "vitest": "^3.2.6"
-  }
+  ]
 }

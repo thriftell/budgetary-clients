@@ -92,9 +92,9 @@ task didn't complete. (Piping a raw rollout to stdin — `cat rollout | … on-s
 raw rollout there is rejected with a pointer to the `--transcript` form.)
 
 When Codex ships a real end-of-session plugin event, add a `hooks/hooks.json`
-that runs the hook (stdin-payload) form — the reference handler is already under
-[`clients/codex/src/hooks/on_session_end.ts`](../clients/codex/src/hooks/on_session_end.ts)
-and CI-tested.
+that runs the hook (stdin-payload) form — the handler already ships in the
+published [`@budgetary/mcp`](https://www.npmjs.com/package/@budgetary/mcp) package
+(source and tests under [`clients/mcp/`](../clients/mcp/)).
 
 ## Validate + local-test
 
