@@ -1,3 +1,10 @@
+// Reference parser for the Codex rollout `token_count` shape. The SHIPPED copy
+// of this logic now lives in the published runtime at
+// clients/mcp/src/transcript.ts (readCodexTotals), which `npx @budgetary/mcp
+// on-session-end --transcript <path>` uses to close the loop on Codex. Keep the
+// two in sync; this file remains the CI-tested reference for the (future) Codex
+// Stop hook handler under src/hooks/.
+//
 // Codex's Stop hook payload, like Claude Code's SessionEnd, does not include
 // session-level token totals — only `transcript_path` pointing at the rollout
 // JSONL at `~/.codex/sessions/rollout-<ts>-<uuid>.jsonl`.

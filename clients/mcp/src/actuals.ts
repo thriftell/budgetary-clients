@@ -381,6 +381,140 @@ function parseNonNegInt(raw: string): number | null {
   return n;
 }
 
+// ---------------------------------------------------------------------------
+// Rollout path: a human runs `on-session-end --transcript <path>` after a Codex
+// (or any) session to submit REAL, transcript-derived counts. Unlike the auto
+// hook path this is a foreground command, so it reports its outcome loudly —
+// what it submitted, or exactly why it didn't. Unlike the manual `report-actual`
+// path it reads the counts from the transcript rather than prompting, so a human
+// never types (and never fabricates) a token number.
+// ---------------------------------------------------------------------------
+
+export interface RolloutActualsArgs {
+  /** Path to the rollout / transcript JSONL file to read real counts from. */
+  transcriptPath: string;
+  /**
+   * Whether the run completed its objective. The transcript carries real token
+   * counts but not a trustworthy success signal, so the human supplies it
+   * (default true; `--failed` sets it false). This is the ONLY caller-declared
+   * field — the token counts are always measured, never entered.
+   */
+  success: boolean;
+  env: NodeJS.ProcessEnv;
+  home?: string;
+  /** The session's working directory, hashed to bind the actual to its own project. */
+  cwd: string;
+  now?: () => Date;
+  /** Write a line to the user. */
+  out: (line: string) => void;
+  clientFactory?: (opts: BudgetaryClientOptions) => BudgetaryClient;
+  /** Override transcript-usage reader (tests). */
+  readUsage?: (path: string, options?: ReadUsageOptions) => TranscriptUsage | null;
+}
+
+/**
+ * Submit actuals for THIS project's newest pending estimate from a real session
+ * transcript. Binds by `project_id` (the cwd hash) so it never closes another
+ * project's estimate, reuses the shared concurrency-safe {@link submitActuals},
+ * reports every outcome, and never exits 0 having silently done nothing.
+ * Returns a process exit code.
+ */
+export async function runRolloutActuals(
+  args: RolloutActualsArgs,
+): Promise<number> {
+  const store = new PendingStore({
+    path: pendingFilePath(args.home),
+    logger: { warn: args.out },
+  });
+  const file = store.read();
+  if (file.entries.length === 0) {
+    args.out("No pending Budgetary estimate to report.");
+    return 0;
+  }
+
+  const entry = newestForProject(file.entries, projectIdFromCwd(args.cwd));
+  if (entry === null) {
+    args.out("No pending Budgetary estimate for this project directory.");
+    args.out(
+      `(${file.entries.length} pending for other ${
+        file.entries.length === 1 ? "project" : "projects"
+      } — run this from the directory you estimated in, or use ` +
+        "`npx @budgetary/mcp report-actual`.)",
+    );
+    return 0;
+  }
+
+  // Check the key before reading the transcript: without one nothing can be
+  // submitted, so surface that first rather than after the work.
+  const resolved = resolveConfig(args.env, args.home);
+  if (resolved === null) {
+    args.out(noKeyGuidance());
+    return 1;
+  }
+
+  const usage = (args.readUsage ?? readTranscriptUsage)(args.transcriptPath, {
+    target: traceTargetEnabled(args.env),
+  });
+  if (usage === null) {
+    args.out(
+      `No token totals found in ${args.transcriptPath} — nothing submitted.`,
+    );
+    args.out(
+      "Budgetary reads Codex rollout `token_count` events and Claude Code " +
+        "transcripts; an unrecognized or empty file yields nothing (never a " +
+        "guessed count).",
+    );
+    return 1;
+  }
+
+  const factory =
+    args.clientFactory ??
+    ((opts: BudgetaryClientOptions) => new BudgetaryClient(opts));
+  const client = factory({ apiKey: resolved.apiKey, baseUrl: resolved.baseUrl });
+
+  const now = (args.now ?? (() => new Date()))();
+  // Fail-closed: an empty/over-cap trace becomes undefined and only the totals
+  // submit. A Codex rollout always yields an empty trace (no per-tool data).
+  const trace = capTrace(usage.trace) ?? undefined;
+
+  let warned: string | null = null;
+  await submitActuals({
+    store,
+    client,
+    entry,
+    counts: {
+      tokensIn: usage.tokensIn,
+      tokensOut: usage.tokensOut,
+      success: args.success,
+      durationMs: inferDurationMs({}, entry, now),
+      ...(trace ? { trace } : {}),
+    },
+    logger: { warn: (m) => (warned = m) },
+  });
+
+  if (warned !== null) {
+    args.out(warned);
+    return 1;
+  }
+  // submitActuals removes the entry on success; if it is gone, we succeeded.
+  if (store.read().entries.some((e) => e.estimate_id === entry.estimate_id)) {
+    args.out(
+      "Submission failed; the estimate is still pending. Try again later.",
+    );
+    return 1;
+  }
+  const commas = (n: number) => n.toLocaleString("en-US");
+  args.out(
+    `Actuals submitted: ${commas(usage.tokensIn)} in / ${commas(usage.tokensOut)} out, ` +
+      `recorded as ${args.success ? "successful" : "failed"}. ` +
+      "Thanks — this calibrates future estimates.",
+  );
+  if (args.success) {
+    args.out("(Re-run with `--failed` if the task didn't actually complete.)");
+  }
+  return 0;
+}
+
 function parseBool(raw: string): boolean | null {
   const v = raw.trim().toLowerCase();
   if (v === "y" || v === "yes" || v === "true") return true;
