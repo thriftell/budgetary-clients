@@ -103,8 +103,11 @@ describe("runEstimateTool — happy path", () => {
     expect(opts.context.host).toBe("claude-code");
     expect(opts.context.projectId).toMatch(/^[0-9a-f]{16}$/);
 
-    expect(result.text).toContain("Estimated cost: 48,000 tokens");
-    expect(result.text).toContain("p10–p90: 12,500–220,000");
+    // Confident → point-led, but the range is always shown (band, not a point).
+    expect(result.text).toContain("Estimated cost:");
+    expect(result.text).toContain("48,000");
+    expect(result.text).toContain("12,500–220,000");
+    expect(result.text).toContain("p10–p90");
     expect(result.text).toContain("Scenario: confident");
     expect(result.text).toContain("Pending estimate stored");
     // Never leak the key.

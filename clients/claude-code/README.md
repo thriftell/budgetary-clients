@@ -60,19 +60,29 @@ It's a free-form display name (`TypeScript`, `Python`, `Go`, …) that the serve
 ```text
 /estimate refactor the payments module to remove the legacy webhook handler
 
-Estimated cost: 48,000 tokens (p10–p90: 12,500–220,000)
-Scenario: confident   (confidence 0.74)
+Estimated cost: ~48,000 tokens (range 12,500–220,000, p10–p90)
+Scenario: confident — well-supported, the range is reliable.
+Confidence: 0.74 (moderate)
 Model: claude-opus-4-7
 
 Pending estimate stored. Run the task and Budgetary will record the actuals
 when the session ends.
 ```
 
+A low-confidence estimate leads with the range and a caution instead of a precise-looking number:
+
+```text
+Estimated range: 12,500–220,000 tokens (p10–p90), midpoint ~48,000
+⚠ Wide range — treat the midpoint as a rough guess, not a number to rely on.
+Scenario: uncertain — supported, but the range is wide.
+Confidence: 0.35 (low)
+```
+
 Out-of-domain queries return a void response:
 
 ```text
 Budgetary cannot confidently estimate this query (out of domain).
-No charge — proceed at your own risk.
+This estimate wasn't billed. Proceed without a prediction — at your own judgment.
 ```
 
 The slash command and the model-invokable `estimate` tool are the same path: both call the Budgetary API, print the estimate verbatim, and append a pending entry to `~/.budgetary/pending.json`.

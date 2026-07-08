@@ -15,6 +15,7 @@ export {
   BudgetaryNetworkError,
 } from "./errors.js";
 
+export { normalizeScenario } from "./types.js";
 export type {
   Scenario,
   Distribution,

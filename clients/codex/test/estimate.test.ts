@@ -111,7 +111,9 @@ describe("runEstimate — happy path", () => {
     expect(opts.context.projectId).toMatch(/^[0-9a-f]{16}$/);
 
     const out = stdout.text();
-    expect(out).toContain("Estimated cost: 48,000 tokens");
+    expect(out).toContain("Estimated cost:");
+    expect(out).toContain("48,000");
+    expect(out).toContain("12,500–220,000");
     expect(out).toContain("Scenario: confident");
 
     const file = JSON.parse(

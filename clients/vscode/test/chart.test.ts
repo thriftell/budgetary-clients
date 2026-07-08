@@ -87,6 +87,18 @@ describe("renderCalibrationChart", () => {
     expect(countCircles(onePoint)).toBe(0);
   });
 
+  it("draws a p10–p90 whisker per point and carries the range in the tooltip", () => {
+    const svg = renderCalibrationChart([
+      entry("e1", "confident", 1_000, 1_200),
+      entry("e2", "uncertain", 10_000, 12_000),
+    ]);
+    // Each whisker is a horizontal band line (round caps, 0.35 opacity).
+    const whiskers = svg.match(/<line[^>]*stroke-linecap="round"[^>]*opacity="0.35"/g) ?? [];
+    expect(whiskers.length).toBe(2);
+    // The band, not just the point, reaches the tooltip.
+    expect(svg).toContain("p10–p90");
+  });
+
   it("colors points per scenario", () => {
     const svg = renderCalibrationChart([
       entry("e1", "confident", 1_000, 1_200),

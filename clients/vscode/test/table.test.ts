@@ -47,6 +47,15 @@ describe("renderRecentTable", () => {
     expect(renderRecentTable([])).toContain("No estimates yet");
   });
 
+  it("shows a p10–p90 range column with the predicted band", () => {
+    const html = renderRecentTable([
+      entry("est_x", "2026-05-27T10:14:00Z", 100),
+    ]);
+    expect(html).toContain("Range (p10–p90)");
+    // The fixture's predicted band is { p10: 1, p50: 2, p90: 3 }.
+    expect(html).toContain("1–3");
+  });
+
   it("escapes a markup-shaped scenario", () => {
     const html = renderRecentTable([
       entry("est_x", "2026-05-27T10:14:00Z", 100, "<b>x</b>"),

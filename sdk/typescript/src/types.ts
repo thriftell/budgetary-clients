@@ -8,6 +8,23 @@ export type Scenario =
   | "sparse_evidence"
   | "out_of_domain";
 
+/**
+ * Fold any scenario string to a known {@link Scenario}. The wire may add labels
+ * at any time (contract §5), so an unrecognized value becomes `"uncertain"` —
+ * a caller must never treat an unknown label as if it were `"confident"`.
+ */
+export function normalizeScenario(scenario: string): Scenario {
+  switch (scenario) {
+    case "confident":
+    case "uncertain":
+    case "sparse_evidence":
+    case "out_of_domain":
+      return scenario;
+    default:
+      return "uncertain";
+  }
+}
+
 export interface Distribution {
   p10: number;
   p50: number;
@@ -39,14 +56,38 @@ export interface EstimateRequest {
 export interface EstimateResponse {
   estimateId: string;
   /**
-   * One of the known {@link Scenario} values, or a future label. Callers
-   * should treat unknown labels as `"uncertain"`.
+   * Scenario label (contract §5). One of the known {@link Scenario} values, or a
+   * future label the server may add. Pass it through {@link normalizeScenario} to
+   * fold any unknown value to `"uncertain"`. The `(string & {})` keeps editor
+   * autocomplete for the known members while still accepting any wire string.
    */
-  scenario: Scenario | string;
+  scenario: Scenario | (string & {});
+  /**
+   * `true` when the server declined to estimate (scenario `out_of_domain`): the
+   * query is too far from anything it has calibration for. This is NOT an error —
+   * render it as "we can't confidently estimate this". When `true`,
+   * {@link distribution} is `null`, so branch on `void` before reading it.
+   */
   void: boolean;
+  /**
+   * The predicted spend as a RANGE, not a single point: `p10`/`p50`/`p90`
+   * combined input+output tokens. `null` on a {@link void} response. Present the
+   * band — `p50` is the midpoint of a range, never a guaranteed cost.
+   */
   distribution: Distribution | null;
+  /**
+   * Single user-facing quality summary in `[0, 1]`. Higher means a tighter,
+   * better-supported estimate; a low value means the range is wide and the
+   * midpoint is a rough guess. Read it alongside {@link scenario}, not as a
+   * probability of any particular outcome.
+   */
   confidence: number;
+  /** The resolved model the estimate is for (an echo of the request, or the org default). */
   model: string;
+  /**
+   * RFC 3339 timestamp after which the estimate should be treated as stale (the
+   * model may have moved since). Re-estimate rather than trusting an expired one.
+   */
   expiresAt: string;
 }
 
@@ -145,7 +186,8 @@ export interface LedgerEntry {
   model: string;
   host: string;
   projectId: string | null;
-  scenario: Scenario | string;
+  /** Scenario label (contract §5); fold unknowns with {@link normalizeScenario}. */
+  scenario: Scenario | (string & {});
   predicted: LedgerPredicted;
   actual: LedgerActual | null;
 }

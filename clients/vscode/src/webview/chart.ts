@@ -22,28 +22,32 @@ const AXIS_COLOR = "var(--vscode-foreground)";
 const GRID_COLOR = "var(--vscode-panel-border)";
 
 interface Point {
-  predicted: number;
+  /** p10 / p50 / p90 of the predicted band (the estimate is a range, not a point). */
+  p10: number;
+  p50: number;
+  p90: number;
   actual: number;
   scenario: string;
+}
+
+function isPositive(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v) && v > 0;
 }
 
 function pickPoints(entries: readonly LedgerEntry[]): Point[] {
   const out: Point[] = [];
   for (const e of entries) {
     if (!e.actual) continue;
-    const p = e.predicted?.p50;
+    const pred = e.predicted;
+    const p50 = pred?.p50;
     const a = e.actual.total;
-    if (
-      typeof p !== "number" ||
-      typeof a !== "number" ||
-      !Number.isFinite(p) ||
-      !Number.isFinite(a) ||
-      p <= 0 ||
-      a <= 0
-    ) {
-      continue;
-    }
-    out.push({ predicted: p, actual: a, scenario: e.scenario });
+    if (!isPositive(p50) || !isPositive(a)) continue;
+    // p10/p90 are optional-safe: a missing/invalid bound falls back to p50 (the
+    // whisker collapses to the marker) rather than dropping the point. Clamp so
+    // p10 ≤ p50 ≤ p90 always holds for rendering, even on odd wire data.
+    const p10 = Math.min(isPositive(pred?.p10) ? pred!.p10 : p50, p50);
+    const p90 = Math.max(isPositive(pred?.p90) ? pred!.p90 : p50, p50);
+    out.push({ p10, p50, p90, actual: a, scenario: e.scenario });
   }
   return out;
 }
@@ -58,9 +62,10 @@ function computeDomain(points: readonly Point[]): Domain {
   let lo = Infinity;
   let hi = -Infinity;
   for (const p of points) {
-    if (p.predicted < lo) lo = p.predicted;
+    // Include the whisker extremes (p10/p90) so the band stays inside the plot.
+    if (p.p10 < lo) lo = p.p10;
     if (p.actual < lo) lo = p.actual;
-    if (p.predicted > hi) hi = p.predicted;
+    if (p.p90 > hi) hi = p.p90;
     if (p.actual > hi) hi = p.actual;
   }
   // Snap to powers of 10. Pad by one decade on each side if the span is small.
@@ -156,11 +161,23 @@ export function renderCalibrationChart(entries: readonly LedgerEntry[]): string 
   <line x1="${PAD_LEFT}" y1="${VIEW_H - PAD_BOTTOM}" x2="${VIEW_W - PAD_RIGHT}" y2="${VIEW_H - PAD_BOTTOM}" stroke="${AXIS_COLOR}" stroke-width="1"/>
   <line x1="${PAD_LEFT}" y1="${PAD_TOP}" x2="${PAD_LEFT}" y2="${VIEW_H - PAD_BOTTOM}" stroke="${AXIS_COLOR}" stroke-width="1"/>`;
 
+  // p10–p90 whisker: a horizontal band on the predicted axis, so the marker is
+  // read as the midpoint of a range, not a single predicted value. Drawn before
+  // the markers so the circle sits on top.
+  const whiskers = points.map((p) => {
+    if (p.p10 >= p.p90) return ""; // degenerate band → no whisker
+    const { fill } = colorForScenario(p.scenario);
+    const x1 = xScale(p.p10, domain).toFixed(2);
+    const x2 = xScale(p.p90, domain).toFixed(2);
+    const cy = yScale(p.actual, domain).toFixed(2);
+    return `<line x1="${x1}" y1="${cy}" x2="${x2}" y2="${cy}" stroke="${fill}" stroke-width="1.5" stroke-linecap="round" opacity="0.35"/>`;
+  });
+
   const circles = points.map((p) => {
     const { fill, opacity } = colorForScenario(p.scenario);
-    const cx = xScale(p.predicted, domain).toFixed(2);
+    const cx = xScale(p.p50, domain).toFixed(2);
     const cy = yScale(p.actual, domain).toFixed(2);
-    return `<circle cx="${cx}" cy="${cy}" r="4" fill="${fill}" opacity="${opacity}"><title>predicted ${formatTick(p.predicted)} → actual ${formatTick(p.actual)} (${escapeHtml(p.scenario)})</title></circle>`;
+    return `<circle cx="${cx}" cy="${cy}" r="4" fill="${fill}" opacity="${opacity}"><title>predicted ${formatTick(p.p50)} (p10–p90 ${formatTick(p.p10)}–${formatTick(p.p90)}) → actual ${formatTick(p.actual)} (${escapeHtml(p.scenario)})</title></circle>`;
   });
 
   const xAxisLabel = `<text x="${(VIEW_W + PAD_LEFT - PAD_RIGHT) / 2}" y="${VIEW_H - 12}" text-anchor="middle" fill="${AXIS_COLOR}" opacity="0.9" font-size="12">predicted (tokens, log)</text>`;
@@ -170,6 +187,7 @@ export function renderCalibrationChart(entries: readonly LedgerEntry[]): string 
   ${gridLines.join("\n  ")}
   ${referenceLine}
   ${axes}
+  ${whiskers.join("\n  ")}
   ${circles.join("\n  ")}
   ${tickLabels.join("\n  ")}
   ${xAxisLabel}
