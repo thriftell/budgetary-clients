@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "BUDGETARY_API_KEY=\"${user_config.api_key}\" npx -y @budgetary/mcp@0.2.3 on-session-end",
+            "command": "BUDGETARY_API_KEY=\"${user_config.api_key}\" npx -y @budgetary/mcp@0.2.4 on-session-end",
             "timeout": 30
           }
         ]
