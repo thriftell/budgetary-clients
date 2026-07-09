@@ -3,7 +3,7 @@
   "name": "io.github.thriftell/budgetary",
   "title": "Budgetary: estimate token spend",
   "description": "Pre-flight, probabilistic token-spend estimate (range, scenario, confidence) for a coding task.",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "websiteUrl": "https://budgetary.tools",
   "repository": {
     "url": "https://github.com/thriftell/budgetary-clients",
@@ -15,7 +15,7 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@budgetary/mcp",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "transport": { "type": "stdio" },
       "environmentVariables": [
         {
