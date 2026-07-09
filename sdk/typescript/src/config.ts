@@ -2,6 +2,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { isBaseUrlAllowed } from "./internal/url.js";
+
 // Node-only config resolution: the single source of truth for "find the API key
 // in BUDGETARY_API_KEY or ~/.budgetary/config.json". Re-exported from the package
 // root (see index.ts); the mcp server and the VS Code extension consume it rather
@@ -85,10 +87,16 @@ export function resolveConfigStatus(
   if (apiKey.length === 0) {
     return { kind: "no-key" };
   }
-  const baseUrl =
+  // A config-file `base_url` is adopted only when it may safely carry the key
+  // (https, or a localhost address). A non-HTTPS host — a tampered config or an
+  // `http://` staging URL — is refused and falls back to the secure default,
+  // rather than sending the bearer token in cleartext. Direct SDK callers that
+  // need a non-HTTPS endpoint pass `allowInsecure` on the client instead.
+  const candidate =
     typeof parsed.base_url === "string" && parsed.base_url.length > 0
       ? parsed.base_url
       : DEFAULT_BASE_URL;
+  const baseUrl = isBaseUrlAllowed(candidate) ? candidate : DEFAULT_BASE_URL;
   return {
     kind: "ok",
     config: { apiKey, baseUrl, source: "config" },

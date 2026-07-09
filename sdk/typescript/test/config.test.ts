@@ -83,6 +83,26 @@ describe("resolveConfigStatus — key resolution + failure taxonomy", () => {
     });
   });
 
+  it("refuses an insecure config base_url and falls back to the https default", () => {
+    // A tampered / http:// staging base_url must not send the key in cleartext:
+    // it is dropped for the secure default rather than adopted.
+    writeConfig({ api_key: "bg_live_file", base_url: "http://evil.example" });
+    const status = resolveConfigStatus(env(), home);
+    expect(status.kind).toBe("ok");
+    if (status.kind === "ok") {
+      expect(status.config.baseUrl).toBe(DEFAULT_BASE_URL);
+    }
+  });
+
+  it("adopts a localhost http config base_url (local development)", () => {
+    writeConfig({ api_key: "bg_live_file", base_url: "http://localhost:8787" });
+    const status = resolveConfigStatus(env(), home);
+    expect(status.kind).toBe("ok");
+    if (status.kind === "ok") {
+      expect(status.config.baseUrl).toBe("http://localhost:8787");
+    }
+  });
+
   it("prefers the env key over the config-file key", () => {
     writeConfig({ api_key: "bg_live_file" });
     const status = resolveConfigStatus(env("bg_test_env"), home);

@@ -9,6 +9,7 @@ import httpx
 
 from budgetary._internal.http import HttpClient
 from budgetary._internal.idempotency import _UNSET, resolve_client_request_id
+from budgetary._internal.url import is_base_url_allowed
 from budgetary.types import (
     ActualsResponse,
     Distribution,
@@ -102,6 +103,7 @@ class BudgetaryClient:
         base_url: str = DEFAULT_BASE_URL,
         timeout_ms: int = DEFAULT_TIMEOUT_MS,
         max_retries: int = DEFAULT_MAX_RETRIES,
+        allow_insecure: bool = False,
         http_client: httpx.Client | None = None,
     ) -> None:
         # Fail fast on a missing key rather than sending `Bearer ` and surfacing
@@ -110,6 +112,15 @@ class BudgetaryClient:
             raise ValueError(
                 "BudgetaryClient: `api_key` is required — pass a non-empty "
                 "Budgetary API key."
+            )
+        # Refuse to attach the bearer token to a non-HTTPS, non-localhost base
+        # URL (unless explicitly opted in) — it would travel in cleartext.
+        if not is_base_url_allowed(base_url, allow_insecure):
+            raise ValueError(
+                "BudgetaryClient: refusing a non-HTTPS base_url "
+                f"({base_url!r}) — the API key would be sent in cleartext. Use an "
+                "https:// URL, a localhost address, or set allow_insecure=True to "
+                "override for a trusted local endpoint."
             )
         self._http = HttpClient(
             api_key=api_key,
