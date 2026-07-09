@@ -51,6 +51,16 @@ jobs:
           node -e "const m=require('@budgetary/sdk'); if(typeof m.BudgetaryClient!=='function'||typeof m.BudgetaryError!=='function'){throw new Error('CJS require did not resolve the public API');} console.log('  OK ->', require.resolve('@budgetary/sdk'));"
           echo "ESM import:"
           node --input-type=module -e "import {BudgetaryClient, BudgetaryError} from '@budgetary/sdk'; if(typeof BudgetaryClient!=='function'||typeof BudgetaryError!=='function'){throw new Error('ESM import did not resolve the public API');} console.log('  OK');"
+      - name: Types are dual-publish-correct (@arethetypeswrong/cli)
+        run: |
+          set -euo pipefail
+          # A CJS TypeScript consumer on node16/nodenext must resolve real CJS
+          # type declarations — not the ESM .d.ts, which fails as TS1479. attw
+          # asserts every resolution mode (node10, node16 from CJS + from ESM,
+          # bundler) so the exports map can't silently regress the dual types.
+          TMP="$(mktemp -d)"
+          ( cd sdk/typescript && pnpm pack --pack-destination "$TMP" )
+          npx -y @arethetypeswrong/cli@0.18.4 "$TMP"/budgetary-sdk-*.tgz
       - name: VS Code extension manifest sanity (unscoped name + publisher + engine)
         run: |
           node -e "const p=require('./clients/vscode/package.json'); if(!/^[a-z0-9][a-z0-9-]*\$/.test(p.name)){console.error('vscode name must be unscoped for vsce/ovsx:',p.name);process.exit(1);} if(!p.publisher){console.error('vscode publisher missing');process.exit(1);} if(!p.engines||!p.engines.vscode){console.error('vscode engines.vscode missing');process.exit(1);} console.log('vscode manifest OK:',p.publisher+'.'+p.name,p.engines.vscode);"
