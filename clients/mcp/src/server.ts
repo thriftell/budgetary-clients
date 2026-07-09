@@ -6,6 +6,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  type CallToolRequest,
+  type CallToolResult,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 
@@ -81,6 +83,50 @@ const ESTIMATE_TOOL: Tool = {
  */
 export const TOOLS: Tool[] = [ESTIMATE_TOOL];
 
+/** Injectable dependencies for {@link handleCallTool} (tests). */
+export interface CallToolDeps {
+  /** Override the estimate tool (tests); defaults to {@link runEstimateTool}. */
+  runEstimate?: typeof runEstimateTool;
+  env?: NodeJS.ProcessEnv;
+  cwd?: () => string;
+}
+
+/**
+ * Handle a `tools/call` request: reject an unknown tool as an `isError` result,
+ * coerce the model-supplied arguments (a non-string `query` → `""`, a non-string
+ * `model` → `undefined`), run the estimate, and map its `{ text, isError }` onto
+ * MCP content. Extracted from the request handler so this dispatch/coercion can
+ * be exercised without a live server; `deps` default to the real tool /
+ * `process.env` / `process.cwd`, so the server's behavior is unchanged.
+ */
+export async function handleCallTool(
+  request: CallToolRequest,
+  deps: CallToolDeps = {},
+): Promise<CallToolResult> {
+  if (request.params.name !== TOOL_NAME) {
+    return {
+      content: [
+        { type: "text", text: `Unknown tool: ${request.params.name}` },
+      ],
+      isError: true,
+    };
+  }
+  const a = request.params.arguments ?? {};
+  const query = typeof a.query === "string" ? a.query : "";
+  const model = typeof a.model === "string" ? a.model : undefined;
+
+  const result = await (deps.runEstimate ?? runEstimateTool)({
+    query,
+    model,
+    env: deps.env ?? process.env,
+    cwd: (deps.cwd ?? (() => process.cwd()))(),
+  });
+  return {
+    content: [{ type: "text", text: result.text }],
+    isError: result.isError,
+  };
+}
+
 /**
  * Build the MCP server with the single model-invokable `estimate` tool.
  *
@@ -99,30 +145,9 @@ export function buildServer(): Server {
     tools: TOOLS,
   }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    if (request.params.name !== TOOL_NAME) {
-      return {
-        content: [
-          { type: "text", text: `Unknown tool: ${request.params.name}` },
-        ],
-        isError: true,
-      };
-    }
-    const a = request.params.arguments ?? {};
-    const query = typeof a.query === "string" ? a.query : "";
-    const model = typeof a.model === "string" ? a.model : undefined;
-
-    const result = await runEstimateTool({
-      query,
-      model,
-      env: process.env,
-      cwd: process.cwd(),
-    });
-    return {
-      content: [{ type: "text", text: result.text }],
-      isError: result.isError,
-    };
-  });
+  server.setRequestHandler(CallToolRequestSchema, (request) =>
+    handleCallTool(request, {}),
+  );
 
   return server;
 }
@@ -189,12 +214,31 @@ export function parseOnSessionEndArgs(rest: string[]): OnSessionEndArgs {
   return { transcript, success, error };
 }
 
-async function runOnSessionEndCli(rest: string[]): Promise<number> {
+/**
+ * Injectable I/O + runner seams for {@link runOnSessionEndCli} (tests). Each
+ * defaults to the real process stream / env / runner, so the CLI's behavior is
+ * unchanged. `runAuto` lets a test observe how a stdin payload is routed to the
+ * auto-actuals path without a live store or network (that path is itself covered
+ * by the `runAutoActuals` tests).
+ */
+export interface OnSessionEndDeps {
+  stdin?: AsyncIterable<string>;
+  stderr?: { write(s: string): void };
+  env?: NodeJS.ProcessEnv;
+  runAuto?: typeof runAutoActuals;
+}
+
+export async function runOnSessionEndCli(
+  rest: string[],
+  deps: OnSessionEndDeps = {},
+): Promise<number> {
+  const stderr = deps.stderr ?? process.stderr;
+  const env = deps.env ?? process.env;
   const { transcript, success, error } = parseOnSessionEndArgs(rest);
   // Fail loud on a malformed foreground request rather than silently entering
   // the stdin hook path (where it would hang on a TTY or no-op on empty stdin).
   if (error !== null) {
-    process.stderr.write(
+    stderr.write(
       `Budgetary: ${error}.\n` +
         "  Usage: npx @budgetary/mcp on-session-end --transcript <path> [--failed]\n",
     );
@@ -206,7 +250,7 @@ async function runOnSessionEndCli(rest: string[]): Promise<number> {
     return runRolloutActuals({
       transcriptPath: transcript,
       success,
-      env: process.env,
+      env,
       cwd: process.cwd(),
       out: (line) => process.stdout.write(`${line}\n`),
     });
@@ -216,8 +260,12 @@ async function runOnSessionEndCli(rest: string[]): Promise<number> {
   // envelope on stdin. Stays silent on success and fails closed (exit 0) so a
   // malformed payload never crashes the host.
   let raw = "";
-  process.stdin.setEncoding("utf8");
-  for await (const chunk of process.stdin) raw += chunk;
+  if (deps.stdin !== undefined) {
+    for await (const chunk of deps.stdin) raw += chunk;
+  } else {
+    process.stdin.setEncoding("utf8");
+    for await (const chunk of process.stdin) raw += chunk;
+  }
   let payload: SessionEndPayload | null = null;
   if (raw.trim().length > 0) {
     try {
@@ -230,18 +278,18 @@ async function runOnSessionEndCli(rest: string[]): Promise<number> {
   // piped in (`cat rollout.jsonl | … on-session-end`), which cannot work this
   // way. Point at the form that does, rather than silently doing nothing.
   if (payload === null && raw.trim().length > 0) {
-    process.stderr.write(
+    stderr.write(
       "Budgetary: couldn't read a session-end payload from stdin. To submit a " +
         "rollout/transcript file directly, run:\n" +
         "  npx @budgetary/mcp on-session-end --transcript <path>\n",
     );
     return 0;
   }
-  return runAutoActuals({
+  return (deps.runAuto ?? runAutoActuals)({
     payload,
-    env: process.env,
+    env,
     cwd: process.cwd(),
-    stderr: process.stderr,
+    stderr,
   });
 }
 

@@ -2,7 +2,30 @@ import { readFileSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
 
-import { parseOnSessionEndArgs, SERVER_VERSION } from "../src/server.js";
+import type { CallToolRequest } from "@modelcontextprotocol/sdk/types.js";
+
+import type { AutoActualsArgs } from "../src/actuals.js";
+import {
+  handleCallTool,
+  parseOnSessionEndArgs,
+  runOnSessionEndCli,
+  SERVER_VERSION,
+  TOOL_NAME,
+} from "../src/server.js";
+import type {
+  EstimateToolArgs,
+  EstimateToolResult,
+} from "../src/tools/estimate.js";
+
+// Read the sole recorded call without a non-null assertion: noUncheckedIndexedAccess
+// types `arr[0]` as `T | undefined`, so narrow it with a guard (like `firstText`).
+function firstCall<T>(calls: readonly T[]): T {
+  const first = calls[0];
+  if (first === undefined) {
+    throw new Error("expected the injected runner to have been called");
+  }
+  return first;
+}
 
 describe("SERVER_VERSION", () => {
   it("is derived from package.json, not a hard-coded 0.0.0", () => {
@@ -62,5 +85,152 @@ describe("parseOnSessionEndArgs", () => {
       success: true,
       error: null,
     });
+  });
+});
+
+describe("handleCallTool", () => {
+  // A stand-in estimate tool that records the args it was called with and
+  // returns a canned result, so the handler's dispatch + argument coercion can
+  // be asserted without a live SDK client or network.
+  function estimateSpy(result: EstimateToolResult) {
+    const calls: EstimateToolArgs[] = [];
+    const runEstimate = async (
+      args: EstimateToolArgs,
+    ): Promise<EstimateToolResult> => {
+      calls.push(args);
+      return result;
+    };
+    return { calls, runEstimate };
+  }
+
+  function callRequest(
+    args: Record<string, unknown>,
+    name: string = TOOL_NAME,
+  ): CallToolRequest {
+    return { method: "tools/call", params: { name, arguments: args } };
+  }
+
+  // The result content is a union; narrow to the text block to read `.text`.
+  function firstText(
+    result: Awaited<ReturnType<typeof handleCallTool>>,
+  ): string {
+    const first = result.content[0];
+    if (!first || first.type !== "text") {
+      throw new Error("expected a text content block");
+    }
+    return first.text;
+  }
+
+  it("rejects an unknown tool as an isError result without running the estimate", async () => {
+    const spy = estimateSpy({ text: "unused", isError: false });
+    const result = await handleCallTool(callRequest({}, "not_a_tool"), {
+      runEstimate: spy.runEstimate,
+    });
+    expect(result.isError).toBe(true);
+    expect(firstText(result)).toContain("Unknown tool");
+    expect(firstText(result)).toContain("not_a_tool");
+    expect(spy.calls).toHaveLength(0);
+  });
+
+  it("coerces a non-string query to an empty string before the tool sees it", async () => {
+    const spy = estimateSpy({ text: "ok", isError: false });
+    await handleCallTool(callRequest({ query: 123 }), {
+      runEstimate: spy.runEstimate,
+    });
+    expect(spy.calls).toHaveLength(1);
+    expect(firstCall(spy.calls).query).toBe("");
+  });
+
+  it("coerces a non-string model to undefined", async () => {
+    const spy = estimateSpy({ text: "ok", isError: false });
+    await handleCallTool(callRequest({ query: "q", model: 7 }), {
+      runEstimate: spy.runEstimate,
+    });
+    expect(firstCall(spy.calls).model).toBeUndefined();
+  });
+
+  it("passes a string query and model through unchanged", async () => {
+    const spy = estimateSpy({ text: "ok", isError: false });
+    await handleCallTool(callRequest({ query: "estimate this", model: "claude-x" }), {
+      runEstimate: spy.runEstimate,
+    });
+    expect(firstCall(spy.calls).query).toBe("estimate this");
+    expect(firstCall(spy.calls).model).toBe("claude-x");
+  });
+
+  it("maps the tool result's text and isError through to the MCP content", async () => {
+    const spy = estimateSpy({ text: "the rendered estimate", isError: true });
+    const result = await handleCallTool(callRequest({ query: "q" }), {
+      runEstimate: spy.runEstimate,
+    });
+    expect(firstText(result)).toBe("the rendered estimate");
+    expect(result.isError).toBe(true);
+  });
+});
+
+describe("runOnSessionEndCli (stdin hook path)", () => {
+  async function* streamOf(...chunks: string[]): AsyncGenerator<string> {
+    for (const chunk of chunks) yield chunk;
+  }
+
+  // Records the args routed to the auto-actuals runner (whose own behavior is
+  // covered by the runAutoActuals tests) so this suite can assert only how the
+  // CLI parses stdin and dispatches — no store or network involved.
+  function autoSpy() {
+    const calls: AutoActualsArgs[] = [];
+    const runAuto = async (args: AutoActualsArgs): Promise<number> => {
+      calls.push(args);
+      return 0;
+    };
+    return { calls, runAuto };
+  }
+
+  it("routes a JSON session-end payload on stdin to the auto path", async () => {
+    const auto = autoSpy();
+    const errs: string[] = [];
+    const payload = {
+      transcript_path: "/tmp/rollout.jsonl",
+      reason: "clear",
+      cwd: "/w",
+    };
+    const code = await runOnSessionEndCli([], {
+      stdin: streamOf(JSON.stringify(payload)),
+      stderr: { write: (s: string) => { errs.push(s); } },
+      env: {},
+      runAuto: auto.runAuto,
+    });
+    expect(code).toBe(0);
+    expect(auto.calls).toHaveLength(1);
+    expect(firstCall(auto.calls).payload).toEqual(payload);
+    expect(errs.join("")).toBe(""); // silent on a valid payload
+  });
+
+  it("prints the --transcript guidance and exits 0 on non-JSON stdin (never auto)", async () => {
+    const auto = autoSpy();
+    const errs: string[] = [];
+    const code = await runOnSessionEndCli([], {
+      stdin: streamOf("this is a raw rollout, not a JSON envelope\n"),
+      stderr: { write: (s: string) => { errs.push(s); } },
+      env: {},
+      runAuto: auto.runAuto,
+    });
+    expect(code).toBe(0);
+    expect(auto.calls).toHaveLength(0);
+    expect(errs.join("")).toContain("--transcript");
+  });
+
+  it("routes empty stdin to the auto path with a null payload", async () => {
+    const auto = autoSpy();
+    const errs: string[] = [];
+    const code = await runOnSessionEndCli([], {
+      stdin: streamOf(""),
+      stderr: { write: (s: string) => { errs.push(s); } },
+      env: {},
+      runAuto: auto.runAuto,
+    });
+    expect(code).toBe(0);
+    expect(auto.calls).toHaveLength(1);
+    expect(firstCall(auto.calls).payload).toBeNull();
+    expect(errs.join("")).toBe("");
   });
 });
