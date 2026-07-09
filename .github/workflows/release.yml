@@ -38,19 +38,20 @@ jobs:
       # requests"); an App token is a separate identity not subject to it.
       - name: Mint GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1.12.0
         with:
           app-id: ${{ secrets.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_KEY }}
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
         with:
           fetch-depth: 0 # changesets needs full history vs baseBranch
-          # Persist the App token as the git credential so the action's push of
-          # the Version PR branch is authored by the app — and re-triggers CI
-          # (pushes made with the default GITHUB_TOKEN do not).
-          token: ${{ steps.app-token.outputs.token }}
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v6
+          # Do NOT persist any git credential: `pnpm -r build`/`test` below run
+          # third-party dev-dependency code, which must not be able to read the
+          # App token out of .git/config. The credential is injected on the remote
+          # URL AFTER build/test, right before the changesets push (see below).
+          persist-credentials: false
+      - uses: pnpm/action-setup@08c4be7e2e672a47d11bd04269e27e5f3e8529cb # v6.0.0
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
         with:
           node-version-file: ".nvmrc"
           registry-url: "https://registry.npmjs.org" # writes .npmrc for NODE_AUTH_TOKEN
@@ -61,9 +62,18 @@ jobs:
       # dependency order (sdk first), so the mcp tarball is never stale.
       - run: pnpm -r build
       - run: pnpm -r test
+      # Only now — after all third-party build/test code has run — put the App
+      # token on the origin remote so the changesets action's push of the Version
+      # PR branch (and release tags) is authored by the App and re-triggers CI
+      # (a push with the default GITHUB_TOKEN does not). The token is never
+      # persisted while dependency code executes.
+      - name: Authenticate the release push as the GitHub App
+        run: |
+          git remote set-url origin \
+            "https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/${{ github.repository }}.git"
       - name: Version PR or publish to npm
         id: changesets
-        uses: changesets/action@v1
+        uses: changesets/action@e0145edc7d9d8679003495b11f87bd8ef63c0cba # v1.5.3
         with:
           version: pnpm run version-packages
           publish: pnpm run release
@@ -75,7 +85,11 @@ jobs:
           # enterprise "Actions can't create PRs" lock.
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           # Auth for npm (classic automation token). Provenance still requires
-          # id-token: write above. Omit once npm OIDC trusted publishing is set up.
+          # id-token: write above. OPERATOR TODO: configure npm OIDC trusted
+          # publishing for this repo+workflow, then delete this line and the
+          # NPM_TOKEN secret — `id-token: write` (already granted) lets `npm
+          # publish` mint a short-lived OIDC credential, removing this long-lived
+          # token entirely (this is how the PyPI job already publishes).
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           # Emit provenance for every package changeset publish pushes.
           NPM_CONFIG_PROVENANCE: "true"
@@ -96,9 +110,13 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+        with:
+          # This job publishes via OVSX_PAT, never git — don't persist a git
+          # credential while pnpm dlx (vsce/ovsx) third-party code runs.
+          persist-credentials: false
+      - uses: pnpm/action-setup@08c4be7e2e672a47d11bd04269e27e5f3e8529cb # v6.0.0
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
         with:
           node-version-file: ".nvmrc"
           cache: pnpm
