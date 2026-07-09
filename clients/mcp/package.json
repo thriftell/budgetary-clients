@@ -31,6 +31,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.test.json",
     "lint": "echo \"@budgetary/mcp: lint placeholder\""
   },
   "dependencies": {

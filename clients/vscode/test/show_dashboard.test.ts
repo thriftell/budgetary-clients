@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type * as vscode from "vscode";
 
 import * as vscodeStub from "./vscode-stub";
 import { load, showDashboard } from "../src/commands/show_dashboard";
@@ -49,15 +50,16 @@ vi.mock("@budgetary/sdk", async () => {
   };
 });
 
-interface FakePanel {
+// The fake carries the few members the command touches at runtime, plus test-
+// only inspection fields. Typed as an intersection with the real WebviewPanel so
+// `load()` (which takes a `vscode.WebviewPanel`) accepts it without a cast at the
+// call sites — the single `as unknown as` in makeFakePanel bridges the mock.
+interface FakePanelInternals {
   _disposed: boolean;
   _html: string;
   _onDispose?: () => void;
-  webview: { html: string; onDidReceiveMessage: (cb: (m: unknown) => void) => unknown };
-  onDidDispose: (cb: () => void) => unknown;
-  reveal: () => void;
-  dispose: () => void;
 }
+type FakePanel = vscode.WebviewPanel & FakePanelInternals;
 
 function makeFakePanel(): FakePanel {
   const p = {

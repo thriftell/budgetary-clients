@@ -20,6 +20,9 @@ jobs:
       - run: pnpm -r lint
       # Build deps-first (sdk before mcp), THEN test — never test before build.
       - run: pnpm -r build
+      # Type-check src + test together (tsconfig.test.json); tests are otherwise
+      # only transpiled by vitest, never type-checked.
+      - run: pnpm -r typecheck
       - run: pnpm -r test
       # Prove every PR is release-ready without publishing anything.
       # Use `pnpm pack` (the same tool `changeset publish` uses) rather than
