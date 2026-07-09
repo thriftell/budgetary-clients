@@ -1,4 +1,11 @@
-import { existsSync, readFileSync } from "node:fs";
+import { createHmac, randomBytes } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -26,6 +33,97 @@ export type { ConfigStatus, ResolvedConfig };
 
 export function pendingFilePath(home?: string): string {
   return join(budgetaryDir(home), "pending.json");
+}
+
+export function installSaltPath(home?: string): string {
+  return join(budgetaryDir(home), "install-salt");
+}
+
+/**
+ * A per-install random secret used to salt the non-reversible `project_id` (and
+ * available to any other digest that must stay STABLE across runs while resisting
+ * a dictionary). It is generated once and persisted at
+ * `~/.budgetary/install-salt` (owner-only), then reused, so the derived id is
+ * stable for one install yet not reversible by the server — the salt never
+ * leaves the machine.
+ *
+ * **Cross-run stability is load-bearing:** the estimate and the session-end hook
+ * run as separate `npx @budgetary/mcp` processes, and an actual binds to its
+ * estimate by matching `project_id`. So this must return the SAME salt on every
+ * run, never a per-process one — otherwise the binding silently breaks and the
+ * measured actual is lost. To hold that even when the persisted file is present
+ * but unusable (empty/truncated/garbage/dangling-symlink) it self-heals:
+ *   1. a valid persisted salt is reused;
+ *   2. an absent file is created exclusively (`wx`, `0600`);
+ *   3. an unusable file is REPAIRED in place — removed (symlink-safe: `unlink`
+ *      targets the link/name, never follows it) and recreated exclusively;
+ *   4. only when nothing can be persisted at all (a read-only `HOME`, or a
+ *      foreign-owned/immutable path) does it fall back to a DETERMINISTIC salt
+ *      derived from the config dir, which is still stable across runs so the
+ *      binding survives — it is simply not salted with machine-private entropy
+ *      in that rare, unpersistable case.
+ * Never throws.
+ */
+export function installSalt(home?: string): Buffer {
+  const path = installSaltPath(home);
+  const existing = readInstallSalt(path);
+  if (existing !== null) return existing;
+
+  const salt = randomBytes(32);
+  const hex = salt.toString("hex");
+  try {
+    const dir = budgetaryDir(home);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // `wx` is create-exclusive (O_CREAT|O_EXCL): a concurrent writer never
+    // clobbers another's salt, and it will not follow/overwrite a pre-existing
+    // symlink. `0600` keeps the secret owner-only.
+    writeFileSync(path, hex, { flag: "wx", mode: 0o600 });
+    return salt;
+  } catch {
+    // Either we lost the create race, or a name already exists at the path but
+    // is unusable (empty/truncated/garbage/symlink/dir/foreign-owned).
+    const raced = readInstallSalt(path);
+    if (raced !== null) return raced; // a concurrent healthy writer won
+
+    // Repair an unusable file so future runs are stable. `unlink` removes the
+    // link/name itself (it does NOT follow a symlink to its target), then a
+    // fresh exclusive create restores a valid owner-only salt.
+    try {
+      unlinkSync(path);
+      writeFileSync(path, hex, { flag: "wx", mode: 0o600 });
+      return salt;
+    } catch {
+      // Truly cannot persist (read-only HOME, foreign-owned/immutable path, or a
+      // directory at the name). Return a DETERMINISTIC salt so `project_id`
+      // stays STABLE across runs and processes and the binding survives.
+      return readInstallSalt(path) ?? deterministicFallbackSalt(home);
+    }
+  }
+}
+
+/**
+ * A stable, process-independent fallback salt for the rare case where no salt
+ * can be persisted. Derived from the config dir so it is identical across runs
+ * and both processes (preserving the estimate↔actual binding). NOT salted with
+ * machine-private entropy — this path is only reached when a per-install secret
+ * cannot be stored at all.
+ */
+function deterministicFallbackSalt(home?: string): Buffer {
+  return createHmac("sha256", "budgetary/install-salt/v1")
+    .update(budgetaryDir(home))
+    .digest();
+}
+
+/** Read the persisted install salt, or `null` when absent/unreadable/malformed. */
+function readInstallSalt(path: string): Buffer | null {
+  try {
+    const hex = readFileSync(path, "utf8").trim();
+    // At least 16 bytes of lowercase hex; anything else is treated as absent.
+    if (/^[0-9a-f]{32,}$/.test(hex)) return Buffer.from(hex, "hex");
+  } catch {
+    // absent / unreadable → the caller generates a fresh salt
+  }
+  return null;
 }
 
 /**
@@ -74,20 +172,27 @@ export function resolveLanguage(
 /**
  * Whether the auto path may attach the redacted `target` descriptor to trace
  * steps. Defaults to ON — `target` is a redacted descriptor (program name +
- * non-reversible digest, or a bare path digest) that carries no raw path,
- * argument, or command. A privacy-conscious operator opts out by setting
- * `BUDGETARY_TRACE_TARGET` to `0` / `false` / `off` / `no`, which suppresses
- * `target` entirely: the trace degrades to the prior `{ tool, tokens, kind? }`
- * shape plus the leak-free `ok` flag, and the realized total is unaffected.
+ * salted, non-reversible digest, or a bare path digest) that carries no raw
+ * path, argument, or command. A privacy-conscious operator opts out by setting
+ * `BUDGETARY_TRACE_TARGET` to an off-value (`0` / `false` / `off` / `no`), which
+ * suppresses `target` entirely: the trace degrades to the prior
+ * `{ tool, tokens, kind? }` shape plus the leak-free `ok` flag, and the realized
+ * total is unaffected.
  *
- * Fail-safe: only the explicit opt-out values disable it; any other or absent
- * value leaves the default ON.
+ * Fail-safe toward the LESS-disclosing direction: it stays ON only when the
+ * variable is absent/blank (the default) or an explicit affirmative
+ * (`1` / `true` / `on` / `yes`). Any other set value — including a typo like
+ * `disabled` or `redacted` — resolves to OFF, so a misremembered opt-out never
+ * silently keeps sending the descriptor.
  */
 export function traceTargetEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   const v = env.BUDGETARY_TRACE_TARGET;
-  if (typeof v !== "string") return true;
+  if (typeof v !== "string") return true; // unset → default ON
   const norm = v.trim().toLowerCase();
-  return !(norm === "0" || norm === "false" || norm === "off" || norm === "no");
+  if (norm === "") return true; // blank → treated as unset (default ON)
+  // Allowlist of affirmatives; every other set value (off-values AND
+  // unrecognized typos) resolves to OFF — the safe direction.
+  return norm === "1" || norm === "true" || norm === "on" || norm === "yes";
 }
 
 /**

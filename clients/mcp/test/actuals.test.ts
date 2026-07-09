@@ -132,7 +132,7 @@ describe("non-fabrication guard", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_x", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_x", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
       ],
     });
     const store = new PendingStore({ path: join(home, ".budgetary", "pending.json") });
@@ -169,7 +169,7 @@ describe("runManualActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_manual", query: "refactor the parser", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_manual", query: "refactor the parser", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
       ],
     });
     const fake = makeFakeClient();
@@ -199,7 +199,7 @@ describe("runManualActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_bad", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_bad", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
       ],
     });
     const fake = makeFakeClient();
@@ -224,7 +224,7 @@ describe("runManualActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_commas", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_commas", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
       ],
     });
     const fake = makeFakeClient();
@@ -249,7 +249,7 @@ describe("runManualActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_mal", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_mal", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
       ],
     });
     const fake = makeFakeClient();
@@ -272,7 +272,7 @@ describe("runManualActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_nokey", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_nokey", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
       ],
     });
     const fake = makeFakeClient();
@@ -300,7 +300,7 @@ describe("runManualActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_mine", query: "mine", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_mine", query: "mine", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
         { estimate_id: "est_other", query: "other", project_id: "0000000other0000", created_at: RECENT, attempts: 0 },
       ],
     });
@@ -325,7 +325,7 @@ describe("runManualActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_403", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_403", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
       ],
     });
     const fake = makeFakeClient(async () => {
@@ -356,7 +356,7 @@ describe("runManualActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_gone", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_gone", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
       ],
     });
     const fake = makeFakeClient(async () => {
@@ -384,7 +384,7 @@ describe("runManualActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_retry", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 1 },
+        { estimate_id: "est_retry", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 1 },
       ],
     });
     const fake = makeFakeClient(async () => {
@@ -411,7 +411,7 @@ describe("runManualActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_give_up", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 4 },
+        { estimate_id: "est_give_up", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 4 },
       ],
     });
     const fake = makeFakeClient(async () => {
@@ -467,7 +467,7 @@ describe("runPendingList", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_mine", query: "refactor the parser", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_mine", query: "refactor the parser", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
         { estimate_id: "est_other", query: "another project task", project_id: "0000000other0000", created_at: RECENT, attempts: 0 },
       ],
     });
@@ -492,7 +492,7 @@ describe("runRolloutActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_rollout", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_rollout", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
       ],
     });
     const fake = makeFakeClient();
@@ -526,7 +526,7 @@ describe("runRolloutActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_failed", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_failed", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
       ],
     });
     const fake = makeFakeClient();
@@ -550,7 +550,7 @@ describe("runRolloutActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_mine", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_mine", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
         { estimate_id: "est_other", query: "q", project_id: "0000000other0000", created_at: RECENT, attempts: 0 },
       ],
     });
@@ -578,7 +578,7 @@ describe("runRolloutActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_none", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_none", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
       ],
     });
     const fake = makeFakeClient();
@@ -606,7 +606,7 @@ describe("runRolloutActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_nokey", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_nokey", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
       ],
     });
     const fake = makeFakeClient();
@@ -665,7 +665,7 @@ describe("runRolloutActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_4xx", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_4xx", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
       ],
     });
     const fake = makeFakeClient(async () => {
@@ -702,7 +702,7 @@ describe("runRolloutActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_5xx", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_5xx", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
       ],
     });
     const fake = makeFakeClient(async () => {
@@ -738,7 +738,7 @@ describe("submitActuals — outcome", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_o", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_o", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
       ],
     });
     const store = new PendingStore({ path: join(home, ".budgetary", "pending.json") });
@@ -818,7 +818,7 @@ describe("runAutoActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_auto", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_auto", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
       ],
     });
     const fake = makeFakeClient();
@@ -851,7 +851,7 @@ describe("runAutoActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_4xx", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_4xx", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
       ],
     });
     const fake = makeFakeClient(async () => {
@@ -891,7 +891,7 @@ describe("runAutoActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_mine", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_mine", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
         { estimate_id: "est_other", query: "q", project_id: "0000000other0000", created_at: RECENT, attempts: 0 },
       ],
     });
@@ -919,7 +919,7 @@ describe("runAutoActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_none", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_none", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
       ],
     });
     const fake = makeFakeClient();
@@ -943,7 +943,7 @@ describe("runAutoActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_trace", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_trace", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
       ],
     });
 
@@ -979,7 +979,7 @@ describe("runAutoActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_overcap", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_overcap", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
       ],
     });
     const overClient = makeFakeClient();
@@ -1005,7 +1005,7 @@ describe("runAutoActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_optout", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_optout", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
       ],
     });
 
@@ -1034,7 +1034,7 @@ describe("runAutoActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_opton", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_opton", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
       ],
     });
     let onOpts: { target?: boolean } | undefined;
@@ -1058,7 +1058,7 @@ describe("runAutoActuals", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_enriched", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_enriched", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
       ],
     });
     const fake = makeFakeClient();
@@ -1117,7 +1117,7 @@ describe("submitActuals — store integrity under concurrency", () => {
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_inflight", query: "q", project_id: projectIdFromCwd(cwd), created_at: RECENT, attempts: 0 },
+        { estimate_id: "est_inflight", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
       ],
     });
     const store = new PendingStore({ path });
