@@ -233,4 +233,20 @@ describe("runOnSessionEndCli (stdin hook path)", () => {
     expect(firstCall(auto.calls).payload).toBeNull();
     expect(errs.join("")).toBe("");
   });
+
+  it("fails closed (exit 0, no auto) when stdin exceeds the size cap", async () => {
+    const auto = autoSpy();
+    const errs: string[] = [];
+    const oneMb = "x".repeat(1024 * 1024);
+    // 9 MiB of stdin exceeds the 8 MiB cap; the read is bounded and fails closed.
+    const code = await runOnSessionEndCli([], {
+      stdin: streamOf(...Array.from({ length: 9 }, () => oneMb)),
+      stderr: { write: (s: string) => { errs.push(s); } },
+      env: {},
+      runAuto: auto.runAuto,
+    });
+    expect(code).toBe(0);
+    expect(auto.calls).toHaveLength(0); // never dispatched to the auto path
+    expect(errs.join("")).toContain("size limit");
+  });
 });

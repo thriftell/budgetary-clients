@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  MAX_TRANSCRIPT_BYTES,
   TRACE_MAX_BYTES,
   TRACE_MAX_STEPS,
   capTrace,
@@ -209,6 +211,39 @@ describe("readTranscriptUsage — back-compat & robustness", () => {
     expect(readTranscriptUsage(join(dir, "nope.jsonl"))).toBeNull();
     expect(readTranscriptUsage(write([]))).toBeNull();
     expect(readTranscriptUsage(write([{ type: "user", message: { content: "hi" } }]))).toBeNull();
+  });
+
+  it("size-guards BEFORE reading: over-cap file with valid content still yields null", () => {
+    // Control: this exact content, in a small file, parses to real usage — so a
+    // null result for the same content over the cap can only be the SIZE guard.
+    const validLine =
+      JSON.stringify(line("m1", toolUse("Read"), { input_tokens: 100, output_tokens: 20 })) + "\n";
+    const small = join(dir, "small.jsonl");
+    writeFileSync(small, validLine, "utf8");
+    expect(readTranscriptUsage(small)).not.toBeNull();
+
+    // Over-cap: the SAME valid first line, then sparse NUL padding past the cap.
+    // If the whole file were read (guard removed) the first line would parse to
+    // non-null usage — so this asserting null locks in the size guard.
+    const huge = join(dir, "huge.jsonl");
+    writeFileSync(huge, validLine, "utf8");
+    truncateSync(huge, MAX_TRANSCRIPT_BYTES + 1);
+    expect(readTranscriptUsage(huge)).toBeNull();
+  });
+
+  it("rejects a non-regular path (a FIFO would read unbounded / block)", () => {
+    // The `!isFile()` branch: a FIFO reports size 0, so only the regular-file
+    // check stops an unbounded/blocking read. Guard present → fast null; a
+    // regression that dropped the check would block on the writer-less FIFO.
+    const fifo = join(dir, "pipe.jsonl");
+    let made = false;
+    try {
+      execFileSync("mkfifo", [fifo]);
+      made = true;
+    } catch {
+      // mkfifo unavailable (e.g. Windows) — skip; CI (linux) and macOS have it.
+    }
+    if (made) expect(readTranscriptUsage(fifo)).toBeNull();
   });
 });
 

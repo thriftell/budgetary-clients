@@ -5,6 +5,7 @@ import {
 } from "@budgetary/sdk";
 
 import {
+  looksLikeBudgetaryKey,
   noKeyGuidance,
   pendingFilePath,
   resolveConfig,
@@ -304,6 +305,17 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
 
   const resolved = resolveConfig(args.env, args.home);
   if (resolved === null) return 0; // leave the entry for a later session with a key
+  // Defense-in-depth for the hook path: the key reaches this unattended process
+  // via a shell-interpolated hook command, so reject a value that isn't a
+  // recognizable bg_live_/bg_test_ key rather than sending it. Leave the entry
+  // for a later, correctly-configured run.
+  if (!looksLikeBudgetaryKey(resolved.apiKey)) {
+    args.stderr.write(
+      "Budgetary: the configured API key is not a recognizable bg_live_/bg_test_ key; " +
+        "skipping the automatic actuals submission.\n",
+    );
+    return 0;
+  }
 
   const factory =
     args.clientFactory ??

@@ -23,6 +23,13 @@ import { runEstimateTool } from "./tools/estimate.js";
 const SERVER_NAME = "budgetary";
 
 /**
+ * Upper bound on the session-end JSON envelope read from stdin. The real payload
+ * is a small object; a larger stdin is hostile or a mistaken pipe, so the read is
+ * bounded to avoid memory exhaustion and then fails closed (exit 0).
+ */
+const MAX_STDIN_BYTES = 8 * 1024 * 1024;
+
+/**
  * The handshake version, read from the package's own package.json so it always
  * matches the published `@budgetary/mcp` rather than drifting from a hard-coded
  * literal. `src/server.ts` and `dist/server.js` are both one level below the
@@ -258,13 +265,36 @@ export async function runOnSessionEndCli(
 
   // Hook form: a host (e.g. Claude Code SessionEnd) pipes one JSON payload
   // envelope on stdin. Stays silent on success and fails closed (exit 0) so a
-  // malformed payload never crashes the host.
+  // malformed payload never crashes the host. The accumulator is size-bounded so
+  // an unbounded/hostile stdin cannot exhaust memory; over the cap it drops what
+  // it read and fails closed, exactly like a malformed payload.
   let raw = "";
+  let overflow = false;
+  const absorb = (chunk: string): void => {
+    if (overflow) return;
+    raw += chunk;
+    if (raw.length > MAX_STDIN_BYTES) {
+      overflow = true;
+      raw = ""; // release the buffer; nothing over-cap is trusted
+    }
+  };
   if (deps.stdin !== undefined) {
-    for await (const chunk of deps.stdin) raw += chunk;
+    for await (const chunk of deps.stdin) {
+      absorb(chunk);
+      if (overflow) break;
+    }
   } else {
     process.stdin.setEncoding("utf8");
-    for await (const chunk of process.stdin) raw += chunk;
+    for await (const chunk of process.stdin) {
+      absorb(chunk);
+      if (overflow) break;
+    }
+  }
+  if (overflow) {
+    stderr.write(
+      "Budgetary: the session-end payload on stdin exceeded the size limit; ignoring it.\n",
+    );
+    return 0;
   }
   let payload: SessionEndPayload | null = null;
   if (raw.trim().length > 0) {
