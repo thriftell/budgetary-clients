@@ -17,6 +17,16 @@ import type {
   EstimateToolResult,
 } from "../src/tools/estimate.js";
 
+// Read the sole recorded call without a non-null assertion: noUncheckedIndexedAccess
+// types `arr[0]` as `T | undefined`, so narrow it with a guard (like `firstText`).
+function firstCall<T>(calls: readonly T[]): T {
+  const first = calls[0];
+  if (first === undefined) {
+    throw new Error("expected the injected runner to have been called");
+  }
+  return first;
+}
+
 describe("SERVER_VERSION", () => {
   it("is derived from package.json, not a hard-coded 0.0.0", () => {
     const pkg = JSON.parse(
@@ -128,7 +138,7 @@ describe("handleCallTool", () => {
       runEstimate: spy.runEstimate,
     });
     expect(spy.calls).toHaveLength(1);
-    expect(spy.calls[0]!.query).toBe("");
+    expect(firstCall(spy.calls).query).toBe("");
   });
 
   it("coerces a non-string model to undefined", async () => {
@@ -136,7 +146,7 @@ describe("handleCallTool", () => {
     await handleCallTool(callRequest({ query: "q", model: 7 }), {
       runEstimate: spy.runEstimate,
     });
-    expect(spy.calls[0]!.model).toBeUndefined();
+    expect(firstCall(spy.calls).model).toBeUndefined();
   });
 
   it("passes a string query and model through unchanged", async () => {
@@ -144,8 +154,8 @@ describe("handleCallTool", () => {
     await handleCallTool(callRequest({ query: "estimate this", model: "claude-x" }), {
       runEstimate: spy.runEstimate,
     });
-    expect(spy.calls[0]!.query).toBe("estimate this");
-    expect(spy.calls[0]!.model).toBe("claude-x");
+    expect(firstCall(spy.calls).query).toBe("estimate this");
+    expect(firstCall(spy.calls).model).toBe("claude-x");
   });
 
   it("maps the tool result's text and isError through to the MCP content", async () => {
@@ -191,7 +201,7 @@ describe("runOnSessionEndCli (stdin hook path)", () => {
     });
     expect(code).toBe(0);
     expect(auto.calls).toHaveLength(1);
-    expect(auto.calls[0]!.payload).toEqual(payload);
+    expect(firstCall(auto.calls).payload).toEqual(payload);
     expect(errs.join("")).toBe(""); // silent on a valid payload
   });
 
@@ -220,7 +230,7 @@ describe("runOnSessionEndCli (stdin hook path)", () => {
     });
     expect(code).toBe(0);
     expect(auto.calls).toHaveLength(1);
-    expect(auto.calls[0]!.payload).toBeNull();
+    expect(firstCall(auto.calls).payload).toBeNull();
     expect(errs.join("")).toBe("");
   });
 });
