@@ -29,6 +29,68 @@ export interface HttpRequest {
 const NETWORK_ERROR_MESSAGE = "network error while contacting Budgetary API";
 const TIMEOUT_ERROR_MESSAGE = "request to Budgetary API timed out";
 
+/**
+ * Hard ceiling on a response body (8 MiB). The API's real responses are a few KB;
+ * a much larger body from a hostile or misbehaving endpoint is a memory-exhaustion
+ * vector, so the read is bounded and a body over the cap is rejected as a network
+ * error rather than buffered in full.
+ */
+const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Read a response body with a hard byte cap. Rejects up-front on an oversized
+ * `Content-Length`, and otherwise streams and aborts once the cap is exceeded so
+ * a lying/absent `Content-Length` cannot force an unbounded buffer. Falls back to
+ * `response.text()` when the environment/test double exposes no readable stream.
+ */
+async function readBodyCapped(response: Response): Promise<string> {
+  const declared = response.headers.get("content-length");
+  if (declared !== null) {
+    const n = Number(declared);
+    if (Number.isFinite(n) && n > MAX_RESPONSE_BYTES) {
+      throw new BudgetaryNetworkError({
+        code: "network",
+        message: "response body from Budgetary API exceeds the size limit",
+      });
+    }
+  }
+  const oversize = () =>
+    new BudgetaryNetworkError({
+      code: "network",
+      message: "response body from Budgetary API exceeds the size limit",
+    });
+
+  const body = response.body;
+  if (!body || typeof body.getReader !== "function") {
+    // No readable stream (e.g. a test double): read fully, then enforce by size.
+    const text = await response.text();
+    if (new TextEncoder().encode(text).length > MAX_RESPONSE_BYTES) throw oversize();
+    return text;
+  }
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) {
+      total += value.byteLength;
+      if (total > MAX_RESPONSE_BYTES) {
+        await reader.cancel().catch(() => {});
+        throw oversize();
+      }
+      chunks.push(value);
+    }
+  }
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder("utf-8").decode(merged);
+}
+
 function snakeKey(key: string): string {
   return key.replace(/([A-Z])/g, (m) => `_${m.toLowerCase()}`);
 }
@@ -217,6 +279,11 @@ export class HttpClient {
         headers,
         body,
         signal,
+        // A hostile endpoint could answer with a 3xx to a `Location` it controls;
+        // following it would re-POST the request body (and the Authorization
+        // header) to that host. Refuse redirects outright (parity with the Python
+        // SDK's httpx default of `follow_redirects=False`).
+        redirect: "error",
       });
     } catch (err) {
       throw mapNetworkError(err);
@@ -224,8 +291,9 @@ export class HttpClient {
 
     let text: string;
     try {
-      text = await response.text();
+      text = await readBodyCapped(response);
     } catch (err) {
+      if (err instanceof BudgetaryError) throw err;
       // The body read can stall or time out after the headers arrived (the
       // AbortSignal also covers the body). Classify it as a network error —
       // exactly like a failure of the fetch call itself — instead of letting a
@@ -256,7 +324,37 @@ export class HttpClient {
       );
     }
 
+    // `JSON.parse` rejects the bare `Infinity`/`NaN` tokens but silently coerces
+    // an overflowing literal (`1e400`) to `Infinity`. Refuse any non-finite
+    // number so it can't reach the numeric response fields.
+    assertFiniteNumbers(parsed);
     return toCamelCase(parsed);
+  }
+}
+
+/**
+ * Throw a network error if any number anywhere in a (successful) response body is
+ * non-finite. Applied only to 2xx bodies — an error body's numbers are never read
+ * as numbers.
+ */
+function assertFiniteNumbers(value: unknown): void {
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new BudgetaryNetworkError({
+        code: "network",
+        message: "response from Budgetary API contained a non-finite number",
+      });
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const v of value) assertFiniteNumbers(v);
+    return;
+  }
+  if (value !== null && typeof value === "object") {
+    for (const v of Object.values(value as Record<string, unknown>)) {
+      assertFiniteNumbers(v);
+    }
   }
 }
 

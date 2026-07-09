@@ -1,4 +1,5 @@
 import { HttpClient, type HttpClientConfig } from "./internal/http.js";
+import { assertAllowedBaseUrl } from "./internal/url.js";
 import { resolveClientRequestId } from "./internal/idempotency.js";
 import type {
   ActualsRequest,
@@ -22,6 +23,13 @@ export interface BudgetaryClientOptions {
   maxRetries?: number;
   /** Override for the global `fetch`. Mainly for tests. */
   fetchImpl?: typeof fetch;
+  /**
+   * Allow a non-HTTPS `baseUrl` to carry the API key. Default `false`: a
+   * non-`https:` base URL is refused unless it is a localhost address, so the
+   * bearer token is never sent in cleartext to a real host. Set `true` only for
+   * a trusted local/lab endpoint you control.
+   */
+  allowInsecure?: boolean;
 }
 
 export interface EstimateCallOptions {
@@ -54,9 +62,13 @@ export class BudgetaryClient {
         "BudgetaryClient: `apiKey` is required — pass a non-empty Budgetary API key.",
       );
     }
+    const baseUrl = opts.baseUrl ?? DEFAULT_BASE_URL;
+    // Refuse to attach the bearer token to a non-HTTPS, non-localhost base URL
+    // (unless explicitly opted in) — it would travel in cleartext.
+    assertAllowedBaseUrl(baseUrl, opts.allowInsecure ?? false);
     const config: HttpClientConfig = {
       apiKey: opts.apiKey,
-      baseUrl: opts.baseUrl ?? DEFAULT_BASE_URL,
+      baseUrl,
       timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       maxRetries: opts.maxRetries ?? DEFAULT_MAX_RETRIES,
       fetchImpl: opts.fetchImpl,

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import math
+import time
 from email.utils import parsedate_to_datetime
 from typing import Any, Callable, TypeVar
 
@@ -21,6 +24,28 @@ from budgetary.errors import (
 from .retry import with_retry
 
 T = TypeVar("T")
+
+# Hard ceiling on a response body (8 MiB). The API's real responses are a few KB;
+# a much larger body from a hostile or misbehaving endpoint is a memory-exhaustion
+# vector, so the body is streamed and bounded rather than buffered whole.
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+
+
+def _reject_non_finite(token: str) -> Any:
+    """`json.loads` parse_constant hook: refuse the bare ``Infinity`` /
+    ``-Infinity`` / ``NaN`` tokens from a hostile server instead of letting them
+    flow into the numeric dataclasses."""
+    raise ValueError(f"non-finite JSON constant: {token}")
+
+
+def _reject_non_finite_float(token: str) -> float:
+    """`json.loads` parse_float hook: refuse a numeric literal that OVERFLOWS to
+    infinity (e.g. ``1e400``) — ``parse_constant`` only sees the bare keyword
+    tokens, so this closes the overflow-to-``inf`` path into the dataclasses."""
+    value = float(token)
+    if not math.isfinite(value):
+        raise ValueError(f"non-finite JSON number: {token}")
+    return value
 
 
 def _default_code_for_status(status: int) -> str:
@@ -160,15 +185,49 @@ class HttpClient:
                 else:
                     clean_params[key] = value
 
+        # httpx's timeout is per-operation (connect / read / write), so a slow
+        # drip could still run past it in wall-clock terms. Bound the whole
+        # request with a monotonic deadline enforced while streaming the body.
+        deadline = time.monotonic() + timeout_seconds
+        raw = bytearray()
         try:
-            response = self._client.request(
+            with self._client.stream(
                 method,
                 url,
                 headers=headers,
                 json=json_body,
                 params=clean_params,
                 timeout=timeout_seconds,
-            )
+                # Never follow a redirect: a hostile 3xx would re-send the request
+                # (and the Authorization header) to its `Location`. Set explicitly
+                # so a caller-supplied client with `follow_redirects=True` can't
+                # re-enable it.
+                follow_redirects=False,
+            ) as response:
+                declared = response.headers.get("content-length")
+                if declared is not None:
+                    try:
+                        if int(declared) > MAX_RESPONSE_BYTES:
+                            raise BudgetaryNetworkError(
+                                code="network",
+                                message="response body from Budgetary API exceeds the size limit",
+                            )
+                    except ValueError:
+                        pass  # unparseable Content-Length: fall back to the streamed cap
+                for chunk in response.iter_bytes():
+                    raw.extend(chunk)
+                    if len(raw) > MAX_RESPONSE_BYTES:
+                        raise BudgetaryNetworkError(
+                            code="network",
+                            message="response body from Budgetary API exceeds the size limit",
+                        )
+                    if time.monotonic() > deadline:
+                        raise BudgetaryNetworkError(
+                            code="timeout",
+                            message="request to Budgetary API exceeded its total deadline",
+                        )
+                status_code = response.status_code
+                resp_headers = response.headers
         except httpx.TimeoutException as err:
             raise BudgetaryNetworkError(
                 code="timeout", message=f"request to Budgetary API timed out: {err}"
@@ -185,15 +244,21 @@ class HttpClient:
             ) from err
 
         body: dict[str, Any] | None = None
-        text = response.text
-        if text:
+        if raw:
             try:
-                body = response.json()
+                # `parse_constant` rejects Infinity/NaN; `errors="replace"` turns a
+                # non-UTF-8 body into text that then fails to parse (→ body=None),
+                # matching the prior "non-JSON body" handling.
+                body = json.loads(
+                    raw.decode("utf-8", errors="replace"),
+                    parse_constant=_reject_non_finite,
+                    parse_float=_reject_non_finite_float,
+                )
             except ValueError:
                 body = None
 
-        if response.status_code >= 400:
-            raise _build_error(response.status_code, body, response.headers)
+        if status_code >= 400:
+            raise _build_error(status_code, body, resp_headers)
 
         try:
             return parse(body or {})
