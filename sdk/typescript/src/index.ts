@@ -33,3 +33,12 @@ export type {
   LedgerActual,
   LedgerPredicted,
 } from "./types.js";
+
+export {
+  DEFAULT_BASE_URL,
+  budgetaryDir,
+  configFilePath,
+  resolveConfig,
+  resolveConfigStatus,
+} from "./config.js";
+export type { ConfigStatus, ResolvedConfig } from "./config.js";
