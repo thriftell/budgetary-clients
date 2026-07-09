@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHmac } from "node:crypto";
 import { resolve as resolvePath } from "node:path";
 
 import {
@@ -11,6 +11,7 @@ import {
 } from "@budgetary/sdk";
 
 import {
+  installSalt,
   noKeyGuidance,
   pendingFilePath,
   resolveConfigStatus,
@@ -46,10 +47,21 @@ export interface EstimateToolResult {
   isError: boolean;
 }
 
-/** A non-reversible hash of the absolute working directory. */
-export function projectIdFromCwd(cwd: string): string {
+/**
+ * A non-reversible, per-install identifier for the absolute working directory:
+ * `HMAC-SHA256(install_salt, abs_cwd)` truncated to 16 hex. Because the salt is
+ * a machine-local secret ({@link installSalt}) that never leaves the machine,
+ * the server cannot dictionary-reverse the id back to a path or a
+ * `~/<user>/<repo>` — while it stays STABLE across runs for one install (the
+ * salt persists), so estimates keep grouping into the same project and actuals
+ * still bind to their own session's estimate.
+ */
+export function projectIdFromCwd(cwd: string, home?: string): string {
   const abs = resolvePath(cwd);
-  return createHash("sha256").update(abs).digest("hex").slice(0, 16);
+  return createHmac("sha256", installSalt(home))
+    .update(abs)
+    .digest("hex")
+    .slice(0, 16);
 }
 
 /**
@@ -79,7 +91,7 @@ export async function runEstimateTool(
   }
   const resolved = status.config;
 
-  const projectId = projectIdFromCwd(args.cwd);
+  const projectId = projectIdFromCwd(args.cwd, args.home);
 
   // Optional, deterministically-declared language tag — resolved from the
   // environment exactly like `host`, never from the model and never inferred

@@ -485,9 +485,47 @@ describe("redactBashTarget", () => {
     expect(redactBashTarget(".venv/bin/pytest -q")!).toMatch(/^pytest [0-9a-f]{12}$/);
   });
 
-  it("is stable for identical operations and distinct for different args", () => {
-    expect(redactBashTarget("pytest -q tests/")).toBe(redactBashTarget("pytest -q  tests/"));
-    expect(redactBashTarget("pytest tests/a.py")).not.toBe(redactBashTarget("pytest tests/b.py"));
+  it("is stable for identical operations under one salt, distinct for different args / salts", () => {
+    const salt = Buffer.from("one-submission-salt");
+    // Same salt (one submission): identical operations share a target (retry key).
+    expect(redactBashTarget("pytest -q tests/", salt)).toBe(
+      redactBashTarget("pytest -q  tests/", salt),
+    );
+    expect(redactBashTarget("pytest tests/a.py", salt)).not.toBe(
+      redactBashTarget("pytest tests/b.py", salt),
+    );
+    // Different submission salt → the SAME command hashes to a different digest,
+    // so a precomputed dictionary of plain hashes cannot reverse it.
+    expect(redactBashTarget("pytest -q", Buffer.from("salt-a"))).not.toBe(
+      redactBashTarget("pytest -q", Buffer.from("salt-b")),
+    );
+  });
+
+  it("cleartext program is ALLOWLIST-gated, not charset-gated (the leak crux)", () => {
+    const salt = Buffer.from("fixed-test-salt");
+    // A pasted credential as the first token is well-formed but NOT allowlisted →
+    // bare salted digest, never cleartext.
+    const gh = redactBashTarget("ghp_AbCd1234EfGh5678 --help", salt)!;
+    expect(gh).toMatch(/^[0-9a-f]{12}$/);
+    expect(gh).not.toContain("ghp_");
+    const sk = redactBashTarget("sk-ant-api03-SUPERSECRET tests/", salt)!;
+    expect(sk).toMatch(/^[0-9a-f]{12}$/);
+    expect(sk).not.toContain("sk-ant");
+    // A private/unlisted script or binary name → bare digest (was cleartext under
+    // the old charset gate).
+    const script = redactBashTarget("rotate_prod_keys.sh --prod", salt)!;
+    expect(script).toMatch(/^[0-9a-f]{12}$/);
+    expect(script).not.toContain("rotate_prod_keys");
+    expect(redactBashTarget("deploy-secrets --now", salt)!).toMatch(/^[0-9a-f]{12}$/);
+    // Common, non-sensitive programs are still exposed for server classification.
+    expect(redactBashTarget("pytest -q", salt)!).toMatch(/^pytest [0-9a-f]{12}$/);
+    expect(redactBashTarget("go test ./...", salt)!).toMatch(/^go test [0-9a-f]{12}$/);
+  });
+
+  it("fails closed on a backslash-escaped env value (no later token surfaces as program)", () => {
+    // `TOKEN=abc\ ghp_real cmd`: the escaped space would split the value, leaving
+    // `ghp_real` as the next token → the program. Refuse rather than tokenize in.
+    expect(redactBashTarget("TOKEN=abc\\ ghp_realtoken aws s3", Buffer.from("s"))).toBeNull();
   });
 
   it("fails closed when no clean program name is available", () => {
@@ -531,9 +569,14 @@ describe("redactFileTarget", () => {
     expect(t).not.toContain("/");
   });
 
-  it("is stable per path (a retry key) and distinct across files", () => {
-    expect(redactFileTarget("/a/b/c.ts")).toBe(redactFileTarget("/a/b/c.ts"));
-    expect(redactFileTarget("/a/b/c.ts")).not.toBe(redactFileTarget("/a/b/d.ts"));
+  it("is stable per path under one salt (a retry key), distinct across files / salts", () => {
+    const salt = Buffer.from("one-submission-salt");
+    expect(redactFileTarget("/a/b/c.ts", salt)).toBe(redactFileTarget("/a/b/c.ts", salt));
+    expect(redactFileTarget("/a/b/c.ts", salt)).not.toBe(redactFileTarget("/a/b/d.ts", salt));
+    // Different submission salt → different digest for the same path.
+    expect(redactFileTarget("/a/b/c.ts", Buffer.from("s1"))).not.toBe(
+      redactFileTarget("/a/b/c.ts", Buffer.from("s2")),
+    );
   });
 
   it("fails closed on an empty path", () => {
@@ -651,6 +694,46 @@ describe("readTranscriptUsage — target + ok enrichment", () => {
     ]);
     const step = readTranscriptUsage(path)!.trace[0]!;
     expect("target" in step).toBe(false);
+  });
+
+  it("salts targets PER submission: same within a run, different across runs", () => {
+    const path = write([
+      line("m1", use("Bash", "b1", { command: "pytest tests/secret_a.py" }), { input_tokens: 5, output_tokens: 5 }),
+      resultLine("b1", true),
+      line("m2", use("Bash", "b2", { command: "pytest tests/secret_a.py" }), { input_tokens: 5, output_tokens: 5 }),
+      resultLine("b2", true),
+    ]);
+    const run1 = readTranscriptUsage(path)!.trace;
+    const run2 = readTranscriptUsage(path)!.trace;
+    // Within ONE submission, the same command shares a target (server retry key).
+    expect(run1[0]!.target).toBe(run1[1]!.target);
+    // Across submissions the salt changes → the digest differs (a plain-hash
+    // dictionary can't reverse it), while the cleartext program stays stable.
+    expect(run1[0]!.target).not.toBe(run2[0]!.target);
+    expect(run1[0]!.target!.startsWith("pytest ")).toBe(true);
+    expect(run2[0]!.target!.startsWith("pytest ")).toBe(true);
+  });
+});
+
+describe("readTranscriptUsage — tool-name allowlist (no custom MCP tool leaks)", () => {
+  it("buckets a custom/internal MCP tool name to mcp:other, forwards host tools verbatim", () => {
+    const path = write([
+      line(
+        "m1",
+        use("mcp__acme-billing-internal__rotate_key", "t1", { foo: "bar" }),
+        { input_tokens: 5, output_tokens: 5 },
+      ),
+    ]);
+    const step = readTranscriptUsage(path)!.trace[0]!;
+    expect(step.tool).toBe("mcp:other");
+    // The org-identifying name never appears anywhere in the step.
+    expect(JSON.stringify(step)).not.toContain("acme-billing-internal");
+
+    // A known host tool is still forwarded exactly.
+    const path2 = write([
+      line("m2", use("Bash", "b1", { command: "pytest -q" }), { input_tokens: 1, output_tokens: 1 }),
+    ]);
+    expect(readTranscriptUsage(path2)!.trace[0]!.tool).toBe("Bash");
   });
 });
 

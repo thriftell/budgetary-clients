@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 
 import type { ActualsTraceStep } from "@budgetary/sdk";
@@ -79,8 +79,9 @@ export interface ReadUsageOptions {
  *
  * Each tool step additionally carries two RAW MEASUREMENTS when the transcript
  * exposes them (still behavior, never classification — the server labels):
- *   - `target`: a REDACTED descriptor of what the step acted on (program name +
- *     non-reversible digest for shell steps; a bare path digest for file tools).
+ *   - `target`: a REDACTED descriptor of what the step acted on (an allowlisted
+ *     program name + a salted, non-reversible digest for shell steps; a bare
+ *     salted path digest for file tools).
  *     Suppressed wholesale by {@link ReadUsageOptions.target} = `false`.
  *   - `ok`: the measured outcome, `!is_error` of the matching `tool_result`.
  *     Outcomes arrive on a LATER user line than the `tool_use`, so they are
@@ -167,11 +168,15 @@ export function readTranscriptUsage(
   let tokensIn = 0;
   let tokensOut = 0;
   const trace: TraceStep[] = [];
+  // One fresh salt per call: identical operations WITHIN this submission share a
+  // target (the server's retry key), but the SAME path/command hashes
+  // differently across submissions, and the salt-less server cannot reverse it.
+  const targetSalt = randomBytes(16);
   for (const key of order) {
     const turn = turns.get(key)!;
     tokensIn += turn.tokensIn;
     tokensOut += turn.tokensOut;
-    appendTurnSteps(trace, turn, results, includeTarget);
+    appendTurnSteps(trace, turn, results, includeTarget, targetSalt);
   }
 
   return { tokensIn, tokensOut, trace };
@@ -228,18 +233,105 @@ export function capTrace(trace: TraceStep[]): TraceStep[] | null {
 //   • file tool   → bare path digest. The server classifies file tools by tool
 //     name, so the target is purely a retry key; the path never appears.
 //
-// The digest is a truncated SHA-256 of the NORMALIZED input (trim + collapse
-// whitespace), so the same operation hashes identically (stable retry key) and
-// nothing about the input can be recovered from it.
+// The digest is a truncated, SALTED SHA-256 (HMAC) of the NORMALIZED input (trim
+// + collapse whitespace). Within one submission a single salt is used, so the
+// same operation hashes identically (stable retry key); the salt is fresh per
+// `readTranscriptUsage` call, so the SAME path/command hashes DIFFERENTLY across
+// runs and the server — which never receives the salt — cannot dictionary-
+// reverse a 48-bit truncation back to a known path or command.
 //
-// Leakage is the crux, so the cleartext is gated by ALLOWLISTS, not charsets: a
-// charset (“looks like a word”) would still pass prose, branch names, script
-// names, and many secret tokens. Membership in a fixed keyword set cannot.
+// Leakage is the crux on TWO axes:
+//   1. The digest is salted (above), so it is genuinely non-reversible rather
+//      than a precomputable plain hash of a low-entropy string.
+//   2. The cleartext PROGRAM slot is gated by an ALLOWLIST, not a charset: a
+//      charset (“looks like a word”) still passes prose, branch names, private
+//      script names (`rotate_prod_keys.sh`), and pasted secret tokens
+//      (`ghp_…`, `sk-ant-…`). Membership in a fixed set of common, non-sensitive
+//      programs cannot — anything else degrades to a bare salted digest.
 // ---------------------------------------------------------------------------
 
-/** Truncated, non-reversible SHA-256 — a stable equality key, never a payload. */
-function shortDigest(input: string): string {
-  return createHash("sha256").update(input).digest("hex").slice(0, 12);
+/**
+ * Truncated, SALTED, non-reversible digest (HMAC-SHA256) — a stable equality key
+ * within one submission, never a payload. The caller supplies the per-submission
+ * salt so retry-equality holds within a run while the digest is unrecoverable
+ * across runs (and by the salt-less server).
+ */
+function shortDigest(input: string, salt: Buffer): string {
+  return createHmac("sha256", salt).update(input).digest("hex").slice(0, 12);
+}
+
+/**
+ * The ONLY programs exposed in a target's cleartext slot-1. Gated by MEMBERSHIP,
+ * never a charset: a program reaches the clear only if it is a common,
+ * non-sensitive tool name; a pasted credential, a private script name, or any
+ * other free-form first token degrades to a bare salted digest. Generous by
+ * design — a program *name* leaks nothing sensitive (every path/arg/secret lives
+ * only in the digest) — but never open-ended.
+ */
+const SAFE_PROGRAMS = new Set([
+  // shell builtins / launchers that legitimately lead a command
+  "cd", "source", "sh", "bash", "zsh", "fish", "dash", "env", "time", "xargs",
+  "sudo", "nohup",
+  // language & build drivers (superset of KNOWN_DRIVERS)
+  "go", "npm", "npx", "pnpm", "yarn", "bun", "bunx", "deno", "node",
+  "cargo", "rustc", "git", "pip", "pip2", "pip3", "python", "python2", "python3",
+  "dotnet", "mvn", "gradle", "gradlew", "bundle", "rake", "ruby", "gem",
+  "make", "cmake", "ninja", "meson", "bazel", "buck", "docker", "docker-compose",
+  "kubectl", "helm", "terraform", "ansible", "poetry", "uv", "pipenv", "conda",
+  "composer", "mix", "sbt", "bazelisk", "tox", "nox", "clang", "gcc", "g++",
+  "cc", "javac", "java", "kotlin", "kotlinc", "swift", "dart", "flutter", "php",
+  "dotnet-test", "elixir", "erl", "scala", "lein", "hatch", "pdm",
+  // test / lint / format / type runners commonly invoked directly
+  "pytest", "unittest", "jest", "vitest", "mocha", "ava", "tap", "jasmine",
+  "cypress", "playwright", "tsc", "eslint", "biome", "ruff", "mypy", "pyright",
+  "prettier", "nyc", "c8", "gofmt", "golangci-lint", "rspec", "phpunit",
+  "cabal", "stack", "rubocop", "black", "isort", "flake8", "pylint", "vet",
+  // ubiquitous read-only / build shell utilities
+  "cat", "ls", "grep", "rg", "ag", "sed", "awk", "find", "head", "tail", "wc",
+  "sort", "uniq", "cut", "tr", "echo", "printf", "test", "true", "false",
+  "curl", "wget", "diff", "cmp", "tee", "which", "type", "stat", "du", "df",
+  "cp", "mv", "rm", "mkdir", "touch", "chmod", "chown", "ln", "readlink",
+  "tar", "gzip", "gunzip", "unzip", "zip", "openssl", "shasum", "sha256sum",
+  "gh", "jq", "yq", "sqlite3", "psql", "mysql", "redis-cli", "ps", "kill",
+  "sleep", "date", "hostname", "whoami", "uname", "pwd", "basename", "dirname",
+]);
+
+/** Program-name cleartext cap: a longer first token is treated as unsafe. */
+const MAX_PROGRAM_LEN = 32;
+
+/**
+ * Known secret-token prefixes. A first token starting with any of these is never
+ * exposed even if (hypothetically) allowlisted — belt-and-suspenders on top of
+ * the allowlist gate. Case-sensitive to match the real token shapes.
+ */
+const SECRET_PREFIXES = [
+  "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "glpat-",
+  "sk-", "sk_", "rk_", "pk_", "xox", "AKIA", "ASIA", "eyJ",
+  "bg_live_", "bg_test_", "AIza", "ya29.", "SG.", "dop_v1_",
+];
+
+function looksLikeSecret(token: string): boolean {
+  return SECRET_PREFIXES.some((p) => token.startsWith(p));
+}
+
+/**
+ * Host tool names forwarded verbatim in `trace[].tool`. Anything not here — a
+ * custom or internal MCP tool such as `mcp__acme-billing__rotate_key`, which is
+ * org-identifying and is NOT the kind of thing the `target` opt-out covers — is
+ * bucketed to a fixed, content-free `"mcp:other"` so no private tool name leaves
+ * the machine. This is unconditional (not gated by the target opt-out): the tool
+ * name itself carries no path/arg, so bucketing loses nothing but the identifier.
+ */
+const KNOWN_TOOLS = new Set([
+  "Bash", "BashOutput", "KillBash", "KillShell",
+  "Read", "Edit", "MultiEdit", "Write", "NotebookEdit", "NotebookRead",
+  "Glob", "Grep", "LS",
+  "WebFetch", "WebSearch", "Task", "TodoWrite", "ExitPlanMode", "SlashCommand",
+]);
+
+/** The verbatim host tool name, or `"mcp:other"` for any custom/unknown tool. */
+function safeToolName(name: string): string {
+  return KNOWN_TOOLS.has(name) ? name : "mcp:other";
 }
 
 /**
@@ -317,8 +409,10 @@ function packageRunnerTool(program: string, tokens: string[]): string | null {
   return tool !== undefined && RUNNER_TOOLS.has(tool) ? tool : null;
 }
 
-// A clean program name (no slash/space/`=`/quote) — only such a token is exposed
-// in the clear as the program. Anything else fails closed (no target).
+// A syntactically clean program token (no slash/space/`=`/quote). This is only a
+// WELL-FORMEDNESS gate — a token that fails it can't be reasoned about, so the
+// whole target is omitted (fail closed). Passing it does NOT grant cleartext:
+// slot-1 exposure is separately gated by the {@link SAFE_PROGRAMS} allowlist.
 const SAFE_PROGRAM = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/;
 
 /** True when `token` holds an unbalanced quote — i.e. a value that continues
@@ -358,9 +452,11 @@ function programSegment(command: string): string | null {
     // One leading `KEY=value` assignment, quote-safely.
     const env = s.match(/^([A-Za-z_][A-Za-z0-9_]*=\S*)\s+(.*)$/);
     if (env) {
-      // A quoted value with interior spaces would leave its tail as the next
-      // token (the leak class) — refuse rather than tokenize into it.
-      if (hasUnbalancedQuote(env[1]!)) return null;
+      // A quoted value with interior spaces, OR one ending in a backslash (a
+      // shell line-continuation / escaped space), would leave its tail as the
+      // next token — the leak class (`TOKEN=abc\ ghp_real cmd` would surface
+      // `ghp_real` as the program). Refuse rather than tokenize into it.
+      if (hasUnbalancedQuote(env[1]!) || env[1]!.includes("\\")) return null;
       s = env[2]!;
       continue;
     }
@@ -376,23 +472,44 @@ function programSegment(command: string): string | null {
 }
 
 /**
- * Redact a shell command to `"<program> [<subcommand>] <digest>"`, or `null`
- * when no program name can be exposed safely (fail closed). The digest covers
- * the WHOLE normalized command, so an identical re-run is an identical target.
+ * Redact a shell command to `"<program> [<subcommand>] <digest>"`, a bare
+ * `"<digest>"` when the program is well-formed but not in the cleartext
+ * allowlist (e.g. a pasted credential or a private script name), or `null` when
+ * no program can even be identified (fail closed). The digest covers the WHOLE
+ * normalized command, so within one submission an identical re-run is an
+ * identical target. `salt` is the per-submission salt; a fresh random one is
+ * used when a caller invokes this standalone.
  */
-export function redactBashTarget(command: string): string | null {
+export function redactBashTarget(
+  command: string,
+  salt: Buffer = randomBytes(16),
+): string | null {
   if (typeof command !== "string" || command.trim().length === 0) return null;
-  const digest = shortDigest(command.trim().replace(/\s+/g, " "));
+  const digest = shortDigest(command.trim().replace(/\s+/g, " "), salt);
   const segment = programSegment(command);
   if (segment === null) return null;
   const tokens = segment.split(/\s+/).filter(Boolean);
   if (tokens.length === 0) return null;
   let program = tokens[0]!;
   if (program.includes("/")) program = program.slice(program.lastIndexOf("/") + 1);
+  // A token that isn't even well-formed can't be reasoned about → omit the whole
+  // target (fail closed), matching the prior behavior for `"quoted"` / `$VAR`.
   if (!SAFE_PROGRAM.test(program)) return null;
 
-  const parts = [program];
   const lower = program.toLowerCase();
+  // Slot-1 cleartext is ALLOWLIST-gated (not charset-gated): expose the program
+  // only if it is a common, non-sensitive tool. A private script name or a
+  // pasted secret is well-formed but NOT allowlisted, so it ships as a bare
+  // salted digest with no cleartext. Length + secret-prefix are belt-and-braces.
+  if (
+    !SAFE_PROGRAMS.has(lower) ||
+    program.length > MAX_PROGRAM_LEN ||
+    looksLikeSecret(program)
+  ) {
+    return digest;
+  }
+
+  const parts = [program];
   const runner = packageRunnerTool(lower, tokens);
   if ((lower === "python" || lower === "python3") && tokens[1] === "-m") {
     // `python -m pytest` — the module is the effective program. Expose it only
@@ -413,29 +530,34 @@ export function redactBashTarget(command: string): string | null {
   return `${parts.join(" ")} ${digest}`;
 }
 
-/** Redact a file path to a bare, non-reversible digest (a retry key only). */
-export function redactFileTarget(path: string): string | null {
+/** Redact a file path to a bare, salted, non-reversible digest (a retry key only). */
+export function redactFileTarget(
+  path: string,
+  salt: Buffer = randomBytes(16),
+): string | null {
   if (typeof path !== "string" || path.trim().length === 0) return null;
-  return shortDigest(path.trim());
+  return shortDigest(path.trim(), salt);
 }
 
 /**
  * Derive the redacted `target` for one tool use, or `null` to omit it. Shell
  * steps redact `input.command`; any tool exposing a path (`file_path` /
  * `notebook_path` / `path`) gets a bare path digest; everything else has no
- * safe descriptor and is omitted (fail closed).
+ * safe descriptor and is omitted (fail closed). `salt` is the per-submission
+ * salt so that within a run identical operations share a target.
  */
 export function redactTarget(
   toolName: string,
   input: Record<string, unknown>,
+  salt: Buffer = randomBytes(16),
 ): string | null {
   if (toolName === "Bash") {
     return typeof input.command === "string"
-      ? redactBashTarget(input.command)
+      ? redactBashTarget(input.command, salt)
       : null;
   }
   const path = input.file_path ?? input.notebook_path ?? input.path;
-  return typeof path === "string" ? redactFileTarget(path) : null;
+  return typeof path === "string" ? redactFileTarget(path, salt) : null;
 }
 
 interface ToolUse {
@@ -457,6 +579,7 @@ function appendTurnSteps(
   turn: Turn,
   results: Map<string, boolean>,
   includeTarget: boolean,
+  salt: Buffer,
 ): void {
   const n = turn.tools.length;
   if (n === 0) return; // text/thinking-only turn → no tool step (still in totals)
@@ -475,10 +598,14 @@ function appendTurnSteps(
       tokens = base + (remainder > 0 ? 1 : 0);
       if (remainder > 0) remainder -= 1;
     }
-    const step: TraceStep = { tool: use.name, tokens };
+    // Forward only ALLOWLISTED host tool names verbatim; a custom/internal MCP
+    // tool name is org-identifying, so it is bucketed to `"mcp:other"`. The
+    // target is still derived from the ORIGINAL name so Bash / path dispatch is
+    // unaffected (a custom tool has no safe target anyway → omitted).
+    const step: TraceStep = { tool: safeToolName(use.name), tokens };
     if (n > 1) step.kind = "turn-split";
     if (includeTarget && use.input !== null) {
-      const target = redactTarget(use.name, use.input);
+      const target = redactTarget(use.name, use.input, salt);
       if (target !== null) step.target = target;
     }
     if (use.id !== null) {

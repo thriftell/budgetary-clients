@@ -255,7 +255,7 @@ function sessionProjectId(args: AutoActualsArgs): string | null {
       ? args.payload.cwd
       : undefined);
   if (typeof cwd !== "string" || cwd.length === 0) return null;
-  return projectIdFromCwd(cwd);
+  return projectIdFromCwd(cwd, args.home);
 }
 
 /**
@@ -420,7 +420,7 @@ export async function runManualActuals(args: ManualActualsArgs): Promise<number>
 
   const entry =
     args.cwd !== undefined
-      ? newestForProject(file.entries, projectIdFromCwd(args.cwd))
+      ? newestForProject(file.entries, projectIdFromCwd(args.cwd, args.home))
       : file.entries[file.entries.length - 1]!;
   if (entry === null) {
     args.out("No pending Budgetary estimate for this project directory.");
@@ -580,7 +580,10 @@ export async function runRolloutActuals(
     return 0;
   }
 
-  const entry = newestForProject(file.entries, projectIdFromCwd(args.cwd));
+  const entry = newestForProject(
+    file.entries,
+    projectIdFromCwd(args.cwd, args.home),
+  );
   if (entry === null) {
     args.out("No pending Budgetary estimate for this project directory.");
     args.out(
@@ -731,7 +734,7 @@ export function runPendingList(args: PendingListArgs): number {
 
   const now = (args.now ?? (() => new Date()))();
   const projectId =
-    args.cwd !== undefined ? projectIdFromCwd(args.cwd) : null;
+    args.cwd !== undefined ? projectIdFromCwd(args.cwd, args.home) : null;
   const sorted = [...entries].sort((a, b) => {
     const ta = Date.parse(a.created_at);
     const tb = Date.parse(b.created_at);

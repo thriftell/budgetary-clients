@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -78,6 +86,60 @@ afterEach(() => {
 
 const asClient = (fake: FakeClient) =>
   fake as unknown as import("@budgetary/sdk").BudgetaryClient;
+
+describe("projectIdFromCwd — salted, per-install, non-reversible", () => {
+  it("is stable across runs for one install, 16-hex, and never the raw path", () => {
+    const a = projectIdFromCwd(cwd, home);
+    const b = projectIdFromCwd(cwd, home); // a later run, same install salt
+    expect(a).toBe(b);
+    expect(a).toMatch(/^[0-9a-f]{16}$/);
+    expect(a).not.toContain(cwd);
+  });
+
+  it("differs across installs (distinct salt) for the same working directory", () => {
+    const home2 = mkdtempSync(join(tmpdir(), "budgetary-home2-"));
+    try {
+      expect(projectIdFromCwd(cwd, home)).not.toBe(projectIdFromCwd(cwd, home2));
+    } finally {
+      rmSync(home2, { recursive: true, force: true });
+    }
+  });
+
+  it("persists the install salt owner-only (no group/other access)", () => {
+    projectIdFromCwd(cwd, home);
+    const saltPath = join(home, ".budgetary", "install-salt");
+    expect(existsSync(saltPath)).toBe(true);
+    // The salt is a machine-local secret — it must not be group/world readable.
+    expect(statSync(saltPath).mode & 0o077).toBe(0);
+  });
+
+  it("self-heals a malformed install-salt so the id stays stable across runs", () => {
+    // A truncated / garbage salt file (e.g. left by a crash mid-write) must not
+    // make project_id churn every run — that would silently break the
+    // estimate↔actuals binding. It is repaired in place instead.
+    const saltPath = join(home, ".budgetary", "install-salt");
+    mkdirSync(join(home, ".budgetary"), { recursive: true });
+    writeFileSync(saltPath, "not-valid-hex", "utf8");
+
+    const a = projectIdFromCwd(cwd, home);
+    const b = projectIdFromCwd(cwd, home); // a later run, same install
+    expect(a).toBe(b);
+    expect(a).toMatch(/^[0-9a-f]{16}$/);
+    // The unusable file was repaired to a valid, persisted 32-byte salt.
+    expect(readFileSync(saltPath, "utf8").trim()).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("stays stable via a deterministic fallback when the salt cannot be persisted", () => {
+    // A directory sitting at the salt path can be neither created (wx) nor
+    // removed (unlink), so no per-install secret can be stored. project_id must
+    // still be STABLE across runs (deterministic fallback), so binding survives.
+    mkdirSync(join(home, ".budgetary", "install-salt"), { recursive: true });
+    const a = projectIdFromCwd(cwd, home);
+    const b = projectIdFromCwd(cwd, home);
+    expect(a).toBe(b);
+    expect(a).toMatch(/^[0-9a-f]{16}$/);
+  });
+});
 
 describe("runEstimateTool — happy path", () => {
   it("threads host from BUDGETARY_HOST, passes query+model, appends pending, renders result", async () => {
@@ -379,7 +441,7 @@ describe("runEstimateTool — honest failures & host-aware onboarding", () => {
       JSON.stringify({
         version: 1,
         entries: [
-          { estimate_id: "est_old", query: "earlier task", project_id: projectIdFromCwd(cwd), created_at: "2026-05-27T09:00:00Z", attempts: 0 },
+          { estimate_id: "est_old", query: "earlier task", project_id: projectIdFromCwd(cwd, home), created_at: "2026-05-27T09:00:00Z", attempts: 0 },
         ],
       }),
       "utf8",

@@ -13,15 +13,19 @@ describe("traceTargetEnabled — privacy opt-out (fail-safe ON)", () => {
     expect(traceTargetEnabled(env())).toBe(true);
   });
 
-  it("treats only explicit off-values as opt-out", () => {
-    for (const v of ["0", "false", "off", "no", "OFF", " False ", "No"]) {
-      expect(traceTargetEnabled(env(v))).toBe(false);
+  it("stays ON only for explicit affirmatives and the blank/unset default", () => {
+    for (const v of ["1", "true", "on", "yes", "ON", " Yes ", ""]) {
+      expect(traceTargetEnabled(env(v))).toBe(true);
     }
   });
 
-  it("leaves any other value ON (fail-safe — never silently suppresses)", () => {
-    for (const v of ["1", "true", "on", "yes", "", "redacted", "garbage"]) {
-      expect(traceTargetEnabled(env(v))).toBe(true);
+  it("is OFF for off-values AND any unrecognized value (fail toward less disclosure)", () => {
+    // A mistyped opt-out (`disabled`, `redacted`) must NOT silently keep sending.
+    for (const v of [
+      "0", "false", "off", "no", "OFF", " False ", "No",
+      "disabled", "redacted", "garbage", "2", "onn",
+    ]) {
+      expect(traceTargetEnabled(env(v))).toBe(false);
     }
   });
 });
