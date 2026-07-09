@@ -9,6 +9,9 @@
     "url": "git+https://github.com/thriftell/budgetary-clients.git",
     "directory": "clients/mcp"
   },
+  "engines": {
+    "node": ">=22"
+  },
   "type": "module",
   "bin": {
     "budgetary-mcp": "bin/budgetary-mcp.mjs"
@@ -36,7 +39,8 @@
   },
   "dependencies": {
     "@budgetary/sdk": "workspace:*",
-    "@modelcontextprotocol/sdk": "^1.29.0"
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.7.0",
