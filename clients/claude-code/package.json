@@ -6,26 +6,10 @@
   "private": true,
   "type": "module",
   "files": [
-    "dist",
-    "bin",
     ".claude-plugin",
     ".mcp.json",
     "skills",
     "hooks",
     "README.md"
-  ],
-  "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "test": "vitest run",
-    "lint": "echo \"@budgetary/claude-code: lint placeholder\""
-  },
-  "dependencies": {
-    "@budgetary/mcp": "workspace:*",
-    "@budgetary/sdk": "workspace:*"
-  },
-  "devDependencies": {
-    "@types/node": "^22.7.0",
-    "typescript": "^5.6.0",
-    "vitest": "^3.2.6"
-  }
+  ]
 }

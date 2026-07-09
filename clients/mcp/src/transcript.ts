@@ -581,8 +581,8 @@ function toFiniteNonNeg(v: unknown): number | null {
 //
 // Claude Code writes per-turn `message.usage`; Codex (codex-rs) writes
 // cumulative `event_msg` → `token_count` events whose final `total_token_usage`
-// is the whole-session running total. Ported verbatim from the verified
-// reference parser in clients/codex/src/transcript.ts (kept in sync there). Two
+// is the whole-session running total. This module is the authoritative parser
+// for the Codex rollout dialect. Two
 // facts drive it:
 //   1. `total_token_usage` is CUMULATIVE, so we keep the LAST such record rather
 //      than summing lines (summing would multiply spend by the event count).

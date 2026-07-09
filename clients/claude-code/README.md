@@ -7,7 +7,7 @@ A [Claude Code](https://claude.com/claude-code) plugin that adds:
 
 Together they close the predicted-vs-actual loop on this host. Without the hook the API has no feedback signal.
 
-Everything executable runs through the published [`@budgetary/mcp`](https://www.npmjs.com/package/@budgetary/mcp) package via `npx`, so the plugin needs no build artifacts: Claude Code loads only the manifests (`plugin.json`, `.mcp.json`, `hooks/hooks.json`, the skill), and there is no `dist/` or `node_modules` to build or bundle at install time. (The TypeScript under `src/` is the package's tested reference implementation; it is not on the plugin's runtime path.)
+Everything executable runs through the published [`@budgetary/mcp`](https://www.npmjs.com/package/@budgetary/mcp) package via `npx`, so the plugin needs no build artifacts: Claude Code loads only the manifests (`plugin.json`, `.mcp.json`, `hooks/hooks.json`, the skill), and there is no `dist/` or `node_modules` to build or bundle at install time. (The runtime — the `estimate` tool and the `on-session-end` handler — lives in the published `@budgetary/mcp` package; its source and tests are under [`clients/mcp/`](../mcp/) in this monorepo.)
 
 ## Install
 
