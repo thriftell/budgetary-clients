@@ -1,5 +1,11 @@
 # @budgetary/sdk
 
+## 0.3.2
+
+### Patch Changes
+
+- 4509caa: Declare `engines: { node: ">=22" }`, which the code already assumes.
+
 ## 0.3.1
 
 ### Patch Changes
