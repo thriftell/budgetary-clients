@@ -12,6 +12,7 @@ from budgetary.errors import (
     BudgetaryError,
     BudgetaryNetworkError,
     BudgetaryNotFoundError,
+    BudgetaryPermissionError,
     BudgetaryRateLimitError,
     BudgetaryServerError,
     BudgetaryValidationError,
@@ -64,8 +65,13 @@ def _build_error(
 
     kwargs = dict(code=code, message=message, http_status=status, request_id=request_id)
 
-    if status in (401, 403):
+    if status == 401:
         return BudgetaryAuthError(**kwargs)
+    if status == 403:
+        # Distinct from 401 (bad key): a valid key lacking scope. A sibling of
+        # BudgetaryAuthError (both under BudgetaryError), so the two are
+        # distinguishable — matching the TS SDK. See contract §6.
+        return BudgetaryPermissionError(**kwargs)
     if status == 404:
         return BudgetaryNotFoundError(**kwargs)
     if status in (400, 409, 413):
@@ -191,10 +197,14 @@ class HttpClient:
 
         try:
             return parse(body or {})
-        except TypeError as err:
-            raise BudgetaryError(
-                code="schema_mismatch",
-                message=f"unexpected response shape from Budgetary API: {err}",
-                http_status=response.status_code,
-                request_id=response.headers.get("x-request-id"),
+        except (TypeError, KeyError, AttributeError) as err:
+            # A 2xx whose body is missing, non-JSON, a non-object JSON value
+            # (list/str/number → AttributeError on `.get`), or missing a required
+            # field is a truncated or malformed response — surface it inside the
+            # error taxonomy as a network-class failure rather than letting a raw
+            # exception escape. Additive/unknown fields are tolerated by the
+            # parsers, so this only fires on a genuinely unusable body.
+            raise BudgetaryNetworkError(
+                code="network",
+                message=f"unusable response body from Budgetary API: {err!r}",
             ) from err

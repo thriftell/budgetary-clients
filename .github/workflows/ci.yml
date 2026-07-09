@@ -81,3 +81,8 @@ jobs:
       - name: Run tests
         working-directory: sdk/python
         run: pytest
+      - name: Type-check (mypy --strict)
+        # The SDK ships py.typed, so its own hints must actually check. Config
+        # lives in pyproject.toml ([tool.mypy]: strict, files = ["src"]).
+        working-directory: sdk/python
+        run: mypy
