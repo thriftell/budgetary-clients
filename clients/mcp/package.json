@@ -35,7 +35,7 @@
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.test.json",
-    "lint": "echo \"@budgetary/mcp: lint placeholder\""
+    "lint": "biome lint ."
   },
   "dependencies": {
     "@budgetary/sdk": "workspace:*",

@@ -17,9 +17,12 @@
     "node": ">=22"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.3",
     "@changesets/cli": "^2.31.0"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild"]
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
   }
 }

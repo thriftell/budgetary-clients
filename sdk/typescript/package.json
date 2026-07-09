@@ -35,7 +35,7 @@
     "prepare": "pnpm build",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.test.json",
-    "lint": "echo \"@budgetary/sdk: lint placeholder\""
+    "lint": "biome lint ."
   },
   "dependencies": {},
   "devDependencies": {

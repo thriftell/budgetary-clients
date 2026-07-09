@@ -28,7 +28,7 @@ export function startTestServer(): ServerHandle {
     cloned.headers.forEach((v, k) => {
       headers[k] = v;
     });
-    let body: unknown = undefined;
+    let body: unknown;
     const text = await cloned.text();
     if (text.length > 0) {
       try {
