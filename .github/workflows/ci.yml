@@ -14,12 +14,15 @@ jobs:
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v6
         with:
-          node-version: "22"
+          node-version-file: ".nvmrc"
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm -r lint
       # Build deps-first (sdk before mcp), THEN test — never test before build.
       - run: pnpm -r build
+      # Type-check src + test together (tsconfig.test.json); tests are otherwise
+      # only transpiled by vitest, never type-checked.
+      - run: pnpm -r typecheck
       - run: pnpm -r test
       # Prove every PR is release-ready without publishing anything.
       # Use `pnpm pack` (the same tool `changeset publish` uses) rather than
@@ -64,6 +67,27 @@ jobs:
       - name: VS Code extension manifest sanity (unscoped name + publisher + engine)
         run: |
           node -e "const p=require('./clients/vscode/package.json'); if(!/^[a-z0-9][a-z0-9-]*\$/.test(p.name)){console.error('vscode name must be unscoped for vsce/ovsx:',p.name);process.exit(1);} if(!p.publisher){console.error('vscode publisher missing');process.exit(1);} if(!p.engines||!p.engines.vscode){console.error('vscode engines.vscode missing');process.exit(1);} console.log('vscode manifest OK:',p.publisher+'.'+p.name,p.engines.vscode);"
+      - name: server.json version matches @budgetary/mcp package.json
+        # The MCP registry publishes clients/mcp/server.json; both its version
+        # fields must equal the package that ships. Fail the build on any drift
+        # (e.g. a package.json bump that forgot server.json), rather than
+        # discovering it at registry-publish time.
+        run: |
+          node -e '
+            const pkg = require("./clients/mcp/package.json");
+            const srv = require("./clients/mcp/server.json");
+            const want = pkg.version;
+            const top = srv.version;
+            const pkgVer = srv.packages && srv.packages[0] && srv.packages[0].version;
+            if (top !== want || pkgVer !== want) {
+              console.error(
+                "server.json version drift vs clients/mcp/package.json (" + want + "): " +
+                  "top-level=" + top + " packages[0]=" + pkgVer,
+              );
+              process.exit(1);
+            }
+            console.log("server.json version matches package.json: " + want);
+          '
 
   py:
     name: Python SDK

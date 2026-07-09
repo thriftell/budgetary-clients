@@ -1,4 +1,4 @@
-import { http, HttpResponse, type HttpHandler } from "msw";
+import { http, HttpResponse, type HttpHandler, type JsonBodyType } from "msw";
 import { setupServer, type SetupServer } from "msw/node";
 
 export const TEST_API_KEY = "bg_test_dummy";
@@ -28,7 +28,7 @@ export function startTestServer(): ServerHandle {
     cloned.headers.forEach((v, k) => {
       headers[k] = v;
     });
-    let body: unknown = undefined;
+    let body: unknown;
     const text = await cloned.text();
     if (text.length > 0) {
       try {
@@ -71,7 +71,7 @@ export function jsonOk<T extends object>(
 export function jsonStatus(
   path: string,
   status: number,
-  body: unknown,
+  body: JsonBodyType,
   init: ResponseInit = {},
 ): HttpHandler {
   return http.all(`${TEST_BASE_URL}${path}`, () =>

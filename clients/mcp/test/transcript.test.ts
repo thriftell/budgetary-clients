@@ -517,7 +517,7 @@ describe("redactBashTarget", () => {
       const clear = clearOf(t);
       // The cleartext is only "<program>" or "<program> <subcommand>".
       expect(clear.split(" ").length).toBeLessThanOrEqual(2);
-      expect(clear).not.toMatch(/[\/=]/);
+      expect(clear).not.toMatch(/[/=]/);
       for (const s of secrets) expect(t).not.toContain(s);
     }
   });

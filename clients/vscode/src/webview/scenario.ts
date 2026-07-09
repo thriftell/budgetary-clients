@@ -66,6 +66,7 @@ export function markerShapeSvg(
       return `<polygon points="0,${-r} ${-r},${r} ${r},${r}" ${attrs}/>`;
     case "diamond":
       return `<polygon points="0,${-r} ${r},0 0,${r} ${-r},0" ${attrs}/>`;
+    // biome-ignore lint/complexity/noUselessSwitchCase: the explicit "circle" case documents it as a first-class MarkerShape, not merely the default fallback.
     case "circle":
     default:
       return `<circle r="${r}" ${attrs}/>`;

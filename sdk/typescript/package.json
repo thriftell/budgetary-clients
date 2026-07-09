@@ -8,6 +8,9 @@
     "url": "git+https://github.com/thriftell/budgetary-clients.git",
     "directory": "sdk/typescript"
   },
+  "engines": {
+    "node": ">=22"
+  },
   "type": "module",
   "main": "./dist/cjs/index.js",
   "types": "./dist/cjs/index.d.ts",
@@ -31,7 +34,8 @@
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.cjs.json && node -e \"require('fs').writeFileSync('dist/cjs/package.json', JSON.stringify({type: 'commonjs'}))\"",
     "prepare": "pnpm build",
     "test": "vitest run",
-    "lint": "echo \"@budgetary/sdk: lint placeholder\""
+    "typecheck": "tsc -p tsconfig.test.json",
+    "lint": "biome lint ."
   },
   "dependencies": {},
   "devDependencies": {
