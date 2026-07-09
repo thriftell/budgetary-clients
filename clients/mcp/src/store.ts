@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -130,14 +131,28 @@ export class PendingStore {
 
   write(file: PendingStoreFile): void {
     const dir = dirname(this.path);
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    // The store lives under ~/.budgetary, alongside config.json (the API key), so
+    // the directory is created owner-only (0700). An already-loose directory is
+    // tightened best-effort so it doesn't stay world-traversable.
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+    } else {
+      try {
+        chmodSync(dir, 0o700);
+      } catch {
+        // best-effort: not fatal if we can't tighten an existing dir
+      }
+    }
     // Unique temp name: the store at ~/.budgetary/pending.json is shared across
     // concurrent sessions and both plugins, so a fixed `${path}.tmp` could be
     // half-written by one writer and renamed by another. A per-writer name makes
     // the write-then-rename atomic per writer.
     const tmp = `${this.path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
     try {
-      writeFileSync(tmp, JSON.stringify(file, null, 2));
+      // `wx` create-exclusive (the unique name can't pre-exist except via a
+      // planted symlink, which `wx` refuses to follow); `0600` keeps the pending
+      // queries owner-only. The rename carries the mode onto the real file.
+      writeFileSync(tmp, JSON.stringify(file, null, 2), { flag: "wx", mode: 0o600 });
       renameSync(tmp, this.path);
     } catch (err) {
       try {

@@ -31,6 +31,21 @@ export {
 };
 export type { ConfigStatus, ResolvedConfig };
 
+/**
+ * Whether a resolved key matches the documented `bg_live_` / `bg_test_` shape.
+ *
+ * Defense-in-depth for the Claude Code session-end HOOK: that host has no env map
+ * for command hooks, so the plugin key is interpolated into the shell command
+ * (`BUDGETARY_API_KEY="${user_config.api_key}" npx …`) and is briefly visible in
+ * the process list — a documented residual. Validating the shape before the
+ * unattended auto path uses it stops a garbage/injected value from reaching the
+ * wire. Deliberately PERMISSIVE on the body (any non-whitespace) so a real key is
+ * never rejected; only the stable, documented prefix is required.
+ */
+export function looksLikeBudgetaryKey(key: string): boolean {
+  return /^bg_(live|test)_\S+$/.test(key);
+}
+
 export function pendingFilePath(home?: string): string {
   return join(budgetaryDir(home), "pending.json");
 }

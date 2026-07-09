@@ -4,6 +4,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -103,6 +104,23 @@ describe("PendingStore", () => {
     const store = new PendingStore({ path: nested });
     store.append(entry("est_nested"));
     expect(existsSync(nested)).toBe(true);
+  });
+
+  it("creates the store dir owner-only (0700) and the file owner-only (0600)", () => {
+    // The store lives beside config.json (the API key); it must not be group- or
+    // world-accessible.
+    const nested = join(dir, "secretdir", "pending.json");
+    const store = new PendingStore({ path: nested });
+    store.append(entry("est_perms"));
+    expect(statSync(join(dir, "secretdir")).mode & 0o077).toBe(0);
+    expect(statSync(nested).mode & 0o077).toBe(0);
+  });
+
+  it("tightens the file to 0600 even over a pre-existing loose file", () => {
+    // Simulate a store left world-readable by an older client, then rewrite it.
+    writeFileSync(path, JSON.stringify({ version: 1, entries: [] }), { mode: 0o644 });
+    new PendingStore({ path }).append(entry("est_tighten"));
+    expect(statSync(path).mode & 0o077).toBe(0);
   });
 
   it("keeps valid entries and drops only the malformed ones", () => {

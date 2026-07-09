@@ -939,6 +939,35 @@ describe("runAutoActuals", () => {
     expect(readPending(home).entries).toHaveLength(1);
   });
 
+  it("skips submission (and keeps the entry) when the key isn't a recognizable bg_ key", async () => {
+    // The hook path's key arrives via a shell-interpolated command; a garbage or
+    // mis-substituted value must not be sent. The measured actual is left pending.
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_badkey", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient();
+    const errs: string[] = [];
+
+    const code = await runAutoActuals({
+      payload: PAYLOAD,
+      env: { BUDGETARY_API_KEY: "garbage-not-a-bg-key" } as NodeJS.ProcessEnv,
+      home,
+      cwd,
+      now: () => NOW,
+      stderr: { write: (s) => errs.push(s) },
+      clientFactory: () => asClient(fake),
+      readUsage: () => ({ tokensIn: 5, tokensOut: 5, trace: [] }),
+    });
+
+    expect(code).toBe(0);
+    expect(fake.submitActuals).not.toHaveBeenCalled();
+    expect(readPending(home).entries).toHaveLength(1);
+    expect(errs.join("")).toContain("bg_live_/bg_test_");
+  });
+
   it("forwards a measured trace and omits an over-cap one (still submits total)", async () => {
     writePending(home, {
       version: 1,

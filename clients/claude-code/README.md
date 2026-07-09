@@ -128,6 +128,17 @@ Only these values cross the network, and only to `https://api.budgetary.tools`:
 
 Nothing else leaves the machine. The API key is never logged.
 
+### Key handling on a shared host (known residual)
+
+The `estimate` MCP server receives your key through a native `env` map (no shell). The **session-end hook**, however, is a Claude Code *command* hook, and command hooks have no `env` map — so the plugin key is interpolated into the hook's shell command line (`BUDGETARY_API_KEY="…" npx …`). On a **shared, multi-user host** that value is briefly visible in the process list (`ps`) for the few seconds the hook runs.
+
+This is a limitation of the hook mechanism, not something the client can fully close today. Mitigations:
+
+- Prefer a **single-user machine** for anything with a `bg_live_` key, or use a `bg_test_` key where the exposure doesn't matter.
+- Store the key in `~/.budgetary/config.json` (`chmod 600`) — the auto path resolves it from there too, and the key never appears in a *log line* or in `pending.json`.
+
+The auto path also **validates the key shape** (`bg_live_`/`bg_test_`) before use and skips submission for an unrecognized value, so a mis-substituted or injected value is never sent.
+
 ## Troubleshooting
 
 | Question | Answer |

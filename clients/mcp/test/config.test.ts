@@ -3,7 +3,11 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { resolveLanguage, traceTargetEnabled } from "../src/config.js";
+import {
+  looksLikeBudgetaryKey,
+  resolveLanguage,
+  traceTargetEnabled,
+} from "../src/config.js";
 
 const env = (v?: string): NodeJS.ProcessEnv =>
   (v === undefined ? {} : { BUDGETARY_TRACE_TARGET: v }) as NodeJS.ProcessEnv;
@@ -26,6 +30,33 @@ describe("traceTargetEnabled — privacy opt-out (fail-safe ON)", () => {
       "disabled", "redacted", "garbage", "2", "onn",
     ]) {
       expect(traceTargetEnabled(env(v))).toBe(false);
+    }
+  });
+});
+
+describe("looksLikeBudgetaryKey — hook-path key-shape guard", () => {
+  it("accepts real bg_live_/bg_test_ keys (permissive body)", () => {
+    for (const k of [
+      "bg_live_ABC123",
+      "bg_test_dummy",
+      "bg_live_a1-b2_c3.d4",
+      `bg_test_${"x".repeat(48)}`,
+    ]) {
+      expect(looksLikeBudgetaryKey(k)).toBe(true);
+    }
+  });
+
+  it("rejects a value that is not a recognizable key", () => {
+    for (const k of [
+      "",
+      "garbage",
+      "sk-ant-api03-XXX",
+      "bg_prod_x", // not live/test
+      "bg_live_", // empty body
+      "bg_test_ with space",
+      "BG_LIVE_X", // wrong case
+    ]) {
+      expect(looksLikeBudgetaryKey(k)).toBe(false);
     }
   });
 });

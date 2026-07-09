@@ -1,5 +1,5 @@
 import { createHmac, randomBytes } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 
 import type { ActualsTraceStep } from "@budgetary/sdk";
 
@@ -34,6 +34,14 @@ export interface TranscriptUsage extends TranscriptTotals {
  */
 export const TRACE_MAX_STEPS = 512;
 export const TRACE_MAX_BYTES = 16 * 1024;
+
+/**
+ * Upper bound on a transcript file we will read whole into memory. A path is
+ * caller-supplied, so a huge (or maliciously large) file must not be able to
+ * exhaust memory. Generous enough for any real session transcript; a file over
+ * this is treated like any other unreadable input — fail closed, submit nothing.
+ */
+export const MAX_TRANSCRIPT_BYTES = 128 * 1024 * 1024;
 
 export interface ReadUsageOptions {
   /**
@@ -96,6 +104,17 @@ export function readTranscriptUsage(
 ): TranscriptUsage | null {
   const includeTarget = options.target !== false;
   if (!existsSync(path)) return null;
+  // Guard before reading the whole file into memory: a transcript path is
+  // caller-supplied, so it must be a REGULAR file within the size cap. This
+  // rejects an over-cap file AND a non-regular path (a FIFO or a device such as
+  // /dev/zero, which reports size 0 yet would read unbounded). Fail closed
+  // (return null → submit nothing) exactly like the other malformed-input paths.
+  try {
+    const st = statSync(path);
+    if (!st.isFile() || st.size > MAX_TRANSCRIPT_BYTES) return null;
+  } catch {
+    return null;
+  }
   let raw: string;
   try {
     raw = readFileSync(path, "utf8");
