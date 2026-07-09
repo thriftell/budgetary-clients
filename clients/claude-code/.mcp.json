@@ -2,7 +2,7 @@
   "mcpServers": {
     "budgetary": {
       "command": "npx",
-      "args": ["-y", "@budgetary/mcp"],
+      "args": ["-y", "@budgetary/mcp@0.2.3"],
       "env": {
         "BUDGETARY_HOST": "claude-code",
         "BUDGETARY_API_KEY": "${user_config.api_key}"
