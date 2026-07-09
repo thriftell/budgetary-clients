@@ -1,5 +1,26 @@
 # @budgetary/sdk
 
+## 0.3.0
+
+### Minor Changes
+
+- f44b900: Request/retry correctness fixes in the HTTP layer:
+
+  - Free-form `metadata` on `submitActuals` now reaches the wire **verbatim** — only known protocol fields are snake-cased, so caller-owned keys (e.g. `toolCalls`) are no longer rewritten.
+  - A failed or stalled response-body read is now classified as a `BudgetaryNetworkError` instead of escaping as a raw, unclassified error.
+  - An oversized `Retry-After` is clamped to `maxDelay`, so a large or hostile header can no longer stall the client for minutes.
+  - 403 now raises a distinct `BudgetaryPermissionError` (previously folded into `BudgetaryAuthError`), so "your key lacks scope" is distinguishable from "bad key". `maxRetries` defaults to `4` (5 total attempts), matching the API contract.
+
+- b4dc94f: Unify API-key resolution behind a single implementation.
+
+  - `@budgetary/sdk` now exports the resolver — `resolveConfigStatus`, `resolveConfig`, the `ConfigStatus` / `ResolvedConfig` types, and the `configFilePath` / `budgetaryDir` path helpers.
+  - The mcp server re-exports the shared resolver (its public shape and tests are unchanged) and keeps its own pending-store, language, trace-target, and guidance helpers on top.
+  - The VS Code extension drops its private, drifted copy and consumes the shared resolver. **Behavior change:** an _unreadable_ `~/.budgetary/config.json` is now surfaced distinctly ("Config file could not be read") instead of being mislabeled "No API key configured", and the env/file key is trimmed — matching the mcp runtime.
+
+### Patch Changes
+
+- 62c0a20: Fix the dual-published CommonJS type declarations. The CJS build now emits its own `.d.ts` (`tsconfig.cjs.json` `declaration: true`), and the package `exports` map carries per-condition types — `import` and `require` each point at the matching ESM / CJS declarations — with `main` and `types` now pointing at the CJS entry. A CommonJS TypeScript consumer on `moduleResolution: node16` / `nodenext` no longer hits **TS1479** from the ESM `.d.ts` masquerading as CommonJS. CI now runs `@arethetypeswrong/cli` against the packed tarball, so the exports map can't silently regress.
+
 ## 0.2.0
 
 ### Minor Changes

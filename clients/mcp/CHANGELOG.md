@@ -1,5 +1,27 @@
 # @budgetary/mcp
 
+## 0.2.1
+
+### Patch Changes
+
+- f44b900: Pending-store and actuals-submission integrity fixes:
+
+  - Actuals are now bound to their own session (matched by `project_id`) before submission, so a session's realized counts can no longer be attached to a different concurrent session's estimate.
+  - The shared `~/.budgetary/pending.json` no longer loses data under concurrency: the store is re-read immediately before each write, the target entry is removed by `estimate_id` rather than by position, each writer uses a unique temp file, and a single malformed entry no longer discards the whole file (an unreadable/corrupt store is left intact instead of clobbered).
+  - The session-end submit persists its attempt bump **before** the network call and uses a bounded client (short retry/timeout), so a hook killed on session exit still advances toward the give-up bound instead of retrying forever, and a failing submit can't hang the host's exit.
+  - `success` defaults to `false` unless a real termination signal is present.
+
+- b4dc94f: Unify API-key resolution behind a single implementation.
+
+  - `@budgetary/sdk` now exports the resolver — `resolveConfigStatus`, `resolveConfig`, the `ConfigStatus` / `ResolvedConfig` types, and the `configFilePath` / `budgetaryDir` path helpers.
+  - The mcp server re-exports the shared resolver (its public shape and tests are unchanged) and keeps its own pending-store, language, trace-target, and guidance helpers on top.
+  - The VS Code extension drops its private, drifted copy and consumes the shared resolver. **Behavior change:** an _unreadable_ `~/.budgetary/config.json` is now surfaced distinctly ("Config file could not be read") instead of being mislabeled "No API key configured", and the env/file key is trimmed — matching the mcp runtime.
+
+- Updated dependencies [f44b900]
+- Updated dependencies [62c0a20]
+- Updated dependencies [b4dc94f]
+  - @budgetary/sdk@0.3.0
+
 ## 0.2.0
 
 ### Minor Changes
