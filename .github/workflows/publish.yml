@@ -6,8 +6,8 @@ name: publish
 # extension (budgetary-vscode) are published by the changesets-driven
 # .github/workflows/release.yml (publish-on-merge). Claude Code / Codex
 # plugin-marketplace listings are tracked separately (0014b). This workflow is
-# the Python (PyPI) path, which changesets does not manage; it is unchanged by
-# 0014a and remains a placeholder.
+# the Python (PyPI) path, which changesets does not manage: bump the version in
+# sdk/python/pyproject.toml, then push a `sdk-py-vX.Y.Z` tag to publish.
 on:
   push:
     tags:
@@ -31,5 +31,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip build
           python -m build
-      - name: Publish (placeholder)
-        run: echo "publish placeholder"
+      - name: Publish to PyPI (trusted publishing)
+        # OIDC via the id-token permission above — no API token/secret. Requires
+        # a Trusted Publisher for this repo+workflow configured on PyPI.
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: sdk/python/dist/
