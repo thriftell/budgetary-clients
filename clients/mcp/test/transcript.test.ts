@@ -336,6 +336,21 @@ describe("readTranscriptUsage — Codex rollout dialect", () => {
     expect(usage.trace).toEqual([{ tool: "Read", tokens: 120 }]);
   });
 
+  it("does not mis-read a Claude transcript that literally contains \"token_count\" as Codex", () => {
+    // The Codex fast-path marker is the substring `"token_count"`. It can appear
+    // verbatim in a Claude transcript (here as a message's text value), which
+    // must still fall through to the per-turn path — never be parsed as a Codex
+    // rollout. Guards the marker heuristic against a false positive.
+    const path = write([
+      line("msg_fp", { type: "text", text: "token_count" }, { input_tokens: 100, output_tokens: 20 }),
+    ]);
+    expect(readTranscriptUsage(path)).toEqual({
+      tokensIn: 100,
+      tokensOut: 20,
+      trace: [],
+    });
+  });
+
   it("fails closed to null on a file that is neither dialect", () => {
     const path = write([
       { type: "session_meta", payload: {} },

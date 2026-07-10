@@ -746,6 +746,15 @@ function toFiniteNonNeg(v: unknown): number | null {
  * i.e. it is not a Codex rollout, and the Claude Code path handles it instead.
  */
 function readCodexTotals(raw: string): TranscriptTotals | null {
+  // Fast reject: the Codex dialect is identified by its `token_count` event type,
+  // which every rollout carries verbatim (codex-rs uses serde_json, which never
+  // escapes the key). Absent that marker the file is not a Codex rollout, so skip
+  // this whole split + per-line JSON.parse probe — the dominant Claude Code
+  // transcript would otherwise be parsed twice (here and in the per-turn pass
+  // below). A coincidental `"token_count"` in a Claude transcript is harmless: the
+  // probe just runs as before, finds no valid event, and returns null (falling
+  // through to the per-turn parse). Fail-safe in both directions.
+  if (!raw.includes('"token_count"')) return null;
   let latest: TranscriptTotals | null = null;
   for (const line of raw.split("\n")) {
     const trimmed = line.trim();
