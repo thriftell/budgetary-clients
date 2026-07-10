@@ -1,5 +1,61 @@
 # @budgetary/mcp
 
+## 0.2.5
+
+### Patch Changes
+
+- a235ce3: Bundle the server so its heavy runtime dependencies drop from 3 to 1.
+
+  `@budgetary/mcp` is launched with `npx -y @budgetary/mcp` — a fresh install on
+  every (pinned) version bump and in every ephemeral environment (devcontainers,
+  cloud sandboxes). Two of its three runtime dependencies (`@modelcontextprotocol/sdk`
+  and `zod`) transitively pulled the MCP SDK's entire HTTP-server stack — express,
+  hono, jose, eventsource, cors, cross-spawn — about 95 packages / ~22 MB /
+  ~3,600 files on a cold `npx`, none of which the stdio server reaches.
+
+  The package now builds with tsup (esbuild) and bundles `@modelcontextprotocol/sdk`
+  and `zod` into a single self-contained tree (the HTTP stack tree-shakes away; the
+  JSON-schema validation the SDK actually uses — ajv and its deps — is retained,
+  bundled into the output). Those two move to
+  `devDependencies`. `@budgetary/sdk` is deliberately kept as an external,
+  exact-pinned runtime `dependency` (not bundled), so changesets keeps
+  auto-republishing `@budgetary/mcp` whenever the workspace SDK changes and an SDK
+  fix reaches the fleet without a bundle rebuild. A cold `npx -y @budgetary/mcp`
+  now downloads the one mcp bundle plus that single zero-dependency SDK tarball —
+  two small packages instead of 95 / ~22 MB.
+
+  The output is intentionally unminified (this is a public, npm-provenanced
+  package, so the shipped bytes stay auditable), and the bundled third-party
+  license notices are collected into `dist/THIRD-PARTY-NOTICES.txt` at build time.
+
+  No public API or runtime behavior change: the `exports` map, `bin`, the
+  `estimate` tool surface, and the `initialize` + `tools/list` handshake are
+  identical, and the version is still read from the package's own `package.json`
+  at runtime. Verified with a stdio handshake run against only the bundle plus the
+  external SDK (the MCP HTTP stack absent), `attw` (green under the esm-only
+  profile, now also gated in CI), and a packed `dependencies` of just
+  `@budgetary/sdk`.
+
+- 34bd3d9: Trim session-end hook latency, behavior-preserving.
+
+  - **Cap retries on the non-interactive actuals submit paths.** The auto
+    session-end hook, the rollout `on-session-end --transcript`, and the manual
+    `report-actual` now construct the SDK client with `maxRetries: 0` (no
+    in-process retry). During a server outage the SDK's default ladder (4 retries,
+    ~7.5–15 s of backoff sleeps) would run inside the 30 s session-end host budget
+    and delay process exit; and because the SDK honors a `429` `Retry-After` as a
+    floor (clamped to 60 s), even a single retry could sleep past the budget and
+    get the hook killed mid-wait — the exact hang this cap prevents. A failed
+    submit stays pending and is retried on a later session (durable cross-session
+    retry), which is strictly better than blocking exit on in-process sleeps. The
+    interactive `estimate` path is deliberately left at the full retry ladder — a
+    user is waiting there for the result.
+  - **Parse each Claude Code transcript once.** The Codex-dialect probe now
+    fast-rejects when the `token_count` marker is absent (the dominant Claude Code
+    hook path), instead of doing a full `split` + per-line `JSON.parse` that the
+    per-turn parser then repeats. A coincidental `token_count` in a Claude
+    transcript is harmless — the probe runs as before and still falls through.
+
 ## 0.2.4
 
 ### Patch Changes
