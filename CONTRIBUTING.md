@@ -75,6 +75,15 @@ Changesets does **not** cover the Python SDK (see the release map below), and
 the `@budgetary/{claude-code,codex}` plugin packages are in the changesets
 `ignore` list — they ship from git, not a registry.
 
+`@budgetary/mcp` is published as a **bundle**: `@modelcontextprotocol/sdk` and
+`zod` are compiled into `dist/` at build time, so a fix in either only reaches
+users when the mcp package is *rebuilt and republished*. Bumping one of those
+bundled dependencies therefore needs its own `@budgetary/mcp` changeset —
+changesets can't infer it, because they're `devDependencies` of mcp, not
+runtime `dependencies`. `@budgetary/sdk` is the exception: it's kept an external
+runtime `dependency` (`workspace:*`, not bundled), so changesets already
+auto-republishes mcp whenever the SDK changes.
+
 ### Release flow
 
 | What | How |

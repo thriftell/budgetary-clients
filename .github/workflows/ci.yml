@@ -69,6 +69,13 @@ jobs:
           TMP="$(mktemp -d)"
           ( cd sdk/typescript && pnpm pack --pack-destination "$TMP" )
           npx -y @arethetypeswrong/cli@0.18.4 "$TMP"/budgetary-sdk-*.tgz
+          # @budgetary/mcp is ESM-only (type:module, exports only import+types),
+          # so its `.d.ts` are checked with the esm-only profile (which ignores
+          # the node10 / node16-from-CJS rows that are inherent to ESM-only and
+          # were red on the prior tsc build too). This guards the bundled build's
+          # exports/types from silently regressing.
+          ( cd clients/mcp && pnpm pack --pack-destination "$TMP" )
+          npx -y @arethetypeswrong/cli@0.18.4 "$TMP"/budgetary-mcp-*.tgz --profile esm-only
       - name: VS Code extension manifest sanity (unscoped name + publisher + engine)
         run: |
           node -e "const p=require('./clients/vscode/package.json'); if(!/^[a-z0-9][a-z0-9-]*\$/.test(p.name)){console.error('vscode name must be unscoped for vsce/ovsx:',p.name);process.exit(1);} if(!p.publisher){console.error('vscode publisher missing');process.exit(1);} if(!p.engines||!p.engines.vscode){console.error('vscode engines.vscode missing');process.exit(1);} console.log('vscode manifest OK:',p.publisher+'.'+p.name,p.engines.vscode);"
