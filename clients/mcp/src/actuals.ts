@@ -26,6 +26,26 @@ export const MAX_ATTEMPTS = 5;
 const PENDING_TTL_MS = 24 * 60 * 60 * 1000;
 
 /**
+ * Retry cap for the NON-INTERACTIVE actuals submit paths (the auto session-end
+ * hook, the rollout `on-session-end --transcript`, and the manual
+ * `report-actual`). A server outage must not stall the caller — most critically
+ * the session-end hook, which runs inside a 30 s host timeout; the SDK's default
+ * ladder (4 retries, ~7.5–15 s of backoff sleeps) would burn most of that budget
+ * blocking process exit.
+ *
+ * Set to 0 — NO in-process retry — rather than 1: the SDK honors a `429`
+ * `Retry-After` as a floor clamped to 60 s (see the SDK's `withRetry`), and a
+ * 429 is a canonical outage response, so even a single retry could sleep past
+ * the 30 s budget and get the hook killed mid-wait — exactly the hang this cap
+ * exists to prevent. With 0, the path is bounded by the request timeout alone; a
+ * failed submit stays pending and is retried on a later session (up to
+ * {@link MAX_ATTEMPTS}) — durable cross-session retry, strictly better than
+ * blocking exit on in-process sleeps. The interactive `estimate` path
+ * deliberately keeps the SDK's full retry ladder — a user waits there for the result.
+ */
+const UNATTENDED_MAX_RETRIES = 0;
+
+/**
  * Realized counts for a completed run. These are ALWAYS supplied by the
  * caller — either a session-end hook reading the real transcript, or a human
  * typing them into the `report-actual` CLI. There is deliberately no code
@@ -320,7 +340,11 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
   const factory =
     args.clientFactory ??
     ((opts: BudgetaryClientOptions) => new BudgetaryClient(opts));
-  const client = factory({ apiKey: resolved.apiKey, baseUrl: resolved.baseUrl });
+  const client = factory({
+    apiKey: resolved.apiKey,
+    baseUrl: resolved.baseUrl,
+    maxRetries: UNATTENDED_MAX_RETRIES,
+  });
 
   // Fail-closed: an over-cap or empty trace becomes `undefined`, so the total
   // still submits with no `trace` rather than failing or shipping invented steps.
@@ -464,7 +488,11 @@ export async function runManualActuals(args: ManualActualsArgs): Promise<number>
   const factory =
     args.clientFactory ??
     ((opts: BudgetaryClientOptions) => new BudgetaryClient(opts));
-  const client = factory({ apiKey: resolved.apiKey, baseUrl: resolved.baseUrl });
+  const client = factory({
+    apiKey: resolved.apiKey,
+    baseUrl: resolved.baseUrl,
+    maxRetries: UNATTENDED_MAX_RETRIES,
+  });
 
   const outcome = await submitActuals({
     store,
@@ -633,7 +661,11 @@ export async function runRolloutActuals(
   const factory =
     args.clientFactory ??
     ((opts: BudgetaryClientOptions) => new BudgetaryClient(opts));
-  const client = factory({ apiKey: resolved.apiKey, baseUrl: resolved.baseUrl });
+  const client = factory({
+    apiKey: resolved.apiKey,
+    baseUrl: resolved.baseUrl,
+    maxRetries: UNATTENDED_MAX_RETRIES,
+  });
 
   const now = (args.now ?? (() => new Date()))();
   // Fail-closed: an empty/over-cap trace becomes undefined and only the totals

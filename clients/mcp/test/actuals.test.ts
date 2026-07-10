@@ -1188,3 +1188,79 @@ describe("submitActuals — store integrity under concurrency", () => {
     ]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Retry cap on the non-interactive submit paths (P-A2). A server outage must
+// not stall session exit (the hook runs inside a 30s host budget) or the
+// foreground caller; a failed submit stays pending for a later session instead.
+// The interactive `estimate` path is deliberately NOT capped (covered there).
+// ---------------------------------------------------------------------------
+
+describe("non-interactive actuals paths cap SDK retries", () => {
+  // Capture the options the path hands the client factory.
+  let opts: import("@budgetary/sdk").BudgetaryClientOptions | undefined;
+  const capturing =
+    (fake: FakeClient) =>
+    (o: import("@budgetary/sdk").BudgetaryClientOptions) => {
+      opts = o;
+      return asClient(fake);
+    };
+
+  beforeEach(() => {
+    opts = undefined;
+  });
+
+  function seed(estimateId: string) {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: estimateId, query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
+      ],
+    });
+  }
+
+  it("auto (session-end hook) constructs the client with maxRetries: 0", async () => {
+    seed("est_auto_cap");
+    await runAutoActuals({
+      payload: { transcript_path: "/tmp/t.jsonl", reason: "clear" },
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      stderr: { write: () => {} },
+      clientFactory: capturing(makeFakeClient()),
+      readUsage: () => ({ tokensIn: 1, tokensOut: 1, trace: [] }),
+    });
+    expect(opts?.maxRetries).toBe(0);
+    // Still forwards the real config alongside the cap.
+    expect(opts?.apiKey).toBe("bg_test_dummy");
+  });
+
+  it("rollout (on-session-end --transcript) constructs the client with maxRetries: 0", async () => {
+    seed("est_rollout_cap");
+    await runRolloutActuals({
+      transcriptPath: "/tmp/rollout.jsonl",
+      success: true,
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      out: () => {},
+      clientFactory: capturing(makeFakeClient()),
+      readUsage: () => ({ tokensIn: 1, tokensOut: 1, trace: [] }),
+    });
+    expect(opts?.maxRetries).toBe(0);
+  });
+
+  it("manual (report-actual) constructs the client with maxRetries: 0", async () => {
+    seed("est_manual_cap");
+    await runManualActuals({
+      env: ENV,
+      home,
+      out: () => {},
+      prompt: scriptedPrompt(["1", "1", "y", "0"]),
+      clientFactory: capturing(makeFakeClient()),
+    });
+    expect(opts?.maxRetries).toBe(0);
+  });
+});
