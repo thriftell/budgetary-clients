@@ -196,6 +196,15 @@ describe("configDiagnostics — printable, secret-free config view (O-7)", () =>
     expect(d.warnings).toEqual([]);
   });
 
+  it("honors a localhost http base_url (allowed loopback) with no 'refused' warning", () => {
+    // isBaseUrlAllowed permits http on a loopback host — it must NOT be flagged as
+    // refused, and the resolved URL is the localhost one, not the prod default.
+    writeConfig({ api_key: "bg_test_x", base_url: "http://localhost:8787" });
+    const d = configDiagnostics({} as NodeJS.ProcessEnv, home);
+    expect(d.baseUrl).toBe("http://localhost:8787");
+    expect(d.warnings).toEqual([]);
+  });
+
   it("warns that an env key shadows a config base_url", () => {
     writeConfig({ api_key: "bg_test_fromfile", base_url: "https://custom.example.com" });
     const d = configDiagnostics({ BUDGETARY_API_KEY: "bg_live_env" } as NodeJS.ProcessEnv, home);

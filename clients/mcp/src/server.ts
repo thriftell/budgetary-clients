@@ -142,14 +142,31 @@ export function buildServer(): Server {
   return server;
 }
 
-async function runStdioServer(): Promise<void> {
+/**
+ * Seams for {@link runStdioServer} (tests only). `connect` defaults to wiring the
+ * real stdio transport; `stderr` defaults to the process stream. Injecting a
+ * no-op `connect` lets a test assert the readiness banner lands on STDERR without
+ * standing up a real stdio transport (which would consume process stdin/stdout).
+ */
+export interface RunStdioServerDeps {
+  connect?: (server: Server) => Promise<void>;
+  stderr?: { write(s: string): void };
+}
+
+export async function runStdioServer(deps: RunStdioServerDeps = {}): Promise<void> {
   const server = buildServer();
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+  const connect =
+    deps.connect ??
+    (async (s: Server) => {
+      await s.connect(new StdioServerTransport());
+    });
+  await connect(server);
   // One-line readiness banner on STDERR (stdout is the JSON-RPC channel). Without
   // it a bare `npx -y @budgetary/mcp` gives no sign of life — indistinguishable
   // from a hang — even though it is correctly waiting for a client on stdin.
-  process.stderr.write(`Budgetary MCP server v${SERVER_VERSION} ready (stdio).\n`);
+  (deps.stderr ?? process.stderr).write(
+    `Budgetary MCP server v${SERVER_VERSION} ready (stdio).\n`,
+  );
   // The transport keeps the process alive while stdin is open; do not exit.
 }
 

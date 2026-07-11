@@ -10,6 +10,7 @@ import {
   main,
   parseOnSessionEndArgs,
   runOnSessionEndCli,
+  runStdioServer,
   SERVER_VERSION,
   TOOL_NAME,
 } from "../src/server.js";
@@ -337,5 +338,23 @@ describe("main — subcommand dispatch never silently starts the server", () => 
     expect(cap.err.join("")).toContain("Usage:");
     // The usage text is the answer — it never fell through to stdout/server.
     expect(cap.out.join("")).toBe("");
+  });
+});
+
+describe("runStdioServer — readiness banner goes to STDERR, never stdout", () => {
+  it("writes the version banner to stderr and NOTHING to stdout (JSON-RPC channel)", async () => {
+    // Inject a no-op connect so no real stdio transport is stood up; capture the
+    // injected stderr and spy on process.stdout to prove the channel stays clean.
+    const err: string[] = [];
+    const so = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    await runStdioServer({
+      connect: async () => {},
+      stderr: { write: (s: string) => { err.push(s); } },
+    });
+    so.mockRestore();
+    expect(err.join("")).toContain(`Budgetary MCP server v${SERVER_VERSION} ready`);
+    // stdout is reserved for the MCP transport's JSON-RPC — the banner must not
+    // have gone there.
+    expect(so).not.toHaveBeenCalled();
   });
 });

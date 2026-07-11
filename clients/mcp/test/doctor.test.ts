@@ -10,6 +10,7 @@ import {
   BudgetaryPermissionError,
   BudgetaryRateLimitError,
   type BudgetaryClient,
+  type BudgetaryClientOptions,
   type LedgerPage,
 } from "@budgetary/sdk";
 
@@ -105,18 +106,21 @@ describe("runDoctor — key present, connectivity classified via the error taxon
     expect(text).toContain("rejected (401)");
   });
 
-  it("classifies a 403 as no active plan", async () => {
+  it("classifies a 403 as no active plan (exit 1)", async () => {
     const client = ledgerClient(async () => {
       throw new BudgetaryPermissionError({ code: "permission_denied", message: "no plan", httpStatus: 403, requestId: null });
     });
-    expect((await doctor(ENV, client)).text).toContain("no active plan (403)");
+    const { code, text } = await doctor(ENV, client);
+    expect(code).toBe(1);
+    expect(text).toContain("no active plan (403)");
   });
 
-  it("treats a 429 as a VALID key (rate limited, not a failure of the key)", async () => {
+  it("treats a 429 as a VALID key (rate limited, not a failure of the key; exit 1)", async () => {
     const client = ledgerClient(async () => {
       throw new BudgetaryRateLimitError({ code: "rate_limited", message: "slow down", httpStatus: 429, requestId: null, retryAfterSeconds: 5 });
     });
-    const { text } = await doctor(ENV, client);
+    const { code, text } = await doctor(ENV, client);
+    expect(code).toBe(1);
     expect(text).toContain("rate limited (429)");
     expect(text).toContain("key IS valid");
   });
@@ -130,11 +134,42 @@ describe("runDoctor — key present, connectivity classified via the error taxon
     expect(text).toContain("couldn't reach https://api.budgetary.tools");
   });
 
-  it("surfaces a generic 4xx with its request_id", async () => {
+  it("surfaces a generic 4xx with its request_id (exit 1)", async () => {
     const client = ledgerClient(async () => {
       throw new BudgetaryError({ code: "invalid_request", message: "bad", httpStatus: 400, requestId: "req_99" });
     });
-    expect((await doctor(ENV, client)).text).toContain("req_99");
+    const { code, text } = await doctor(ENV, client);
+    expect(code).toBe(1);
+    expect(text).toContain("req_99");
+  });
+
+  it("handles a non-Error thrown value (defensive fallback)", async () => {
+    const client = ledgerClient(async () => {
+      throw "plain string boom"; // eslint-disable-line no-throw-literal
+    });
+    const { code, text } = await doctor(ENV, client);
+    expect(code).toBe(1);
+    expect(text).toContain("plain string boom");
+  });
+
+  it("makes exactly ONE probe, with maxRetries: 0 (never sits through a retry ladder)", async () => {
+    let opts: BudgetaryClientOptions | undefined;
+    const client = okLedger();
+    const lines: string[] = [];
+    await runDoctor({
+      env: ENV,
+      home,
+      now: () => NOW,
+      out: (l) => lines.push(l),
+      clientFactory: (o) => {
+        opts = o;
+        return client;
+      },
+    });
+    expect(client.getLedger).toHaveBeenCalledTimes(1);
+    expect(opts?.maxRetries).toBe(0);
+    // The key VALUE is used to build the client but is not among the printed lines.
+    expect(lines.join("\n")).not.toContain("bg_test_secretvalue");
   });
 });
 
