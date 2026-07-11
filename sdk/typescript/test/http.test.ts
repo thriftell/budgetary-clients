@@ -139,4 +139,13 @@ describe("mapNetworkError names the host + the underlying cause (O-6)", () => {
     expect(err.message).toContain("host: api.test.budgetary.tools");
     expect(err.message).toContain("fetch failed");
   });
+
+  it("handles a non-Error thrown value — host still named, no crash", async () => {
+    const client = makeClient(fetchThatThrows("a bare string, not an Error"));
+    const err = (await client
+      .request({ method: "GET", path: "/v1/health" })
+      .catch((e: unknown) => e)) as BudgetaryError;
+    expect(err).toBeInstanceOf(BudgetaryNetworkError);
+    expect(err.message).toContain("host: api.test.budgetary.tools");
+  });
 });

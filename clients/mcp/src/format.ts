@@ -268,7 +268,9 @@ export function renderTransportError(
     attempts !== undefined && attempts > 1
       ? ` after ${attempts} attempts${
           totalElapsedMs !== undefined && Number.isFinite(totalElapsedMs)
-            ? ` over ${Math.round(totalElapsedMs / 1000)}s`
+            ? // Clamp at 0: the SDK's monotonic clock never yields a negative, but
+              // this is a public renderer — never print "over -2s".
+              ` over ${Math.max(0, Math.round(totalElapsedMs / 1000))}s`
             : ""
         }`
       : "";

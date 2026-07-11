@@ -306,3 +306,51 @@ def test_on_retry_throw_is_swallowed():
         fn, max_retries=3, sleep=lambda _s: None, random_fn=lambda: 0.0, on_retry=boom
     )
     assert res == "ok"
+
+
+def test_non_budgetary_exception_propagates_unannotated():
+    # The broadened `except BudgetaryError` must NOT catch a non-Budgetary
+    # exception — it propagates unchanged (no annotation, no retry). This guards
+    # the single riskiest behavior change (invariant #2).
+    def fn() -> str:
+        raise ValueError("not a budgetary error")
+
+    with pytest.raises(ValueError):
+        with_retry(fn, max_retries=5, sleep=lambda _s: None, random_fn=lambda: 0.0)
+
+
+def test_on_retry_reports_429_status():
+    seen: list[int | None] = []
+
+    def fn() -> str:
+        raise _rate_limit_error(retry_after=None)  # will exhaust
+
+    with pytest.raises(BudgetaryRateLimitError):
+        with_retry(
+            fn,
+            max_retries=1,
+            sleep=lambda _s: None,
+            random_fn=lambda: 1.0,
+            on_retry=lambda _a, _d, status: seen.append(status),
+        )
+
+    assert seen == [429]  # the failing status is reported to the observer
+
+
+def test_client_annotates_returned_error_with_attempts(respx_mock, make_client):
+    # Parity with the TS SDK's errors.test.ts: the annotation reaches a caller
+    # through a real client request, not only the with_retry unit.
+    def handler(_request):
+        return httpx.Response(
+            500,
+            json={"error": {"code": "internal_error", "message": "boom", "request_id": "r"}},
+        )
+
+    respx_mock.post("/v1/estimate").mock(side_effect=handler)
+    client = make_client(max_retries=0)  # exactly one attempt
+
+    with pytest.raises(BudgetaryServerError) as ei:
+        client.estimate("hi", client_request_id=None)
+
+    assert ei.value.attempts == 1
+    assert ei.value.total_elapsed_ms is not None

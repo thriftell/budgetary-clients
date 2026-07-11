@@ -219,6 +219,22 @@ describe("withRetry — attempts / totalElapsedMs / onRetry (O-6)", () => {
     ]);
   });
 
+  it("reports the 429 status to onRetry (not only 5xx)", async () => {
+    const seen: RetryInfo[] = [];
+    let n = 0;
+    await withRetry(
+      async () => {
+        n += 1;
+        if (n < 2) {
+          throw new BudgetaryRateLimitError({ code: "rate_limited", message: "x", httpStatus: 429, requestId: null, retryAfterSeconds: null });
+        }
+        return "ok";
+      },
+      { maxRetries: 3, sleep: async () => {}, random: () => 1, onRetry: (i) => seen.push(i) },
+    );
+    expect(seen.map((i) => i.httpStatus)).toEqual([429]);
+  });
+
   it("swallows a throw from onRetry (a diagnostic hook never derails the request)", async () => {
     let attempt = 0;
     const res = await withRetry(

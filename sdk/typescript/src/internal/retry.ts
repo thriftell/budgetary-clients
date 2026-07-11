@@ -21,7 +21,12 @@ export interface RetryOptions {
   maxDelayMs?: number;
   sleep?: (ms: number) => Promise<void>;
   random?: () => number;
-  /** Injectable monotonic clock (ms) for elapsed tracking; defaults to `Date.now`. */
+  /**
+   * Injectable MONOTONIC clock (ms) for elapsed tracking; defaults to
+   * `performance.now()`. Monotonic (not wall-clock `Date.now`) so an NTP step or
+   * a manual clock change mid-retry can't produce a negative or wrong
+   * `totalElapsedMs`. Parity with Python's `time.monotonic`.
+   */
   now?: () => number;
   /** Observe each retry (attempt just failed, backoff about to sleep). Never throws the run. */
   onRetry?: (info: RetryInfo) => void;
@@ -33,6 +38,11 @@ const DEFAULT_MAX_DELAY_MS = 60_000;
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Monotonic default clock (ms). `performance.now` is monotonic; `Date.now` is not. */
+function defaultNow(): number {
+  return performance.now();
 }
 
 function isRetryable(err: unknown): boolean {
@@ -52,7 +62,7 @@ export async function withRetry<T>(
   const maxDelay = options.maxDelayMs ?? DEFAULT_MAX_DELAY_MS;
   const sleep = options.sleep ?? defaultSleep;
   const random = options.random ?? Math.random;
-  const now = options.now ?? Date.now;
+  const now = options.now ?? defaultNow;
   const onRetry = options.onRetry;
 
   const startedAt = now();
