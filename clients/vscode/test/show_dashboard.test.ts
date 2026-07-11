@@ -187,6 +187,21 @@ describe("dashboard load sequencing", () => {
     expect(fp._html).not.toContain("Could not load ledger");
   });
 
+  it("shows an honest error on a malformed ledger page (entries not an array)", async () => {
+    const fp = makeFakePanel();
+    activePanel = fp;
+    vscodeStub.window.createWebviewPanel = () => fp;
+
+    showDashboard({} as never); // deferreds[0]
+    // A wrong-shape 2xx: `entries` is not an array. It must read as an honest
+    // "unexpected response", never throw out of the renderer.
+    ctl.deferreds[0]!.resolve({ entries: "nope", nextCursor: null });
+    await tick();
+
+    expect(fp._html).toContain("unexpected response");
+    expect(fp._html).toContain("Could not load ledger");
+  });
+
   it("a load resolving after the panel is disposed neither writes nor throws", async () => {
     const fp = makeFakePanel();
     activePanel = fp;
