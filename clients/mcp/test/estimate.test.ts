@@ -326,6 +326,37 @@ describe("runEstimateTool — 403 subscription gate", () => {
   });
 });
 
+describe("runEstimateTool — transport error surfaces the retry ordeal (O-6)", () => {
+  it("renders 'after N attempts over Ns' from the error's attempts/totalElapsedMs", async () => {
+    // A 5xx that exhausted the ladder: the SDK stamps attempts/totalElapsedMs; the
+    // estimate tool must forward them into renderTransportError (the wiring).
+    const err = new BudgetaryError({
+      code: "unavailable",
+      message: "upstream down",
+      httpStatus: 503,
+      requestId: "req_x",
+    });
+    err.attempts = 5;
+    err.totalElapsedMs = 240000;
+    const fake = makeFakeClient(async () => {
+      throw err;
+    });
+
+    const result = await runEstimateTool({
+      query: "estimate this",
+      env: { BUDGETARY_API_KEY: "bg_test_dummy" } as NodeJS.ProcessEnv,
+      cwd,
+      home,
+      clientFactory: () => asClient(fake),
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("Budgetary couldn't be reached");
+    expect(result.text).toContain("after 5 attempts over 240s");
+    expect(result.text).toContain("(request_id: req_x)");
+  });
+});
+
 describe("runEstimateTool — 401 auth failure", () => {
   it("renders a key-rejected message distinct from the 403 wording", async () => {
     const fake = makeFakeClient(async () => {

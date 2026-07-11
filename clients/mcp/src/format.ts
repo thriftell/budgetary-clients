@@ -251,11 +251,28 @@ export function renderRequestRejected(
   return `Budgetary rejected the request: ${message}${tail}.${fix}`;
 }
 
-/** Network failures and 5xx. Surfaces request_id when present, with a retry affordance. */
+/**
+ * Network failures and 5xx. Surfaces request_id when present, with a retry
+ * affordance. When the SDK exhausted its retry ladder, the additive `attempts` /
+ * `totalElapsedMs` from the error are shown as "after N attempts over Ns" — so a
+ * ~4-minute 429/5xx backoff reads as the ordeal it was, not a first-attempt blip.
+ */
 export function renderTransportError(
   message: string,
   requestId: string | null,
+  attempts?: number,
+  totalElapsedMs?: number,
 ): string {
   const tail = requestId ? ` (request_id: ${requestId})` : "";
-  return `Budgetary couldn't be reached: ${message}${tail}. Please try again.`;
+  const retryInfo =
+    attempts !== undefined && attempts > 1
+      ? ` after ${attempts} attempts${
+          totalElapsedMs !== undefined && Number.isFinite(totalElapsedMs)
+            ? // Clamp at 0: the SDK's monotonic clock never yields a negative, but
+              // this is a public renderer — never print "over -2s".
+              ` over ${Math.max(0, Math.round(totalElapsedMs / 1000))}s`
+            : ""
+        }`
+      : "";
+  return `Budgetary couldn't be reached: ${message}${tail}${retryInfo}. Please try again.`;
 }

@@ -1,5 +1,6 @@
 import { BudgetaryNetworkError } from "./errors.js";
 import { HttpClient, type HttpClientConfig } from "./internal/http.js";
+import type { RetryInfo } from "./internal/retry.js";
 import { assertAllowedBaseUrl } from "./internal/url.js";
 import { resolveClientRequestId } from "./internal/idempotency.js";
 import type {
@@ -31,6 +32,13 @@ export interface BudgetaryClientOptions {
    * a trusted local/lab endpoint you control.
    */
   allowInsecure?: boolean;
+  /**
+   * Optional observer invoked before each backoff sleep on a retryable failure
+   * (5xx / 429), with the attempt count, the delay about to be slept, and the
+   * HTTP status. Purely diagnostic — a throw from it is swallowed and never
+   * derails the request. Use it to log/telemeter a slow retry ordeal.
+   */
+  onRetry?: (info: RetryInfo) => void;
 }
 
 export interface EstimateCallOptions {
@@ -113,6 +121,7 @@ export class BudgetaryClient {
       timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       maxRetries: opts.maxRetries ?? DEFAULT_MAX_RETRIES,
       fetchImpl: opts.fetchImpl,
+      onRetry: opts.onRetry,
     };
     this.http = new HttpClient(config);
   }

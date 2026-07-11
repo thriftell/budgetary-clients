@@ -9,6 +9,20 @@ export class BudgetaryError extends Error {
   readonly code: string;
   readonly httpStatus: number | null;
   readonly requestId: string | null;
+  /**
+   * How many attempts were made before this error was thrown. Set by the retry
+   * wrapper: `1` when the first attempt failed non-retryably, up to `maxRetries + 1`
+   * on exhaustion. `undefined` if the error never passed through the retry wrapper.
+   * Additive and diagnostic — a ~4-minute 429/5xx backoff no longer looks like a
+   * first-attempt blip.
+   */
+  attempts?: number;
+  /**
+   * Total wall-clock across every attempt AND the backoff sleeps between them, in
+   * ms. Set alongside {@link attempts} on the final throw. `undefined` if the
+   * error never passed through the retry wrapper.
+   */
+  totalElapsedMs?: number;
 
   constructor(args: BudgetaryErrorArgs) {
     super(args.message);

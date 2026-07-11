@@ -1,5 +1,6 @@
 """Public surface of the ``budgetary`` Python SDK."""
 
+from budgetary._internal.retry import OnRetry
 from budgetary.client import BudgetaryClient
 from budgetary.errors import (
     BudgetaryAuthError,
@@ -45,5 +46,6 @@ __all__ = [
     "LedgerActual",
     "LedgerPredicted",
     "EstimateContext",
+    "OnRetry",
     "normalize_scenario",
 ]

@@ -3,6 +3,7 @@ export type {
   BudgetaryClientOptions,
   EstimateCallOptions,
 } from "./client.js";
+export type { RetryInfo } from "./internal/retry.js";
 
 export {
   BudgetaryError,

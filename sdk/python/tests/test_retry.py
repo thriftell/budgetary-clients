@@ -218,3 +218,139 @@ def test_client_retries_503_and_eventually_succeeds(respx_mock, make_client):
 
     assert res.estimate_id == "est_ok"
     assert calls["n"] == 3
+
+
+# --- O-6: attempts / total_elapsed_ms / on_retry (parity with the TS SDK) ---
+
+
+def test_annotates_attempts_and_elapsed_on_exhaustion():
+    clock = {"t": 0.0}
+
+    def sleep(s: float) -> None:
+        clock["t"] += s  # a fake clock: sleeping advances monotonic time
+
+    def monotonic() -> float:
+        return clock["t"]
+
+    def fn() -> str:
+        raise _server_error()
+
+    with pytest.raises(BudgetaryServerError) as ei:
+        with_retry(
+            fn,
+            max_retries=2,
+            sleep=sleep,
+            monotonic=monotonic,
+            random_fn=lambda: 1.0,
+        )
+
+    err = ei.value
+    # 3 total attempts (initial + 2 retries).
+    assert err.attempts == 3
+    # 2 sleeps of 1.0 s + 2.0 s = 3.0 s = 3000 ms.
+    assert err.total_elapsed_ms == pytest.approx(3000.0)
+
+
+def test_annotates_non_retryable_with_attempts_1():
+    def fn() -> str:
+        raise BudgetaryValidationError(
+            code="invalid_request", message="nope", http_status=400, request_id=None
+        )
+
+    with pytest.raises(BudgetaryValidationError) as ei:
+        with_retry(fn, max_retries=5, sleep=lambda _s: None, random_fn=lambda: 0.0)
+
+    assert ei.value.attempts == 1
+    assert ei.value.total_elapsed_ms is not None
+
+
+def test_on_retry_invoked_with_attempt_delay_status():
+    seen: list[tuple[int, float, int | None]] = []
+    calls = {"n": 0}
+
+    def fn() -> str:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise BudgetaryServerError(
+                code="unavailable", message="x", http_status=503, request_id=None
+            )
+        return "ok"
+
+    with_retry(
+        fn,
+        max_retries=5,
+        sleep=lambda _s: None,
+        random_fn=lambda: 1.0,
+        on_retry=lambda attempt, delay_ms, status: seen.append(
+            (attempt, delay_ms, status)
+        ),
+    )
+
+    assert seen == [(1, 1000.0, 503), (2, 2000.0, 503)]
+
+
+def test_on_retry_throw_is_swallowed():
+    calls = {"n": 0}
+
+    def fn() -> str:
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise _server_error()
+        return "ok"
+
+    def boom(_attempt: int, _delay: float, _status: int | None) -> None:
+        raise RuntimeError("observer blew up")
+
+    # A diagnostic hook must never derail the request.
+    res = with_retry(
+        fn, max_retries=3, sleep=lambda _s: None, random_fn=lambda: 0.0, on_retry=boom
+    )
+    assert res == "ok"
+
+
+def test_non_budgetary_exception_propagates_unannotated():
+    # The broadened `except BudgetaryError` must NOT catch a non-Budgetary
+    # exception — it propagates unchanged (no annotation, no retry). This guards
+    # the single riskiest behavior change (invariant #2).
+    def fn() -> str:
+        raise ValueError("not a budgetary error")
+
+    with pytest.raises(ValueError):
+        with_retry(fn, max_retries=5, sleep=lambda _s: None, random_fn=lambda: 0.0)
+
+
+def test_on_retry_reports_429_status():
+    seen: list[int | None] = []
+
+    def fn() -> str:
+        raise _rate_limit_error(retry_after=None)  # will exhaust
+
+    with pytest.raises(BudgetaryRateLimitError):
+        with_retry(
+            fn,
+            max_retries=1,
+            sleep=lambda _s: None,
+            random_fn=lambda: 1.0,
+            on_retry=lambda _a, _d, status: seen.append(status),
+        )
+
+    assert seen == [429]  # the failing status is reported to the observer
+
+
+def test_client_annotates_returned_error_with_attempts(respx_mock, make_client):
+    # Parity with the TS SDK's errors.test.ts: the annotation reaches a caller
+    # through a real client request, not only the with_retry unit.
+    def handler(_request):
+        return httpx.Response(
+            500,
+            json={"error": {"code": "internal_error", "message": "boom", "request_id": "r"}},
+        )
+
+    respx_mock.post("/v1/estimate").mock(side_effect=handler)
+    client = make_client(max_retries=0)  # exactly one attempt
+
+    with pytest.raises(BudgetaryServerError) as ei:
+        client.estimate("hi", client_request_id=None)
+
+    assert ei.value.attempts == 1
+    assert ei.value.total_elapsed_ms is not None

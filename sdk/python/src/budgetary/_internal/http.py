@@ -21,7 +21,7 @@ from budgetary.errors import (
     BudgetaryValidationError,
 )
 
-from .retry import with_retry
+from .retry import OnRetry, with_retry
 
 T = TypeVar("T")
 
@@ -126,6 +126,7 @@ class HttpClient:
         timeout_ms: int,
         max_retries: int,
         http_client: httpx.Client | None = None,
+        on_retry: OnRetry | None = None,
     ) -> None:
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
@@ -133,6 +134,7 @@ class HttpClient:
         self._max_retries = max_retries
         self._owned_client = http_client is None
         self._client = http_client or httpx.Client()
+        self._on_retry = on_retry
 
     def close(self) -> None:
         if self._owned_client:
@@ -158,6 +160,7 @@ class HttpClient:
                 parse=parse,
             ),
             max_retries=self._max_retries,
+            on_retry=self._on_retry,
         )
 
     def _attempt(
