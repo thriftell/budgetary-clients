@@ -16,6 +16,18 @@ export interface PendingEntry {
   project_id: string;
   created_at: string;
   attempts: number;
+  // --- Additive (v1-compatible) measured counts, persisted ONLY after a FAILED
+  //     submit so a later session's retry resubmits THESE counts rather than
+  //     re-deriving them from a different session's transcript (which would
+  //     mis-pair the actual). Absent on a fresh estimate. Their presence and
+  //     validity is re-checked at read time (a partial/corrupt write is ignored,
+  //     not trusted), so they need no bump to the file `version`.
+  tokens_in?: number;
+  tokens_out?: number;
+  success?: boolean;
+  duration_ms?: number;
+  /** Whether the original (failed) submit carried a trace; the retry sends totals only. */
+  has_trace?: boolean;
 }
 
 export interface PendingStoreFile {
