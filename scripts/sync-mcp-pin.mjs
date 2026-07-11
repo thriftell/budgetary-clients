@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// Keep the pinned `@budgetary/mcp` version in the DISTRIBUTED plugin manifests in
-// lockstep with clients/mcp/package.json.
+// Keep the pinned `@budgetary/mcp` version in the DISTRIBUTED plugin manifests —
+// AND the two version fields in the MCP-registry manifest (clients/mcp/server.json)
+// — in lockstep with clients/mcp/package.json.
 //
 // The Claude Code hook and the two `.mcp.json` files launch the runtime with
 // `npx @budgetary/mcp`; left unpinned that resolves to `latest`, so one bad
@@ -60,18 +61,44 @@ for (const rel of targets) {
   }
 }
 
+// clients/mcp/server.json is the MCP-registry manifest. It carries the mcp
+// version as TWO plain JSON fields (top-level `version` and `packages[0].version`)
+// — not an `@budgetary/mcp@X` npx spec — and `changeset version` never touches
+// them, so every "Version Packages" PR arrives with server.json one bump behind
+// and CI's `server.json version matches package.json` check red until someone
+// hand-commits the fix. Re-sync those two fields here (the ONLY two `"version":`
+// keys in the file) so that CI check becomes a true tripwire, not recurring toil.
+// Surgical string replace, NOT parse+re-stringify, so the file's formatting
+// (inline `transport`/`remotes` objects) is preserved and the diff stays minimal.
+const VERSION_FIELD = /("version":\s*)"[^"]*"/g;
+const serverJsonRel = "clients/mcp/server.json";
+{
+  const path = join(root, serverJsonRel);
+  const before = readFileSync(path, "utf8");
+  const after = before.replace(VERSION_FIELD, `$1"${version}"`);
+  if (after !== before) {
+    drifted.push(serverJsonRel);
+    if (!check) {
+      writeFileSync(path, after);
+      changed += 1;
+    }
+  }
+}
+
 if (check) {
   if (drifted.length > 0) {
     console.error(
-      `sync-mcp-pin --check: these manifests are not pinned to ${pin}:\n  ` +
+      `sync-mcp-pin --check: these files are out of sync with @budgetary/mcp@${version}:\n  ` +
         drifted.join("\n  ") +
         "\nRun `node scripts/sync-mcp-pin.mjs` (or `pnpm run version-packages`).",
     );
     process.exit(1);
   }
-  console.log(`sync-mcp-pin --check: all manifests pinned to ${pin}`);
+  console.log(
+    `sync-mcp-pin --check: all manifests + server.json match ${version}`,
+  );
 } else {
   console.log(
-    `sync-mcp-pin: pinned ${targets.length} manifest(s) to ${pin} (${changed} changed)`,
+    `sync-mcp-pin: synced ${targets.length} manifest(s) + server.json to ${version} (${changed} changed)`,
   );
 }
