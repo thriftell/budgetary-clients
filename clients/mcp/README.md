@@ -12,7 +12,7 @@ Pass your key as `BUDGETARY_API_KEY` and tag the host with `BUDGETARY_HOST` so l
 
 ```bash
 claude mcp add budgetary \
-  --env BUDGETARY_API_KEY=bg_live_... \
+  --env BUDGETARY_API_KEY=bg_test_... \
   --env BUDGETARY_HOST=claude-code \
   -- npx -y @budgetary/mcp
 ```
@@ -28,7 +28,7 @@ claude mcp add budgetary \
       "command": "npx",
       "args": ["-y", "@budgetary/mcp"],
       "env": {
-        "BUDGETARY_API_KEY": "bg_live_...",
+        "BUDGETARY_API_KEY": "bg_test_...",
         "BUDGETARY_HOST": "cursor"
       }
     }
@@ -62,7 +62,7 @@ VS Code uses the `servers` key (not `mcpServers`) and can prompt for secrets via
 
 ```bash
 codex mcp add budgetary \
-  --env BUDGETARY_API_KEY=bg_live_... \
+  --env BUDGETARY_API_KEY=bg_test_... \
   --env BUDGETARY_HOST=codex \
   -- npx -y @budgetary/mcp
 ```
@@ -75,7 +75,7 @@ command = "npx"
 args = ["-y", "@budgetary/mcp"]
 
 [mcp_servers.budgetary.env]
-BUDGETARY_API_KEY = "bg_live_..."
+BUDGETARY_API_KEY = "bg_test_..."
 BUDGETARY_HOST = "codex"
 ```
 
@@ -91,7 +91,7 @@ If neither is set, the `estimate` tool returns short configure-your-key guidance
 ```bash
 mkdir -p ~/.budgetary
 # Write the key with an EDITOR so it never lands in your shell history:
-"${EDITOR:-nano}" ~/.budgetary/config.json   # add: { "api_key": "bg_live_..." }
+"${EDITOR:-nano}" ~/.budgetary/config.json   # add: { "api_key": "bg_test_..." }
 chmod 600 ~/.budgetary/config.json            # owner-only
 ```
 
@@ -115,7 +115,7 @@ You can optionally tag each estimate with the language you're working in, so you
 or add a `language` field to `~/.budgetary/config.json` (the environment variable wins if both are set):
 
 ```json
-{ "api_key": "bg_live_...", "language": "TypeScript" }
+{ "api_key": "bg_test_...", "language": "TypeScript" }
 ```
 
 It's a free-form display name — `TypeScript`, `Python`, `Go`, and so on — that the server tidies up; you don't need an exact spelling. Like `BUDGETARY_HOST`, it is a benign tag you **declare** in the environment: the language model never sets it and it is never guessed from your task description. There is intentionally no `language` argument on the `estimate` tool. If you set nothing, the estimate is simply recorded without a language — it's never required, and it never changes the estimate itself.

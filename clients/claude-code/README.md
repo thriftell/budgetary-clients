@@ -26,7 +26,7 @@ Non-interactive / scripted equivalent:
 
 ```bash
 claude plugin marketplace add thriftell/budgetary-clients
-claude plugin install budgetary@budgetary --config api_key=bg_live_...
+claude plugin install budgetary@budgetary --config api_key=bg_test_...
 ```
 
 > The plugin shells out to `npx -y @budgetary/mcp`, so Node.js and npm must be available on your `PATH` (the same requirement as any npx-launched MCP server). The package is downloaded and cached on first use.
@@ -39,6 +39,8 @@ You can instead (or additionally) provide the key via:
 
 1. the `BUDGETARY_API_KEY` environment variable (set in the shell that launched Claude Code), or
 2. `~/.budgetary/config.json` → `{ "api_key": "bg_..." }`.
+
+A **`bg_test_`** key is the free testing tier and works immediately; **`bg_live_`** is the production key (and must be on an active plan).
 
 If no key is configured, `/estimate` prints a configure-your-key hint and the session-end hook quietly does nothing — it never calls the API and never crashes the session. The API key never appears in `pending.json`, in stdout, or in any error message.
 

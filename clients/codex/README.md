@@ -31,16 +31,18 @@ Codex plugins do not have an install-time secret prompt (the `plugin.json` manif
 2. `~/.budgetary/config.json` → `{ "api_key": "bg_..." }`.
 
 ```bash
-export BUDGETARY_API_KEY=bg_live_...
+export BUDGETARY_API_KEY=bg_test_...
 
 # or, persistently (recommended for Codex, independent of the launching shell):
 mkdir -p ~/.budgetary
 # Write the key with an EDITOR so it never lands in your shell history:
-"${EDITOR:-nano}" ~/.budgetary/config.json   # add: { "api_key": "bg_live_..." }
+"${EDITOR:-nano}" ~/.budgetary/config.json   # add: { "api_key": "bg_test_..." }
 chmod 600 ~/.budgetary/config.json            # owner-only
 ```
 
-> Avoid `echo '{ "api_key": "bg_live_..." }' > ~/.budgetary/config.json` — that records the secret in your shell history. Use an editor (above), and `chmod 600` the file so it isn't world-readable.
+> Avoid `echo '{ "api_key": "bg_test_..." }' > ~/.budgetary/config.json` — that records the secret in your shell history. Use an editor (above), and `chmod 600` the file so it isn't world-readable.
+
+A **`bg_test_`** key is the free testing tier and works immediately; **`bg_live_`** is the production key (and must be on an active plan).
 
 If no key is configured, the `estimate` tool returns a short configure-your-key hint instead of an estimate — it never calls the API and never crashes Codex. The API key never appears in `pending.json`, in stdout, or in any error message.
 
