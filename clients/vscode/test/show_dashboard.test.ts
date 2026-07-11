@@ -57,7 +57,9 @@ vi.mock("@budgetary/sdk", async () => {
 interface FakePanelInternals {
   _disposed: boolean;
   _html: string;
+  _visible: boolean;
   _onDispose?: () => void;
+  _onViewState?: (e: { webviewPanel: vscode.WebviewPanel }) => void;
 }
 type FakePanel = vscode.WebviewPanel & FakePanelInternals;
 
@@ -65,6 +67,10 @@ function makeFakePanel(): FakePanel {
   const p = {
     _disposed: false,
     _html: "",
+    _visible: true,
+    get visible() {
+      return p._visible;
+    },
     webview: {
       get html() {
         return p._html;
@@ -81,10 +87,19 @@ function makeFakePanel(): FakePanel {
       p._onDispose = cb;
       return { dispose() {} };
     },
+    onDidChangeViewState(cb: (e: { webviewPanel: vscode.WebviewPanel }) => void) {
+      p._onViewState = cb;
+      return { dispose() {} };
+    },
     reveal() {},
     dispose() {},
   } as unknown as FakePanel;
   return p;
+}
+
+/** Simulate the panel being hidden then re-shown (fires onDidChangeViewState). */
+function fireViewStateVisible(p: FakePanel): void {
+  p._onViewState?.({ webviewPanel: p });
 }
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
@@ -271,6 +286,74 @@ describe("dashboard load sequencing", () => {
     await expect(lp).resolves.toBeUndefined(); // guard prevented the throwing write
     expect(fp._html).not.toContain("est_after");
     activePanel = undefined; // already disposed
+  });
+});
+
+describe("dashboard view-state re-render (L-2: no retainContextWhenHidden)", () => {
+  it("creates the webview WITHOUT retainContextWhenHidden", () => {
+    const fp = makeFakePanel();
+    activePanel = fp;
+    let capturedOpts: Record<string, unknown> | undefined;
+    vscodeStub.window.createWebviewPanel = ((
+      _id: string,
+      _title: string,
+      _col: unknown,
+      opts: Record<string, unknown>,
+    ) => {
+      capturedOpts = opts;
+      return fp;
+    }) as typeof vscodeStub.window.createWebviewPanel;
+
+    showDashboard({} as never);
+
+    expect(capturedOpts).toBeDefined();
+    expect(capturedOpts!.enableScripts).toBe(true);
+    // The flag we dropped: retaining the hidden webview is exactly what L-2 removes.
+    expect(capturedOpts!.retainContextWhenHidden).toBeUndefined();
+  });
+
+  it("re-renders the dashboard from held state when the panel returns to view, with NO re-fetch", async () => {
+    const fp = makeFakePanel();
+    activePanel = fp;
+    vscodeStub.window.createWebviewPanel = () => fp;
+
+    showDashboard({} as never); // deferreds[0]
+    ctl.deferreds[0]!.resolve(ledgerPage("est_held"));
+    await tick();
+    expect(fp._html).toContain("est_held");
+    const fetchesAfterLoad = ctl.deferreds.length; // one getLedger so far
+
+    // The webview is torn down while hidden (no retainContextWhenHidden): blank it,
+    // then simulate it returning to view.
+    fp._html = "";
+    fireViewStateVisible(fp);
+
+    // Restored from the held pagination state — and crucially WITHOUT a new fetch.
+    expect(fp._html).toContain("est_held");
+    expect(ctl.deferreds.length).toBe(fetchesAfterLoad);
+  });
+
+  it("does NOT re-render a dashboard over a non-dashboard view (configure panel stays)", async () => {
+    const fp = makeFakePanel();
+    activePanel = fp;
+    vscodeStub.window.createWebviewPanel = () => fp;
+
+    showDashboard({} as never); // deferreds[0]
+    ctl.deferreds[0]!.reject(
+      new BudgetaryAuthError({
+        code: "authentication_failed",
+        message: "key rejected",
+        httpStatus: 401,
+        requestId: "r",
+      }),
+    );
+    await tick();
+    expect(fp._html).toContain("No API key configured");
+
+    // Returning to view must not clobber the configure panel with an (empty) dashboard.
+    fireViewStateVisible(fp);
+    expect(fp._html).toContain("No API key configured");
+    expect(fp._html).not.toContain('id="b-chart-h"');
   });
 });
 
