@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { EstimateResponse } from "@budgetary/sdk";
 
 import {
+  forecastOnly,
+  forecastVsActual,
   renderAuthFailed,
   renderEstimate,
   renderPermissionDenied,
@@ -95,6 +97,96 @@ describe("renderEstimate — honest presentation", () => {
   });
 });
 
+describe("renderEstimate — cost-loop additions (worst case, validity, key tier)", () => {
+  it("names the p90 worst case and the validity window", () => {
+    const text = renderEstimate(estimate());
+    expect(text).toContain("Worst case (p90): ~220,000 tokens");
+    expect(text).toContain("Valid until: 2026-05-27T10:14:00Z");
+  });
+
+  it("omits the validity line when the server sent no expiresAt", () => {
+    expect(renderEstimate(estimate({ expiresAt: "" }))).not.toContain("Valid until");
+  });
+
+  it("surfaces the key tier where the spend happens (paid vs free), or nothing when unknown", () => {
+    expect(renderEstimate(estimate(), { keyPrefix: "bg_live_" })).toContain(
+      "Key: bg_live_ (paid)",
+    );
+    expect(renderEstimate(estimate(), { keyPrefix: "bg_test_" })).toContain(
+      "Key: bg_test_ (free)",
+    );
+    // Unrecognized / absent → no key line (never a fabricated tier).
+    expect(renderEstimate(estimate(), { keyPrefix: "unrecognized" })).not.toContain(
+      "Key:",
+    );
+    expect(renderEstimate(estimate())).not.toContain("Key:");
+  });
+});
+
+describe("storedFooter — an un-stored (but already-billed) estimate closes for FREE", () => {
+  it("prints the FULL id + report-actual --estimate-id, and does NOT lead with re-estimate", () => {
+    const text = renderEstimate(estimate({ estimateId: "est_fullid_abcdef123" }), {
+      stored: false,
+    });
+    // The FULL id (never truncated) so the free close is copy-pasteable.
+    expect(text).toContain(
+      "report-actual --estimate-id est_fullid_abcdef123",
+    );
+    // Already billed → must warn against re-estimating (a second bill).
+    expect(text).toContain("ALREADY billed");
+    expect(text).toContain("do NOT re-estimate");
+    // Re-estimating is demoted to a last resort, not the headline fix.
+    expect(text).toContain("last resort");
+  });
+});
+
+describe("forecastVsActual / forecastOnly (tokens only, never a $)", () => {
+  const band = { p10: 100, p50: 500, p90: 2000 };
+  it("places the actual within / above / below the band", () => {
+    expect(forecastVsActual(480, band)).toBe(
+      "actual 480 tokens vs forecast ~500 (within p10–p90)",
+    );
+    expect(forecastVsActual(5000, band)).toContain("above p10–p90");
+    expect(forecastVsActual(50, band)).toContain("below p10–p90");
+    expect(forecastVsActual(480, band)).not.toContain("$");
+  });
+  it("returns null when the band is missing or partial (never a garbage line)", () => {
+    expect(forecastVsActual(480, {})).toBeNull();
+    expect(forecastVsActual(480, { p10: 1, p50: 2 })).toBeNull();
+    expect(forecastVsActual(480, { p10: 1, p50: Number.NaN, p90: 3 })).toBeNull();
+  });
+  it("forecastOnly renders the band alone for an open row, or null when absent", () => {
+    expect(forecastOnly(band)).toBe("forecast ~500 tokens (p10–p90 100–2,000)");
+    expect(forecastOnly({})).toBeNull();
+  });
+});
+
+describe("renderRateLimited — enriched with the tier window + retry ordeal", () => {
+  it("surfaces the tier limit, remaining, reset, and attempts", () => {
+    // Fixed clock: reset epoch 1000s, now 900s → resets in ~100s.
+    const text = renderRateLimited(30, {
+      requestId: "req_z",
+      limit: 100,
+      remaining: 0,
+      resetSeconds: 1000,
+      attempts: 5,
+      totalElapsedMs: 240000,
+      now: () => 900_000,
+    });
+    expect(text).toContain("Try again in 30 seconds.");
+    expect(text).toContain("Tier limit: 100 requests/window, 0 left.");
+    expect(text).toContain("Window resets in ~100s.");
+    expect(text).toContain("after 5 attempts over 240s");
+    expect(text).toContain("(request_id: req_z)");
+  });
+  it("degrades cleanly when the window fields are absent (no NaN, no fabricated numbers)", () => {
+    const text = renderRateLimited(null);
+    expect(text).toBe("Budgetary rate limit reached. Try again in a little while.");
+    expect(text).not.toContain("NaN");
+    expect(text).not.toContain("Tier limit");
+  });
+});
+
 describe("estimate_id visibility (O-4)", () => {
   it("renderEstimate shows the short estimate id, correlating with pending + submit", () => {
     const text = renderEstimate(estimate({ estimateId: "est_abcdefghijklmnop" }));
@@ -117,9 +209,11 @@ describe("request_id threading into the auth/plan/rate-limit renderers (O-4)", (
     expect(renderPermissionDenied("req_b")).toContain("(request_id: req_b)");
     expect(renderPermissionDenied()).not.toContain("request_id");
 
-    expect(renderRateLimited(5, "req_c")).toContain("(request_id: req_c)");
+    expect(renderRateLimited(5, { requestId: "req_c" })).toContain("(request_id: req_c)");
     expect(renderRateLimited(5)).not.toContain("request_id");
-    expect(renderRateLimited(null, "req_d")).toContain("(request_id: req_d)");
+    expect(renderRateLimited(null, { requestId: "req_d" })).toContain(
+      "(request_id: req_d)",
+    );
   });
 });
 

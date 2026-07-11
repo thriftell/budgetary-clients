@@ -12,6 +12,7 @@ import {
 
 import {
   installSalt,
+  keyPrefixOf,
   noKeyGuidance,
   pendingFilePath,
   resolveConfigStatus,
@@ -25,7 +26,12 @@ import {
   renderRequestRejected,
   renderTransportError,
 } from "../format.js";
-import { PendingStore, type PendingEntry } from "../store.js";
+import {
+  isEntryExpired,
+  MAX_QUERY_LEN,
+  PendingStore,
+  type PendingEntry,
+} from "../store.js";
 
 /** The default host tag when `BUDGETARY_HOST` is unset. */
 export const DEFAULT_HOST = "mcp";
@@ -136,6 +142,10 @@ export async function runEstimateTool(
     // Count of THIS project's OTHER still-open estimates, computed from the
     // snapshot the append already returned — no second read/parse of the file.
     let others = 0;
+    // Whether an UNEXPIRED pending entry already holds the identical query+project
+    // — i.e. this estimate likely just re-billed a task already forecast. Surfaced
+    // so the user can reuse the earlier one next time instead of paying twice.
+    let dup = false;
     if (!response.void) {
       const store = new PendingStore({
         path: pendingFilePath(args.home),
@@ -147,6 +157,17 @@ export async function runEstimateTool(
         project_id: projectId,
         created_at: (args.now ?? (() => new Date()))().toISOString(),
         attempts: 0,
+        // Persist the forecast band (LOCAL only — the response already carried it)
+        // so `pending`/`doctor`/the submit lines can later close the loop against
+        // the realized actual. `distribution` is non-null on a non-void estimate;
+        // the guard is belt-and-suspenders.
+        ...(response.distribution
+          ? {
+              forecast_p10: response.distribution.p10,
+              forecast_p50: response.distribution.p50,
+              forecast_p90: response.distribution.p90,
+            }
+          : {}),
       };
       // Pass the tool's clock so the append-time TTL sweep is consistent with
       // the created_at just stamped above.
@@ -156,13 +177,34 @@ export async function runEstimateTool(
         others = result.entries.filter(
           (e) => e.project_id === projectId && e.estimate_id !== response.estimateId,
         ).length;
+        // Compare against the STORED (truncated) query form the snapshot holds.
+        const storedQuery =
+          query.length > MAX_QUERY_LEN ? query.slice(0, MAX_QUERY_LEN) : query;
+        const nowMs = (args.now ?? (() => new Date()))().getTime();
+        dup = result.entries.some(
+          (e) =>
+            e.estimate_id !== response.estimateId &&
+            e.project_id === projectId &&
+            e.query === storedQuery &&
+            !isEntryExpired(e, nowMs),
+        );
       }
     }
 
-    let text = renderEstimate(response, { host, stored });
-    // Nudge: if earlier estimates for THIS project were never closed out, surface
-    // it once (a lost actual shouldn't stay invisible). Best-effort — never fatal.
-    if (stored && others > 0) {
+    let text = renderEstimate(response, {
+      host,
+      stored,
+      keyPrefix: keyPrefixOf(resolved.apiKey),
+    });
+    // Nudge, best-effort (never fatal). Lead with the more specific duplicate
+    // warning when this exact task is already forecast and unexpired — that's a
+    // likely double-bill; otherwise the generic "earlier estimates await actuals".
+    if (stored && dup) {
+      text +=
+        "\n\n(You already have an UNEXPIRED estimate for this exact task in this " +
+        "project — re-estimating bills again. Reuse it, or close it with " +
+        "`npx @budgetary/mcp report-actual`.)";
+    } else if (stored && others > 0) {
       text +=
         `\n\n(${others} earlier ${others === 1 ? "estimate" : "estimates"} for ` +
         "this project still await actuals — run `npx @budgetary/mcp pending`.)";
@@ -185,7 +227,14 @@ function renderEstimateError(
   source: "env" | "config",
 ): string {
   if (err instanceof BudgetaryRateLimitError) {
-    return renderRateLimited(err.retryAfterSeconds, err.requestId);
+    return renderRateLimited(err.retryAfterSeconds, {
+      requestId: err.requestId,
+      limit: err.limit,
+      remaining: err.remaining,
+      resetSeconds: err.resetSeconds,
+      attempts: err.attempts,
+      totalElapsedMs: err.totalElapsedMs,
+    });
   }
   if (err instanceof BudgetaryError) {
     // The SDK maps 401 → BudgetaryAuthError and 403 → BudgetaryPermissionError
@@ -200,7 +249,11 @@ function renderEstimateError(
       return renderAuthFailed(host, source, err.requestId);
     }
     if (err.httpStatus === 429 || err.code === "rate_limited") {
-      return renderRateLimited(null, err.requestId);
+      return renderRateLimited(null, {
+        requestId: err.requestId,
+        attempts: err.attempts,
+        totalElapsedMs: err.totalElapsedMs,
+      });
     }
     // A 4xx the server deliberately rejected — state the reason + fix, never
     // "couldn't be reached, try again" (which is reserved for network / 5xx).

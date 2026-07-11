@@ -17,6 +17,7 @@ import {
   runRolloutActuals,
   type SessionEndPayload,
 } from "./actuals.js";
+import { configDiagnostics } from "./config.js";
 import { runDoctor } from "./doctor.js";
 import { runEstimateTool } from "./tools/estimate.js";
 import { SERVER_VERSION } from "./version.js";
@@ -173,11 +174,31 @@ export async function runStdioServer(deps: RunStdioServerDeps = {}): Promise<voi
   await connect(server);
   // One-line readiness banner on STDERR (stdout is the JSON-RPC channel). Without
   // it a bare `npx -y @budgetary/mcp` gives no sign of life — indistinguishable
-  // from a hang — even though it is correctly waiting for a client on stdin.
+  // from a hang — even though it is correctly waiting for a client on stdin. The
+  // key TIER rides on the banner so free-vs-paid is visible where spending starts,
+  // not only in `doctor` — never the key value, only its documented prefix.
   (deps.stderr ?? process.stderr).write(
-    `Budgetary MCP server v${SERVER_VERSION} ready (stdio).\n`,
+    `Budgetary MCP server v${SERVER_VERSION} ready (stdio); ${keyTierBanner()}.\n`,
   );
   // The transport keeps the process alive while stdin is open; do not exit.
+}
+
+/**
+ * A non-secret one-liner for the readiness banner describing the configured key's
+ * TIER (never the value). Best-effort: any resolution fault degrades to a neutral
+ * note rather than crashing server startup.
+ */
+function keyTierBanner(): string {
+  try {
+    const diag = configDiagnostics(process.env);
+    if (diag.source === "none") return "no API key configured";
+    if (diag.source === "unreadable") return "API key config unreadable";
+    if (diag.keyPrefix === "bg_live_") return "key: bg_live_ (paid)";
+    if (diag.keyPrefix === "bg_test_") return "key: bg_test_ (free)";
+    return "key: unrecognized prefix";
+  } catch {
+    return "key: (unknown)";
+  }
 }
 
 /** One-line-per-form usage, printed for `--help` and an unknown subcommand. */
@@ -190,6 +211,7 @@ function usageText(): string {
     "  npx @budgetary/mcp doctor                         check version, key, base URL + connectivity",
     "  npx @budgetary/mcp pending                        list estimates awaiting actuals (read-only)",
     "  npx @budgetary/mcp report-actual                  enter realized counts by hand",
+    "  npx @budgetary/mcp report-actual --estimate-id ID close a specific (already-billed) estimate for free",
     "  npx @budgetary/mcp on-session-end                 actuals from a session-end payload on stdin (host hook)",
     "  npx @budgetary/mcp on-session-end --transcript P  actuals from a rollout/transcript file P",
     "  npx @budgetary/mcp --version                      print the version and exit",
@@ -206,7 +228,23 @@ async function runDoctorCli(): Promise<number> {
   });
 }
 
-async function runReportActualCli(): Promise<number> {
+/**
+ * Parse `report-actual` arguments: an optional `--estimate-id <id>` (the FREE
+ * close for a billed estimate whose local pending row failed to write). A flag
+ * with no value, or a flag-shaped value, yields `null` (fall back to the normal
+ * newest-pending path) rather than swallowing the next token.
+ */
+export function parseReportActualArgs(rest: string[]): { estimateId: string | null } {
+  for (let i = 0; i < rest.length; i++) {
+    if (rest[i] === "--estimate-id") {
+      const v = rest[i + 1];
+      if (v !== undefined && !v.startsWith("-")) return { estimateId: v };
+    }
+  }
+  return { estimateId: null };
+}
+
+async function runReportActualCli(estimateId: string | null): Promise<number> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
     return await runManualActuals({
@@ -214,6 +252,7 @@ async function runReportActualCli(): Promise<number> {
       cwd: process.cwd(),
       out: (line) => process.stdout.write(`${line}\n`),
       prompt: (question) => rl.question(question),
+      ...(estimateId !== null ? { estimateId } : {}),
     });
   } finally {
     rl.close();
@@ -429,7 +468,9 @@ export async function main(argv: string[]): Promise<number | null> {
     }
     if (sub === "doctor") return await runDoctorCli();
     if (sub === "pending") return runPendingCli();
-    if (sub === "report-actual") return await runReportActualCli();
+    if (sub === "report-actual") {
+      return await runReportActualCli(parseReportActualArgs(argv.slice(1)).estimateId);
+    }
     if (sub === "on-session-end") return await runOnSessionEndCli(argv.slice(1));
     // Unknown subcommand: fail loud, never start the server.
     process.stderr.write(`Budgetary: unknown subcommand "${sub}".\n\n${usageText()}`);

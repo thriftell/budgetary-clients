@@ -8,7 +8,7 @@ import {
   type BudgetaryClientOptions,
 } from "@budgetary/sdk";
 
-import { describeAge } from "./actuals.js";
+import { breadcrumbForecastVsActual, describeAge } from "./actuals.js";
 import { readBreadcrumb, type SessionEndBreadcrumb } from "./breadcrumb.js";
 import { configDiagnostics, pendingFilePath, resolveConfig } from "./config.js";
 import { PendingStore } from "./store.js";
@@ -33,7 +33,10 @@ function describeBreadcrumb(crumb: SessionEndBreadcrumb, now: Date): string {
   const id = crumb.estimateId
     ? ` ${crumb.estimateId.length > 12 ? `${crumb.estimateId.slice(0, 12)}…` : crumb.estimateId}`
     : "";
-  return `${crumb.outcome}${id}, ${age}`;
+  // Close the loop when the run recorded counts: "forecast ~M → actual N".
+  const compare = breadcrumbForecastVsActual(crumb);
+  const cmp = compare ? ` — ${compare}` : "";
+  return `${crumb.outcome}${id}, ${age}${cmp}`;
 }
 
 /** Map a connectivity failure onto the SDK's existing error taxonomy. */

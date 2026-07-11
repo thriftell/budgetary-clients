@@ -9,6 +9,7 @@ import {
   handleCallTool,
   main,
   parseOnSessionEndArgs,
+  parseReportActualArgs,
   runOnSessionEndCli,
   runStdioServer,
   SERVER_VERSION,
@@ -368,5 +369,41 @@ describe("runStdioServer — readiness banner goes to STDERR, never stdout", () 
     // stdout is reserved for the MCP transport's JSON-RPC — the banner must not
     // have gone there.
     expect(so).not.toHaveBeenCalled();
+  });
+
+  it("names the key TIER on the banner (free vs paid), never the value", async () => {
+    const saved = process.env.BUDGETARY_API_KEY;
+    process.env.BUDGETARY_API_KEY = "bg_test_bannerkey";
+    try {
+      const err: string[] = [];
+      const so = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+      await runStdioServer({
+        connect: async () => {},
+        stderr: { write: (s: string) => { err.push(s); } },
+      });
+      so.mockRestore();
+      const banner = err.join("");
+      expect(banner).toContain("key: bg_test_ (free)");
+      // Never the value.
+      expect(banner).not.toContain("bg_test_bannerkey");
+    } finally {
+      if (saved === undefined) delete process.env.BUDGETARY_API_KEY;
+      else process.env.BUDGETARY_API_KEY = saved;
+    }
+  });
+});
+
+describe("parseReportActualArgs", () => {
+  it("extracts --estimate-id <id>", () => {
+    expect(parseReportActualArgs(["--estimate-id", "est_abc"])).toEqual({
+      estimateId: "est_abc",
+    });
+  });
+  it("returns null when absent, or when the flag has no (non-flag) value", () => {
+    expect(parseReportActualArgs([])).toEqual({ estimateId: null });
+    expect(parseReportActualArgs(["--estimate-id"])).toEqual({ estimateId: null });
+    expect(parseReportActualArgs(["--estimate-id", "--failed"])).toEqual({
+      estimateId: null,
+    });
   });
 });

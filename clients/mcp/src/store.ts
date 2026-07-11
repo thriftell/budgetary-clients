@@ -32,6 +32,18 @@ export interface PendingEntry {
   duration_ms?: number;
   /** Whether the original (failed) submit carried a trace; the retry sends totals only. */
   has_trace?: boolean;
+  // --- Additive (v1-compatible) FORECAST band captured at ESTIMATE time. The
+  //     estimate response already carried it, so this is a LOCAL store field, not
+  //     a wire change: it lets a later `pending`/`doctor`/submit surface print
+  //     "forecast ~M (p10–p90)" and place the realized actual within/above/below
+  //     it — closing the forecast→actual loop for a human who never opens the VS
+  //     Code dashboard. Absent on a void estimate (no distribution) or an entry
+  //     written before this field existed. Re-validated at read time by each
+  //     reader (a partial/corrupt write is ignored, not trusted), so — exactly
+  //     like the measured counts above — they need no bump to the file `version`.
+  forecast_p10?: number;
+  forecast_p50?: number;
+  forecast_p90?: number;
 }
 
 export interface PendingStoreFile {

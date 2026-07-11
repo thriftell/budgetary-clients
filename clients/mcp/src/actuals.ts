@@ -18,7 +18,7 @@ import {
   resolveConfigStatus,
   traceTargetEnabled,
 } from "./config.js";
-import { shortEstimateId } from "./format.js";
+import { forecastOnly, forecastVsActual, shortEstimateId } from "./format.js";
 import {
   isEntryExpired,
   PendingStore,
@@ -516,14 +516,42 @@ function belongsToThisSession(
  * traceable. Keeps the `Budgetary:` prefix and NEVER receives the API key —
  * callers pass the source/base-url/counts, never the value.
  */
+/**
+ * A one-line stderr sink plus an `enabled` flag. The flag lets a caller GATE an
+ * expensive-to-build debug argument (e.g. re-deriving a transcript's unreadable
+ * reason, which re-reads the whole file) so the work is skipped entirely when
+ * debug is off — not merely discarded inside a no-op write.
+ */
+type DebugSink = ((message: string) => void) & { enabled: boolean };
+
 function sessionEndDebug(
   env: NodeJS.ProcessEnv,
   stderr: { write(s: string): void },
-): (message: string) => void {
+): DebugSink {
   const on = debugEnabled(env);
-  return (message: string): void => {
+  const sink = ((message: string): void => {
     if (on) stderr.write(`Budgetary: session-end: ${message}\n`);
-  };
+  }) as DebugSink;
+  sink.enabled = on;
+  return sink;
+}
+
+/** The persisted forecast band on an entry, or undefined unless all three are finite. */
+function forecastBand(
+  entry: PendingEntry,
+): { p10: number; p50: number; p90: number } | undefined {
+  const { forecast_p10, forecast_p50, forecast_p90 } = entry;
+  if (
+    typeof forecast_p10 === "number" &&
+    Number.isFinite(forecast_p10) &&
+    typeof forecast_p50 === "number" &&
+    Number.isFinite(forecast_p50) &&
+    typeof forecast_p90 === "number" &&
+    Number.isFinite(forecast_p90)
+  ) {
+    return { p10: forecast_p10, p50: forecast_p50, p90: forecast_p90 };
+  }
+  return undefined;
 }
 
 /** Map a {@link SubmitOutcome} to a breadcrumb outcome string. Never the key. */
@@ -574,6 +602,13 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
   // this otherwise-silent degradation (debug would show trace_steps=0, ==a
   // tool-free run) is legible to `pending`/`doctor`.
   let traceNote: string | undefined;
+  // The realized counts + the acted-on estimate's forecast band, stamped into the
+  // breadcrumb so `pending`/`doctor` can close the loop for the human ("forecast
+  // ~M → actual N") on the otherwise-silent auto path. Set once counts are known
+  // (even on a failed submit — they were genuinely measured); the band comes from
+  // the selected entry.
+  let breadcrumbCounts: { tokensIn: number; tokensOut: number } | undefined;
+  let breadcrumbBand: { p10: number; p50: number; p90: number } | undefined;
   try {
     // Sweep ALL expired entries first — every project's, not just the one this
     // session would close — so an abandoned entry can't live forever, warning
@@ -612,6 +647,8 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
       return 0;
     }
     estimateId = entry.estimate_id;
+    // The forecast band the estimate carried, for the loop-closing breadcrumb.
+    breadcrumbBand = forecastBand(entry);
     debug(
       `matched estimate_id=${entry.estimate_id} project_id=${entry.project_id} attempts=${entry.attempts}`,
     );
@@ -688,10 +725,14 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
       if (usage === null) {
         outcome = "no-usage";
         // Name WHY (structural re-derivation, no content) — a silently-killed
-        // session-end most often dies here on a transcript-format change.
-        debug(
-          `fresh path aborted: ${transcriptUnreadableReason(transcriptPath)}`,
-        );
+        // session-end most often dies here on a transcript-format change. GATE
+        // the reason on debug.enabled: transcriptUnreadableReason re-reads the
+        // WHOLE transcript, so with BUDGETARY_DEBUG off (the default) this must
+        // not run at all — otherwise every no-usage abort re-reads a 126 MB file
+        // just to build a string nothing consumes.
+        if (debug.enabled) {
+          debug(`fresh path aborted: ${transcriptUnreadableReason(transcriptPath)}`);
+        }
         return 0;
       }
 
@@ -719,6 +760,11 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
         }`,
       );
     }
+
+    // Stamp the realized counts for the loop-closing breadcrumb NOW (before the
+    // submit): they were genuinely measured, so the "forecast → actual" header is
+    // honest whether the submit below succeeds or is left pending.
+    breadcrumbCounts = { tokensIn: counts.tokensIn, tokensOut: counts.tokensOut };
 
     const resolved = resolveConfig(args.env, args.home);
     if (resolved === null) {
@@ -794,6 +840,14 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
       outcome,
       estimateId,
       ...(traceNote ? { note: traceNote } : {}),
+      ...(breadcrumbCounts ?? {}),
+      ...(breadcrumbBand
+        ? {
+            forecastP10: breadcrumbBand.p10,
+            forecastP50: breadcrumbBand.p50,
+            forecastP90: breadcrumbBand.p90,
+          }
+        : {}),
     });
     debug(
       `finished outcome=${outcome}${
@@ -838,6 +892,15 @@ export interface ManualActualsArgs {
    * globally-newest entry (back-compat).
    */
   cwd?: string;
+  /**
+   * Close a SPECIFIC estimate by id (`report-actual --estimate-id <id>`),
+   * bypassing the pending-store lookup. This is the FREE close for an estimate
+   * that was billed but whose local `pending.json` write failed (the `stored:
+   * false` footer prints exactly this command with the full id): the submit binds
+   * to the id alone, so no pending row is required. No query/band is known for it,
+   * so no forecast comparison is shown.
+   */
+  estimateId?: string;
   /** Write a line to the user. */
   out: (line: string) => void;
   /** Ask the user a question and return their (trimmed) answer. */
@@ -873,30 +936,48 @@ export async function runManualActuals(args: ManualActualsArgs): Promise<number>
     path: pendingFilePath(args.home),
     logger: { warn: args.out },
   });
-  const file = store.read();
-  if (file.entries.length === 0) {
-    args.out("No pending Budgetary estimate to report.");
-    return 0;
-  }
 
-  const entry =
-    args.cwd !== undefined
-      ? newestForProject(file.entries, projectIdFromCwd(args.cwd, args.home))
-      : file.entries[file.entries.length - 1]!;
-  if (entry === null) {
-    args.out("No pending Budgetary estimate for this project directory.");
-    args.out(
-      `(${file.entries.length} pending for other ${
-        file.entries.length === 1 ? "project" : "projects"
-      } — run report-actual from the directory you estimated in.)`,
-    );
-    return 0;
+  const byId = typeof args.estimateId === "string" && args.estimateId.length > 0;
+  let entry: PendingEntry;
+  if (byId) {
+    // Close a specific billed estimate whose local pending row was never written.
+    // The submit binds to the id ALONE (submitActuals locates any real store row
+    // by estimate_id, never by these placeholder fields), so no pending row is
+    // required. No query/band is known, so no forecast comparison is shown.
+    entry = {
+      estimate_id: args.estimateId as string,
+      query: "",
+      project_id: "",
+      created_at: new Date(0).toISOString(),
+      attempts: 0,
+    };
+    args.out(`Reporting actuals for estimate ${args.estimateId}:`);
+    args.out("");
+  } else {
+    const file = store.read();
+    if (file.entries.length === 0) {
+      args.out("No pending Budgetary estimate to report.");
+      return 0;
+    }
+    const found =
+      args.cwd !== undefined
+        ? newestForProject(file.entries, projectIdFromCwd(args.cwd, args.home))
+        : file.entries[file.entries.length - 1]!;
+    if (found === null) {
+      args.out("No pending Budgetary estimate for this project directory.");
+      args.out(
+        `(${file.entries.length} pending for other ${
+          file.entries.length === 1 ? "project" : "projects"
+        } — run report-actual from the directory you estimated in.)`,
+      );
+      return 0;
+    }
+    entry = found;
+    const excerpt = entry.query.slice(0, QUERY_EXCERPT_LEN);
+    args.out("Reporting actuals for this estimate:");
+    args.out(`  ${excerpt}${entry.query.length > QUERY_EXCERPT_LEN ? "…" : ""}`);
+    args.out("");
   }
-
-  const excerpt = entry.query.slice(0, QUERY_EXCERPT_LEN);
-  args.out("Reporting actuals for this estimate:");
-  args.out(`  ${excerpt}${entry.query.length > QUERY_EXCERPT_LEN ? "…" : ""}`);
-  args.out("");
 
   const tokensIn = await promptNonNegInt(args, "Input tokens (tokens_in): ", "tokens_in", false);
   if (tokensIn === null) return 2;
@@ -931,6 +1012,14 @@ export async function runManualActuals(args: ManualActualsArgs): Promise<number>
     args.out(
       `Actuals submitted (${shortEstimateId(entry.estimate_id)}). Thanks — this calibrates future estimates.`,
     );
+    // Close the loop when the pending entry carried a forecast band (never on the
+    // by-id path — a synthetic entry has none).
+    const cmp = forecastVsActual(tokensIn + tokensOut, {
+      p10: entry.forecast_p10,
+      p50: entry.forecast_p50,
+      p90: entry.forecast_p90,
+    });
+    if (cmp !== null) args.out(`  Forecast check: ${cmp}.`);
     return 0;
   }
   if (outcome.gaveUp) {
@@ -940,8 +1029,11 @@ export async function runManualActuals(args: ManualActualsArgs): Promise<number>
   const detail = outcome.error instanceof Error ? outcome.error.message : "";
   if (outcome.retryable) {
     args.out(
-      `Couldn't reach Budgetary${detail ? ` (${detail})` : ""}; the estimate is ` +
-        "still pending. Try again later.",
+      byId
+        ? `Couldn't reach Budgetary${detail ? ` (${detail})` : ""}; nothing was recorded. ` +
+            `Re-run \`report-actual --estimate-id ${args.estimateId}\` to try again.`
+        : `Couldn't reach Budgetary${detail ? ` (${detail})` : ""}; the estimate is ` +
+            "still pending. Try again later.",
     );
   } else if (outcome.terminal) {
     args.out(
@@ -950,8 +1042,11 @@ export async function runManualActuals(args: ManualActualsArgs): Promise<number>
     );
   } else {
     args.out(
-      `Budgetary rejected this submission${detail ? `: ${detail}` : ""}. Fix your ` +
-        "API key or plan, then resubmit — the estimate is left pending.",
+      byId
+        ? `Budgetary rejected this submission${detail ? `: ${detail}` : ""}. Fix your ` +
+            `API key or plan, then re-run \`report-actual --estimate-id ${args.estimateId}\`.`
+        : `Budgetary rejected this submission${detail ? `: ${detail}` : ""}. Fix your ` +
+            "API key or plan, then resubmit — the estimate is left pending.",
     );
   }
   return 1;
@@ -1131,6 +1226,13 @@ export async function runRolloutActuals(
         `recorded as ${args.success ? "successful" : "failed"}. ` +
         "Thanks — this calibrates future estimates.",
     );
+    // Close the loop when the pending entry carried a forecast band.
+    const cmp = forecastVsActual(usage.tokensIn + usage.tokensOut, {
+      p10: entry.forecast_p10,
+      p50: entry.forecast_p50,
+      p90: entry.forecast_p90,
+    });
+    if (cmp !== null) args.out(`  Forecast check: ${cmp}.`);
     if (args.success) {
       args.out("(Re-run with `--failed` if the task didn't actually complete.)");
     }
@@ -1189,6 +1291,25 @@ export interface PendingListArgs {
  * becomes legible: working / degrading / interrupted, at a glance. A start-only
  * record (no outcome/duration) means the hook was SIGKILLed past its timeout.
  */
+/**
+ * The closed-loop "actual N tokens vs forecast ~M (within p10–p90)" line from a
+ * breadcrumb, or `null` when it carries no realized counts (a no-entry/no-usage
+ * run). Shared by the `pending` header here and the `doctor` breadcrumb line, so
+ * the auto path's forecast→actual close reads identically in both. Tokens only.
+ */
+export function breadcrumbForecastVsActual(
+  crumb: SessionEndBreadcrumb,
+): string | null {
+  if (typeof crumb.tokensIn !== "number" || typeof crumb.tokensOut !== "number") {
+    return null;
+  }
+  return forecastVsActual(crumb.tokensIn + crumb.tokensOut, {
+    p10: crumb.forecastP10,
+    p50: crumb.forecastP50,
+    p90: crumb.forecastP90,
+  });
+}
+
 function formatBreadcrumbHeader(crumb: SessionEndBreadcrumb, now: Date): string {
   const age = describeAge(crumb.startedAt, now);
   if (crumb.outcome === undefined || crumb.durationMs === undefined) {
@@ -1198,7 +1319,10 @@ function formatBreadcrumbHeader(crumb: SessionEndBreadcrumb, now: Date): string 
   // Surface a recorded degradation (e.g. a dropped-over-cap trace) alongside the
   // outcome — the totals still submitted, but the operator should see the note.
   const note = crumb.note ? ` [${crumb.note}]` : "";
-  return `Last automatic submission: ${crumb.outcome}${id}, ${age}.${note}`;
+  // Close the loop when the run recorded counts: "forecast ~M → actual N".
+  const compare = breadcrumbForecastVsActual(crumb);
+  const cmp = compare ? ` — ${compare}` : "";
+  return `Last automatic submission: ${crumb.outcome}${id}, ${age}.${cmp}${note}`;
 }
 
 /**
@@ -1282,8 +1406,16 @@ export function runPendingList(args: PendingListArgs): number {
       describeAge(e.created_at, now),
       `${e.attempts}/${MAX_ATTEMPTS} attempts`,
     ];
+    const band = { p10: e.forecast_p10, p50: e.forecast_p50, p90: e.forecast_p90 };
     if (typeof e.tokens_in === "number" && typeof e.tokens_out === "number") {
-      parts.push("measured ✓");
+      // Measured (a prior failed submit): show "actual N vs forecast ~M" when a
+      // band was persisted, else the legacy "measured ✓" marker.
+      parts.push(forecastVsActual(e.tokens_in + e.tokens_out, band) ?? "measured ✓");
+    } else {
+      // Not yet measured: surface the forecast alone when a band is present, so
+      // even an open row shows what was predicted.
+      const fc = forecastOnly(band);
+      if (fc !== null) parts.push(fc);
     }
     parts.push(describeExpiry(e.created_at, now));
     args.out(
