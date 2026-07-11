@@ -254,13 +254,26 @@ export async function runOnSessionEndCli(
   // Foreground form: an explicit rollout/transcript file path. Reads real counts
   // from the file and reports what it did — the working Codex actuals path.
   if (transcript !== null) {
-    return runRolloutActuals({
-      transcriptPath: transcript,
-      success,
-      env,
-      cwd: process.cwd(),
-      out: (line) => process.stdout.write(`${line}\n`),
-    });
+    try {
+      return await runRolloutActuals({
+        transcriptPath: transcript,
+        success,
+        env,
+        cwd: process.cwd(),
+        out: (line) => process.stdout.write(`${line}\n`),
+      });
+    } catch (err) {
+      // A foreground command must surface an unforeseen fault as a NON-zero exit
+      // (an honest failure signal) with a clean message — never a raw stack, and
+      // never the hook path's exit-0, which a caller would read as "submitted".
+      // (Covers e.g. `process.cwd()` throwing when the cwd was unlinked.)
+      stderr.write(
+        `Budgetary: couldn't submit actuals from ${transcript} (${
+          err instanceof Error ? err.message : String(err)
+        }).\n`,
+      );
+      return 1;
+    }
   }
 
   // Hook form: a host (e.g. Claude Code SessionEnd) pipes one JSON payload
@@ -315,12 +328,25 @@ export async function runOnSessionEndCli(
     );
     return 0;
   }
-  return (deps.runAuto ?? runAutoActuals)({
-    payload,
-    env,
-    cwd: process.cwd(),
-    stderr,
-  });
+  // Last-resort guard: the hook's contract is to FAIL CLOSED (exit 0) so an
+  // environmental fault never crashes the host with a raw stack. runAutoActuals
+  // already degrades its own store/network faults, but any unforeseen throw here
+  // must still exit 0 rather than escape.
+  try {
+    return await (deps.runAuto ?? runAutoActuals)({
+      payload,
+      env,
+      cwd: process.cwd(),
+      stderr,
+    });
+  } catch (err) {
+    stderr.write(
+      `Budgetary: the session-end hook hit an unexpected error and did nothing (${
+        err instanceof Error ? err.message : String(err)
+      }).\n`,
+    );
+    return 0;
+  }
 }
 
 function runPendingCli(): number {
@@ -341,9 +367,21 @@ function runPendingCli(): number {
  */
 export async function main(argv: string[]): Promise<number | null> {
   const sub = argv[0];
-  if (sub === "pending") return runPendingCli();
-  if (sub === "report-actual") return runReportActualCli();
-  if (sub === "on-session-end") return runOnSessionEndCli(argv.slice(1));
-  await runStdioServer();
-  return null;
+  try {
+    if (sub === "pending") return runPendingCli();
+    if (sub === "report-actual") return await runReportActualCli();
+    if (sub === "on-session-end") return await runOnSessionEndCli(argv.slice(1));
+    await runStdioServer();
+    return null;
+  } catch (err) {
+    // Backstop so no subcommand ever exits on a raw stack. The session-end HOOK
+    // must fail closed (exit 0) whatever happens; every other subcommand is
+    // foreground, so a nonzero exit is the honest signal (never a raw trace).
+    process.stderr.write(
+      `Budgetary: unexpected error (${
+        err instanceof Error ? err.message : String(err)
+      }).\n`,
+    );
+    return sub === "on-session-end" ? 0 : 1;
+  }
 }

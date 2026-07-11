@@ -73,11 +73,21 @@ export class PendingStore {
   }
 
   private readResult(): ReadResult {
-    if (!existsSync(this.path)) return { file: emptyFile(), writable: true };
+    // Read directly and classify by errno — do NOT gate on `existsSync` first.
+    // `existsSync` returns `false` for ANY error (a lost read permission on
+    // ~/.budgetary, EIO, a directory in the way), which would send a genuinely
+    // unreadable store down the "empty + writable" first-run path; the very next
+    // append would then overwrite whatever bytes are there with a fresh
+    // one-entry file, destroying the whole queue. Branching in the catch keeps
+    // ENOENT (a real first run) writable while routing every other failure into
+    // the fail-closed, append-refusing path that preserves the existing bytes.
     let raw: string;
     try {
       raw = readFileSync(this.path, "utf8");
     } catch (err) {
+      if ((err as NodeJS.ErrnoException | null)?.code === "ENOENT") {
+        return { file: emptyFile(), writable: true };
+      }
       this.logger.warn(
         `Budgetary: could not read pending store at ${this.path}; leaving it untouched. (${
           err instanceof Error ? err.message : String(err)

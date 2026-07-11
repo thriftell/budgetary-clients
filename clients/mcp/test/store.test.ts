@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  chmodSync,
   existsSync,
   mkdtempSync,
   readFileSync,
@@ -162,6 +163,46 @@ describe("PendingStore", () => {
     expect(readFileSync(path, "utf8")).toBe("{corrupt json");
     expect(warnings.some((w) => w.includes("not appending"))).toBe(true);
   });
+
+  // A read failure that is NOT ENOENT (a lost read permission, EIO, a directory
+  // in the way) must fail closed, not be mistaken for a first run. The old
+  // `existsSync` pre-check returned false for ANY error, silently routing an
+  // unreadable store down the "empty + writable" path so the next append
+  // clobbered the whole queue with a fresh one-entry file. chmod 000 the file to
+  // provoke EACCES and prove the queue is preserved instead.
+  const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
+  it.skipIf(isRoot)(
+    "fails closed on an unreadable store (errno != ENOENT), preserving the bytes",
+    () => {
+      writeFileSync(
+        path,
+        JSON.stringify({ version: 1, entries: [entry("est_keep")] }),
+        "utf8",
+      );
+      chmodSync(path, 0o000);
+      try {
+        const warnings: string[] = [];
+        const store = new PendingStore({
+          path,
+          logger: { warn: (m) => warnings.push(m) },
+        });
+        // read() can't see the bytes → empty, and NOT writable ...
+        expect(store.read().entries).toEqual([]);
+        // ... so append REFUSES rather than overwriting the unreadable queue.
+        expect(store.append(entry("est_new"))).toBe(false);
+        expect(warnings.some((w) => w.includes("could not read"))).toBe(true);
+        expect(warnings.some((w) => w.includes("not appending"))).toBe(true);
+      } finally {
+        chmodSync(path, 0o600);
+      }
+      // The original entry survives — the queue was never clobbered.
+      expect(
+        JSON.parse(readFileSync(path, "utf8")).entries.map(
+          (e: PendingEntry) => e.estimate_id,
+        ),
+      ).toEqual(["est_keep"]);
+    },
+  );
 
   it("refuses to append an entry without an estimate_id", () => {
     const warnings: string[] = [];
