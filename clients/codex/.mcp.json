@@ -2,7 +2,7 @@
   "mcpServers": {
     "budgetary": {
       "command": "npx",
-      "args": ["-y", "@budgetary/mcp@0.2.5"],
+      "args": ["-y", "@budgetary/mcp@0.2.6"],
       "env": {
         "BUDGETARY_HOST": "codex"
       }

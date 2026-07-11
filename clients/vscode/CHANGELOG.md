@@ -1,5 +1,12 @@
 # budgetary-vscode
 
+## 0.1.6
+
+### Patch Changes
+
+- Updated dependencies [4965932]
+  - @budgetary/sdk@0.4.1
+
 ## 0.1.5
 
 ### Patch Changes

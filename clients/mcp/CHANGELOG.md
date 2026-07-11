@@ -1,5 +1,61 @@
 # @budgetary/mcp
 
+## 0.2.6
+
+### Patch Changes
+
+- 4965932: Trust response _bodies_ as little as the transport already trusts the network:
+  close every path where a malformed 2xx becomes a crash or fabricated data.
+  (Python parity changes ship in the same commit — Python is outside changesets.)
+
+  - **Shape-validate the estimate body (fabrication guard).** `client.estimate`
+    now validates the parsed 2xx before returning it: a non-empty string
+    `estimateId`, a boolean `void`, and finite-number `p10`/`p50`/`p90` when not
+    void — otherwise a typed `BudgetaryNetworkError("unusable response body")`. An
+    empty body, a wrong-shape 200 (missing `distribution`), or a wrong-_typed_ 200
+    (string percentiles — `"123"` would render as a real number and be stored as a
+    fabricated estimate) is caught here instead of crashing downstream. The MCP
+    `estimate` tool additionally wraps its render+store block so a malformed shape
+    that reaches it degrades to graceful transport-error text and stores no pending
+    entry (the tool's "never throws" contract). Python's `_parse_estimate` gains
+    the matching type checks (rejecting `bool` percentiles, which are `int`
+    subclasses).
+  - **Deeply-nested JSON stays inside the taxonomy.** The SDK's own recursive
+    walks (`assertFiniteNumbers` / `toCamelCase`) are now iterative (explicit
+    worklist), so a deeply-nested 2xx can't blow the call stack with a raw
+    `RangeError`; Python adds `RecursionError` to the `json.loads` except clause.
+  - **`Retry-After: nan` no longer reaches `sleep`.** Python's `_parse_retry_after`
+    returns a value only when it is finite, so a `nan`/`inf` header can't pierce the
+    min/max clamp into `time.sleep(nan)` (a raw `ValueError`).
+  - **Transcript totals fail closed on an out-of-range sum.** `readTranscriptUsage`
+    now guards the SUMMED totals (not just each field): an overflow to `Infinity`
+    or past `Number.MAX_SAFE_INTEGER` — which `JSON.stringify` serializes as `null`
+    on the wire — makes the reader submit nothing instead of a corrupt actual.
+
+- 1b6c470: Harden the pending-store read/write surface so an environmental fault degrades
+  instead of corrupting the queue or crashing the session-end hook.
+
+  - **Never clobber an unreadable queue.** `PendingStore` no longer pre-checks the
+    file with `existsSync` (which returns `false` for _any_ error — a lost read
+    permission on `~/.budgetary`, EIO, a directory in the way). It reads directly
+    and classifies by errno: `ENOENT` is a genuine first run (empty + writable);
+    every other read failure fails closed (empty + **not** writable), so the next
+    `append` refuses rather than overwriting whatever bytes are there with a fresh
+    one-entry file. The whole queue is preserved with a warning.
+  - **A `store.write` fault no longer crashes the hook after a successful POST.**
+    Each `store.write` in the submit path and the TTL-drop is now best-effort: on
+    a post-success remove failure the submit is still reported `submitted: true`
+    (a committed submit is never reclassified as retryable — a leftover entry is
+    reconciled next session by the server's `estimate_id` dedup); bump/drop write
+    failures return the computed outcome without persisting. A last-resort guard in
+    the session-end CLI (and a `main()` backstop) keeps the hook's exit-0 contract:
+    an unforeseen throw exits 0 with one stderr line, never a raw stack; the
+    foreground `report-actual` / `on-session-end --transcript` / `pending`
+    subcommands surface a clean message instead of a stack trace.
+
+- Updated dependencies [4965932]
+  - @budgetary/sdk@0.4.1
+
 ## 0.2.5
 
 ### Patch Changes
