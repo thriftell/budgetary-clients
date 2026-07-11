@@ -1,5 +1,156 @@
 # @budgetary/mcp
 
+## 0.3.0
+
+### Minor Changes
+
+- a1ed86d: Pair each cross-session actuals retry with the RIGHT data, so a later session's
+  usage can never attach to an older estimate (P-B1). This is what makes the
+  non-interactive paths' `maxRetries: 0` safe: a failed submit is retried on a
+  later session, and that retry must resubmit the ORIGINAL run's counts, not
+  whatever the retrying session measured.
+
+  - **Persist measured counts on a failed submit (part 1, load-bearing).** When a
+    submit fails and the entry is kept (a retryable 5xx/network error, or a
+    user-fixable 401/403), the measured `{tokensIn, tokensOut, success, durationMs,
+hasTrace}` are stamped onto the pending entry as **additive, optional** fields.
+    A later session's auto path then resubmits THOSE counts — baked in, never
+    re-derived from a different transcript — so the retry can't mis-pair. The store
+    file stays `version: 1`; the new fields are re-validated at read time, so a
+    partial/corrupt write is ignored (fall back to a fresh read), never trusted.
+    On the happy path (first submit succeeds) nothing changes.
+  - **Session-bind the fresh auto-close (part 2, forward-looking).** A fresh
+    (never-submitted) entry is only closed with this session's transcript when it
+    was created DURING the ending session, compared against `payload.started_at`.
+    Today's Claude Code SessionEnd payload does not carry `started_at` (nor does
+    Codex's Stop payload), so this falls back to the existing project binding —
+    part 1 carries the protection in that case, and the session binding activates
+    automatically for any host that sends `started_at`. Bias is toward not
+    mis-pairing: a stale entry with no persisted counts is left for its own retry
+    or the 24h TTL, never paired with foreign usage.
+
+  The manual (`report-actual`) and rollout (`on-session-end --transcript`) paths
+  are human-directed and unchanged, except that a failed submit on those paths
+  also persists its counts, so the auto path can later retry them.
+
+- 880ffb2: Add operator self-service and stop the silent-hang: `main()` dispatched only 3
+  subcommands, so `--version`, `--help`, and any typo fell through to
+  `runStdioServer()` and blocked — the documented `npx -y @budgetary/mcp` smoke
+  test looked like a freeze, and there was no way to check connectivity/key/config
+  short of a billed estimate.
+
+  - **No silent hang.** Only a bare invocation (no arguments) starts the stdio
+    server. `--version`/`-v`/`version` prints the version; `--help`/`-h`/`help`
+    prints usage; an unknown subcommand prints usage to stderr and exits 2. A
+    one-line version banner is written to **stderr** at server start (stdout stays
+    the JSON-RPC channel) so a bare launch shows a sign of life.
+  - **`doctor` subcommand.** Prints the version, the key **source + prefix**
+    (`bg_live_`/`bg_test_` — never the value), the **resolved base URL**, the
+    pending path + count, and the last automatic-run breadcrumb; then makes ONE
+    authenticated `GET /v1/ledger?limit=1` (the existing endpoint — no new API,
+    `maxRetries: 0`) and classifies the result through the SDK's error taxonomy
+    (200 / 401 / 403 / 429-is-valid / network-names-the-host).
+  - **Config transparency (O-7).** `doctor` (and the new `configDiagnostics`) warn
+    when a config-file `base_url` was **refused** (non-HTTPS → silently fell back to
+    the prod default) or **shadowed** by an env key that short-circuits before the
+    file is read. Traffic could otherwise hit prod while the operator believed
+    otherwise — surfacing the resolved URL + the reason is the fix.
+
+- 33b40cf: Make the unattended session-end path observable. The auto actuals hook (where
+  100% of default calibration data flows) previously exited 0 with zero bytes on
+  success, on every no-op reason, and on failure — a lost actual vanished from the
+  queue with no signal anywhere.
+
+  - **Durable breadcrumb.** Every `runAutoActuals` run now leaves
+    `~/.budgetary/last-session-end.json` — `{ startedAt, durationMs, outcome,
+estimateId }` — best-effort and never-throws. `outcome` is one of `submitted`,
+    `no-entry`, `no-usage`, `no-key`, `dropped-ttl` (the sweep dropped entries),
+    `stale-skip` (the matched entry was kept but not this session's), `rejected`,
+    `gave-up`, `failed:<code>`, or `error`. A start-only record (overwritten on
+    completion) is the interrupted-run marker: if the host SIGKILLs the hook past
+    its 30 s timeout, the absent `durationMs`/`outcome` says so. The API key is
+    never written.
+  - **`BUDGETARY_DEBUG=1`** narrates every decision on stderr (source + resolved
+    base URL, matched estimate, transcript counts, submit outcome + `request_id`,
+    and the _reason_ each no-op returned) — never the key value. Off by default;
+    stdout stays the pure JSON-RPC channel.
+  - **Transcript failures are named.** A new `transcriptUnreadableReason` re-derives
+    why a transcript yielded no counts (missing / non-regular / over-cap / empty /
+    unrecognized format) so a Claude Code transcript-format change is diagnosable
+    under the flag instead of silently killing every future submission.
+  - **`pending` surfaces it.** A one-line header reports the last automatic run
+    ("Last automatic submission: submitted (est\_…), 3h ago" or an interrupted-run
+    note), so an empty queue is explained rather than merely blank.
+
+### Patch Changes
+
+- a475a2f: Make a retry ordeal legible instead of opaque (O-6).
+
+  **@budgetary/sdk (both TypeScript and Python)**
+
+  - On the final throw, the retry wrapper now stamps two additive, diagnostic
+    fields onto the `BudgetaryError`: `attempts` (1-based — `1` for a first-attempt
+    terminal failure, up to `maxRetries + 1` on exhaustion) and `totalElapsedMs` /
+    `total_elapsed_ms` (wall-clock across every attempt + backoff). A ~4-minute
+    429/5xx backoff no longer reads as a first-attempt blip. The error type is
+    unchanged.
+  - An optional `onRetry` / `on_retry` observer on the client options fires before
+    each backoff sleep with the attempt count, the delay about to be slept, and the
+    HTTP status. Purely diagnostic — a throw from it is swallowed and never derails
+    the request. (`RetryInfo` / `OnRetry` are exported for typing.)
+  - **TypeScript only:** `mapNetworkError` now appends `err.cause?.message` and the
+    target **host** to the message, so a transport failure surfaces the real reason
+    (`connect ECONNREFUSED …`) and where it was headed instead of the opaque
+    `"fetch failed"`. (Python already interpolated this.) Host only — never the
+    path/query.
+
+  **@budgetary/mcp**
+
+  - The estimate tool's transport-error render shows "after N attempts over Ns"
+    when the SDK exhausted its ladder, so a slow retry ordeal is visible in the host.
+
+- 1e3ec4a: Sharpen the status surfaces so they under-report trouble less and make the
+  `estimate_id` pairing key visible.
+
+  **@budgetary/mcp**
+
+  - `pending` rows now carry the facts that matter: `• <excerpt> — 3h ago,
+4/5 attempts, measured ✓, expires in ~1h, id est_ab12…`. `attempts` shows how
+    close an entry is to the give-up cap; `measured ✓` marks an entry whose counts
+    were already captured on a prior failed submit (a retry resends those); the
+    expiry names the 24h auto-window and notes that manual `report-actual` still
+    works past it.
+  - The `estimate_id` (short form) is now visible where it was invisible before:
+    in the estimate render footer, in the manual/rollout submit confirmations, and
+    on every `pending` row — the same short id across all three, so a user can
+    correlate an estimate with its pending entry and its submission.
+  - `request_id` is threaded into the auth (401), permission (403), and
+    rate-limit (429) renderers, matching the transport-error renderers.
+  - Honest terminal copy: an empty queue no longer claims "the loop is closed"
+    (some estimates may have been dropped — gave-up / rejected / TTL-swept, which
+    the last-run breadcrumb reports).
+
+  **budgetary-vscode**
+
+  - The dashboard surfaces the out-of-coverage void rate ("2 of the last 50
+    estimates were out-of-coverage voids") from `scenario === "out_of_domain"`.
+  - Out-of-domain rows render their Result cell as "no prediction" instead of the
+    misleading "○ pending" — a void never receives an actual.
+  - `out_of_domain` is dropped from the chart legend (it is never plotted as a
+    marker, so its swatch advertised a shape the chart never draws); it still
+    appears in the table's Scenario column.
+
+- 3dd43a2: Sweep the pending store honestly at session end. `runAutoActuals` now drops
+  EVERY entry older than the 24h TTL — not just the one this session would close —
+  so an abandoned project's estimate can't live in the queue forever (nothing else
+  ever selected it, so nothing ever expired it). The sweep re-reads first (so a
+  concurrent append isn't clobbered) and emits a single warning naming the count,
+  closing the last silent drop path. An unparseable or future `created_at` has an
+  unknown age and is deliberately KEPT rather than discarded — dropping it could
+  silently lose a session's own actual.
+- Updated dependencies [a475a2f]
+  - @budgetary/sdk@0.5.0
+
 ## 0.2.6
 
 ### Patch Changes
