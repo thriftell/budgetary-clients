@@ -79,6 +79,12 @@ export interface CallToolDeps {
   runEstimate?: typeof runEstimateTool;
   env?: NodeJS.ProcessEnv;
   cwd?: () => string;
+  /**
+   * The host's per-request cancellation, forwarded to the SDK so an abandoned
+   * estimate stops retrying against a struggling engine instead of finishing its
+   * full ladder. Supplied by {@link buildServer} from the MCP request `extra`.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -110,6 +116,7 @@ export async function handleCallTool(
     model,
     env: deps.env ?? process.env,
     cwd: (deps.cwd ?? (() => process.cwd()))(),
+    signal: deps.signal,
   });
   return {
     content: [{ type: "text", text: result.text }],
@@ -135,8 +142,11 @@ export function buildServer(): Server {
     tools: TOOLS,
   }));
 
-  server.setRequestHandler(CallToolRequestSchema, (request) =>
-    handleCallTool(request, {}),
+  // Forward the host's per-request cancellation (`extra.signal`) so an abandoned
+  // estimate stops retrying against a struggling engine (sheds load in an outage)
+  // rather than finishing its full ~5 min ladder for a result no one will read.
+  server.setRequestHandler(CallToolRequestSchema, (request, extra) =>
+    handleCallTool(request, { signal: extra.signal }),
   );
 
   return server;

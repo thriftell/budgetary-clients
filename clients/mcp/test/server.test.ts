@@ -160,6 +160,18 @@ describe("handleCallTool", () => {
     expect(firstCall(spy.calls).model).toBe("claude-x");
   });
 
+  it("forwards the host cancellation signal to the estimate tool (R-2)", async () => {
+    const spy = estimateSpy({ text: "ok", isError: false });
+    const controller = new AbortController();
+    await handleCallTool(callRequest({ query: "q" }), {
+      runEstimate: spy.runEstimate,
+      signal: controller.signal,
+    });
+    // The tool receives the same AbortSignal buildServer takes from extra.signal,
+    // so an abandoned estimate can stop retrying against a struggling engine.
+    expect(firstCall(spy.calls).signal).toBe(controller.signal);
+  });
+
   it("maps the tool result's text and isError through to the MCP content", async () => {
     const spy = estimateSpy({ text: "the rendered estimate", isError: true });
     const result = await handleCallTool(callRequest({ query: "q" }), {

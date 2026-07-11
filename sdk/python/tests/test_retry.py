@@ -90,6 +90,38 @@ def test_retry_after_floor():
     assert sleeps[0] >= 2.0
 
 
+def test_retry_after_jitter_desyncs_a_correlated_fleet():
+    # Two clients see the SAME Retry-After: 1 at a fixed-window boundary. The
+    # floor still holds, but jitter is ADDED on top so their backoffs DIFFER
+    # (de-synced) rather than collapsing into one bucket. Parity with the TS SDK.
+    def backoff_for(rand: float) -> float:
+        sleeps: list[float] = []
+        n = {"v": 0}
+
+        def fn() -> str:
+            n["v"] += 1
+            if n["v"] == 1:
+                raise _rate_limit_error(retry_after=1.0)
+            return "ok"
+
+        with_retry(
+            fn,
+            max_retries=2,
+            sleep=lambda s: sleeps.append(s),
+            random_fn=lambda: rand,
+        )
+        return sleeps[0]
+
+    # computed at attempt 0 = 1.0 s, floor = 1.0 s.
+    a = backoff_for(0.2)  # 1.0 + 0.2*1.0
+    b = backoff_for(0.8)  # 1.0 + 0.8*1.0
+    assert a >= 1.0  # never earlier than the server asked
+    assert b >= 1.0
+    assert a == pytest.approx(1.2)
+    assert b == pytest.approx(1.8)
+    assert a != b  # de-synced
+
+
 def test_retry_after_is_clamped_to_max_delay():
     sleeps: list[float] = []
     attempts = {"n": 0}

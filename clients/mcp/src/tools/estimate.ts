@@ -40,6 +40,11 @@ export interface EstimateToolArgs {
   clientFactory?: (opts: BudgetaryClientOptions) => BudgetaryClient;
   /** Override the now timestamp (tests). */
   now?: () => Date;
+  /**
+   * Host cancellation, forwarded to the SDK's `estimate` call so an abandoned
+   * request stops retrying. Threaded from the MCP request `extra.signal`.
+   */
+  signal?: AbortSignal;
 }
 
 export interface EstimateToolResult {
@@ -111,6 +116,7 @@ export async function runEstimateTool(
     response = await client.estimate(query, {
       model: args.model,
       context,
+      signal: args.signal,
     });
   } catch (err) {
     return { text: renderEstimateError(err, host, resolved.source), isError: true };

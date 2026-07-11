@@ -26,6 +26,11 @@ export interface HttpRequest {
   body?: unknown;
   query?: Record<string, string | number | boolean | undefined | null>;
   timeoutMs?: number;
+  /**
+   * Optional caller cancellation, combined with the per-attempt timeout so a
+   * host-abandoned request aborts the in-flight fetch AND stops the retry ladder.
+   */
+  signal?: AbortSignal;
 }
 
 const NETWORK_ERROR_MESSAGE = "network error while contacting Budgetary API";
@@ -295,6 +300,8 @@ export class HttpClient {
     const result = await withRetry(() => this.attempt(req), {
       maxRetries: this.config.maxRetries,
       onRetry: this.config.onRetry,
+      // Stop the retry ladder (and cut a backoff sleep short) when the caller aborts.
+      signal: req.signal,
     });
     return result as T;
   }
@@ -320,7 +327,15 @@ export class HttpClient {
     }
 
     const timeoutMs = req.timeoutMs ?? this.config.timeoutMs;
-    const signal = AbortSignal.timeout(timeoutMs);
+    // Combine the per-attempt timeout with the caller's cancellation: whichever
+    // fires first aborts the fetch. `AbortSignal.any` propagates the winning
+    // signal's reason, so a timeout still surfaces as a TimeoutError (→ "timeout")
+    // and a host abort as an AbortError (→ "abort") in mapNetworkError.
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
+    const signal =
+      req.signal !== undefined
+        ? AbortSignal.any([timeoutSignal, req.signal])
+        : timeoutSignal;
 
     let response: Response;
     try {
@@ -336,7 +351,7 @@ export class HttpClient {
         redirect: "error",
       });
     } catch (err) {
-      throw mapNetworkError(err, host);
+      throw mapTransportError(err, host, timeoutSignal, req.signal);
     }
 
     let text: string;
@@ -345,10 +360,10 @@ export class HttpClient {
     } catch (err) {
       if (err instanceof BudgetaryError) throw err;
       // The body read can stall or time out after the headers arrived (the
-      // AbortSignal also covers the body). Classify it as a network error —
-      // exactly like a failure of the fetch call itself — instead of letting a
-      // raw undici/stream error escape unclassified.
-      throw mapNetworkError(err, host);
+      // AbortSignal also covers the body). Classify it — exactly like a failure
+      // of the fetch call itself — instead of letting a raw undici/stream error
+      // escape unclassified.
+      throw mapTransportError(err, host, timeoutSignal, req.signal);
     }
 
     let parsed: unknown = null;
@@ -421,6 +436,40 @@ function safeHost(baseUrl: string): string | undefined {
 /** Append ` (host: X)` when a host is known. Host only — never the path/query. */
 function withHost(base: string, host?: string): string {
   return host ? `${base} (host: ${host})` : base;
+}
+
+/**
+ * Classify a fetch/body-read rejection, disambiguating a cancellation or timeout
+ * by the SIGNAL STATE rather than the rejection's shape. A caller (e.g. the MCP
+ * host) may abort with a non-Error `reason` — `AbortController.abort("...")` — in
+ * which case undici rejects with that raw value, and `mapNetworkError`'s
+ * `instanceof Error` gate would misclassify a deliberate cancellation as a
+ * generic `network` error. Checking the input signals guarantees a host abort
+ * always surfaces as code `abort` and a per-attempt timeout as `timeout`,
+ * regardless of the reason value. Falls through to {@link mapNetworkError} for a
+ * genuine transport failure (neither signal aborted).
+ */
+function mapTransportError(
+  err: unknown,
+  host: string | undefined,
+  timeoutSignal: AbortSignal,
+  callerSignal: AbortSignal | undefined,
+): BudgetaryError {
+  // Caller cancellation takes priority: when the host abandons the request the
+  // caller's signal fires first and the timeout has not yet elapsed.
+  if (callerSignal?.aborted) {
+    return new BudgetaryNetworkError({
+      code: "abort",
+      message: "request was aborted",
+    });
+  }
+  if (timeoutSignal.aborted) {
+    return new BudgetaryNetworkError({
+      code: "timeout",
+      message: withHost(TIMEOUT_ERROR_MESSAGE, host),
+    });
+  }
+  return mapNetworkError(err, host);
 }
 
 function mapNetworkError(err: unknown, host?: string): BudgetaryError {

@@ -53,6 +53,14 @@ export interface EstimateCallOptions {
   clientRequestId?: string | null;
   /** Per-call timeout override. */
   timeoutMs?: number;
+  /**
+   * Caller cancellation. When it aborts, the in-flight request is aborted and
+   * the retry ladder stops immediately — so a host that abandons an interactive
+   * estimate (e.g. the MCP `AbortSignal`) sheds load instead of finishing its
+   * full retry ladder against a struggling engine. Combined with the per-attempt
+   * timeout internally.
+   */
+  signal?: AbortSignal;
 }
 
 const DEFAULT_BASE_URL = "https://api.budgetary.tools";
@@ -141,6 +149,7 @@ export class BudgetaryClient {
       path: "/v1/estimate",
       body,
       timeoutMs: opts.timeoutMs,
+      signal: opts.signal,
     });
     return parseEstimateResponse(raw);
   }
