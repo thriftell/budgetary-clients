@@ -572,10 +572,25 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
       // which would otherwise reach this point and mis-pair this session's tokens
       // onto a foreign/stale estimate. (The retry path above is exempt: it submits
       // the entry's OWN persisted counts, which cannot mis-pair.)
+      // "stale-skip" (NOT "dropped-ttl"): this branch KEEPS the entry — it only
+      // declines to attribute THIS session's transcript to an entry that isn't
+      // demonstrably a live, this-session estimate. Distinct from the sweep, which
+      // actually drops. Reporting "dropped-ttl" here would lie in a breadcrumb
+      // built for the operator: they'd read "expired" while the entry is still in
+      // the queue. Split the two sub-cases so the message is honest.
       const created = Date.parse(entry.created_at);
-      if (!Number.isFinite(created) || now.getTime() - created > PENDING_TTL_MS) {
-        outcome = "dropped-ttl";
-        debug("fresh path aborted: the matched entry is stale (past the 24h window)");
+      if (!Number.isFinite(created)) {
+        outcome = "stale-skip";
+        debug(
+          "fresh path skipped: the matched entry has an unparseable created_at (kept, not submitted)",
+        );
+        return 0;
+      }
+      if (now.getTime() - created > PENDING_TTL_MS) {
+        outcome = "stale-skip";
+        debug(
+          "fresh path skipped: the matched entry is stale (past the 24h window; not this session's to submit)",
+        );
         return 0;
       }
       // Bind to the session too, when the host provides a boundary (started_at).

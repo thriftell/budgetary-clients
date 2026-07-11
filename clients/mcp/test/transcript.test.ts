@@ -860,6 +860,14 @@ describe("transcriptUnreadableReason", () => {
     expect(transcriptUnreadableReason(dir)).toMatch(/not a regular file/);
   });
 
+  it("names an over-cap file", () => {
+    const path = join(dir, "big.jsonl");
+    writeFileSync(path, "{}", "utf8");
+    // truncateSync extends the file (sparse) past the size cap cheaply.
+    truncateSync(path, MAX_TRANSCRIPT_BYTES + 1);
+    expect(transcriptUnreadableReason(path)).toMatch(/exceeds the size cap/);
+  });
+
   it("reports the load-bearing case: present + non-empty but unrecognized format", () => {
     // Exactly the silent-death scenario: a transcript whose shape the parser no
     // longer recognizes (a Claude Code format change) → readTranscriptUsage null.

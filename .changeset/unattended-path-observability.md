@@ -10,8 +10,9 @@ queue with no signal anywhere.
 - **Durable breadcrumb.** Every `runAutoActuals` run now leaves
   `~/.budgetary/last-session-end.json` — `{ startedAt, durationMs, outcome,
   estimateId }` — best-effort and never-throws. `outcome` is one of `submitted`,
-  `no-entry`, `no-usage`, `no-key`, `dropped-ttl`, `rejected`, `gave-up`, or
-  `failed:<code>`. A start-only record (written before the work, overwritten on
+  `no-entry`, `no-usage`, `no-key`, `dropped-ttl` (the sweep dropped entries),
+  `stale-skip` (the matched entry was kept but not this session's), `rejected`,
+  `gave-up`, `failed:<code>`, or `error`. A start-only record (overwritten on
   completion) is the interrupted-run marker: if the host SIGKILLs the hook past
   its 30 s timeout, the absent `durationMs`/`outcome` says so. The API key is
   never written.

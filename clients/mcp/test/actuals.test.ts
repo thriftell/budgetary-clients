@@ -1704,18 +1704,51 @@ describe("runAutoActuals — breadcrumb (the only durable instrument)", () => {
     expect(typeof crumb?.startedAt).toBe("string");
   });
 
+  it("writes a start-ONLY breadcrumb BEFORE the work (the SIGKILL marker)", async () => {
+    // The interrupted-run marker is only real if runAutoActuals actually persists
+    // a start-only record before doing the work. Observe it mid-run (readUsage
+    // runs after the start marker, before the finally overwrites it). Without the
+    // pre-work write this fails — the finally alone would never leave a start-only
+    // record on a completed run.
+    seed("est_startmarker");
+    let midRun: ReturnType<typeof readBreadcrumb> = null;
+    await runAuto({
+      clientFactory: () => asClient(makeFakeClient()),
+      readUsage: () => {
+        midRun = readBreadcrumb(home);
+        return { tokensIn: 5, tokensOut: 5, trace: [] };
+      },
+    });
+    expect(midRun).not.toBeNull();
+    expect(midRun!.startedAt).toBeTruthy();
+    expect(midRun!.outcome).toBeUndefined(); // start-only ⇒ interrupted marker
+    expect(midRun!.durationMs).toBeUndefined();
+    // ...then overwritten with the completed record.
+    expect(readBreadcrumb(home)?.outcome).toBe("submitted");
+  });
+
   it("records 'no-entry' when the store is empty", async () => {
     writePending(home, { version: 1, entries: [] });
     await runAuto({ clientFactory: () => asClient(makeFakeClient()) });
     expect(readBreadcrumb(home)?.outcome).toBe("no-entry");
   });
 
-  it("records 'dropped-ttl' when this session's estimate aged out", async () => {
+  it("records 'dropped-ttl' when the TTL sweep drains the queue", async () => {
     seed("est_stale", { created_at: STALE });
     await runAuto({ clientFactory: () => asClient(makeFakeClient()) });
     expect(readBreadcrumb(home)?.outcome).toBe("dropped-ttl");
-    // ...and the entry really was swept.
+    // ...and the entry really was swept (dropped-ttl means DROPPED).
     expect(readPending(home).entries).toEqual([]);
+  });
+
+  it("records 'stale-skip' (NOT dropped-ttl) for a kept entry with an unparseable created_at", async () => {
+    // sweepExpired keeps unknown-age entries, so this reaches the fresh-path
+    // re-guard. The breadcrumb must NOT claim the entry expired — it's still here.
+    seed("est_badts", { created_at: "not-a-real-date" });
+    await runAuto({ clientFactory: () => asClient(makeFakeClient()) });
+    expect(readBreadcrumb(home)?.outcome).toBe("stale-skip");
+    // The entry is KEPT — the honesty point of the split.
+    expect(readPending(home).entries.map((e) => e.estimate_id)).toEqual(["est_badts"]);
   });
 
   it("records 'no-usage' when the transcript yields no counts", async () => {
@@ -1819,6 +1852,10 @@ describe("runAutoActuals — BUDGETARY_DEBUG narration (never the key)", () => {
     expect(text).toContain("key source=env");
     expect(text).not.toContain("bg_test_secretvalue");
     expect(text).toContain("submit outcome=submitted");
+    // PRIME DIRECTIVE #1 also covers the persisted breadcrumb FILE, not just stderr.
+    const crumbRaw = readFileSync(join(home, ".budgetary", "last-session-end.json"), "utf8");
+    expect(crumbRaw).not.toContain("bg_test_secretvalue");
+    expect(crumbRaw).not.toContain("bg_test_");
   });
 });
 
@@ -1859,14 +1896,16 @@ describe("runAutoActuals — fails closed to exit 0 even when a dependency throw
 });
 
 describe("runPendingList — surfaces the last automatic run", () => {
-  it("prints a 'submitted' header from the breadcrumb, even with an empty queue", () => {
+  it("prints a 'submitted' header, truncating a long id and naming the age", () => {
     writePending(home, { version: 1, entries: [] });
-    writeBreadcrumbForTest("2026-05-27T10:00:00Z", "submitted", "est_led");
+    // A >12-char id exercises the ellipsis truncation; RECENT vs NOW = 14m.
+    writeBreadcrumbForTest(RECENT, "submitted", "est_abcdefghijklmnop");
     const out: string[] = [];
     runPendingList({ env: ENV, home, now: () => NOW, out: (l) => out.push(l) });
     const text = out.join("\n");
-    expect(text).toContain("Last automatic submission: submitted");
-    expect(text).toContain("est_led");
+    // Truncated to 12 chars + ellipsis, and the age tail is present.
+    expect(text).toContain("Last automatic submission: submitted (est_abcdefgh…), 14m ago.");
+    expect(text).not.toContain("est_abcdefghijklmnop"); // full id never shown
     expect(text).toContain("loop is closed");
   });
 

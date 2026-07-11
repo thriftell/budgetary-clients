@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  debugEnabled,
   looksLikeBudgetaryKey,
   resolveLanguage,
   traceTargetEnabled,
@@ -11,6 +12,29 @@ import {
 
 const env = (v?: string): NodeJS.ProcessEnv =>
   (v === undefined ? {} : { BUDGETARY_TRACE_TARGET: v }) as NodeJS.ProcessEnv;
+
+const debugEnv = (v?: string): NodeJS.ProcessEnv =>
+  (v === undefined ? {} : { BUDGETARY_DEBUG: v }) as NodeJS.ProcessEnv;
+
+describe("debugEnabled — session-end diagnostics (fail-safe OFF)", () => {
+  it("defaults to OFF when unset or blank", () => {
+    expect(debugEnabled(debugEnv())).toBe(false);
+    expect(debugEnabled(debugEnv(""))).toBe(false);
+    expect(debugEnabled(debugEnv("  "))).toBe(false);
+  });
+
+  it("is ON only for explicit affirmatives (case-insensitive, trimmed)", () => {
+    for (const v of ["1", "true", "on", "yes", "ON", " Yes ", "TRUE"]) {
+      expect(debugEnabled(debugEnv(v))).toBe(true);
+    }
+  });
+
+  it("stays OFF for off-values AND any unrecognized value (never floods stderr)", () => {
+    for (const v of ["0", "false", "off", "no", "2", "verbose", "debug", "onn"]) {
+      expect(debugEnabled(debugEnv(v))).toBe(false);
+    }
+  });
+});
 
 describe("traceTargetEnabled — privacy opt-out (fail-safe ON)", () => {
   it("defaults to ON when unset", () => {

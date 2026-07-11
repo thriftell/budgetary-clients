@@ -33,9 +33,20 @@ export interface SessionEndBreadcrumb {
    */
   durationMs?: number;
   /**
-   * Terminal outcome, one of: `submitted`, `no-entry`, `no-usage`, `no-key`,
-   * `dropped-ttl`, `rejected`, `gave-up`, or `failed:<code>` (a retryable
-   * transport/plan failure that left the estimate pending). ABSENT ⇒ incomplete.
+   * Terminal outcome. ABSENT ⇒ incomplete (see {@link durationMs}). One of:
+   *   - `submitted`   — the POST succeeded and the entry was removed.
+   *   - `no-entry`    — nothing matched this session (empty store / no project
+   *                     match / predates the session boundary).
+   *   - `no-usage`    — no payload, no transcript path, or the transcript yielded
+   *                     no real counts.
+   *   - `no-key`      — no key configured, or one that isn't a recognizable shape.
+   *   - `dropped-ttl` — the TTL sweep drained the queue (entries actually dropped).
+   *   - `stale-skip`  — the matched entry was KEPT but skipped as not-this-session
+   *                     (unparseable or past-window `created_at`).
+   *   - `rejected`    — a terminal 4xx; the entry was dropped.
+   *   - `gave-up`     — {@link MAX_ATTEMPTS} reached; the entry was dropped.
+   *   - `failed:<code>` — a retryable transport/plan failure; the entry was kept.
+   *   - `error`       — an unexpected throw (still exited 0 via the CLI backstop).
    */
   outcome?: string;
   /** The estimate the run acted on, when one was selected. Never sensitive. */
