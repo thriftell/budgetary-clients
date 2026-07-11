@@ -147,7 +147,8 @@ const STYLES = `
 `;
 
 // Built from the single shared source of truth (scenario.ts), so the legend's
-// colors AND shapes always match the chart markers — including out_of_domain.
+// colors AND shapes always match the chart markers. out_of_domain is excluded
+// from LEGEND_STYLES (it is never plotted as a marker), so it is not listed here.
 const LEGEND = `<ul class="b-legend" aria-label="Scenario legend">
   ${LEGEND_STYLES.map(
     (s) => `<li>${legendSwatchSvg(s)}<span>${escapeHtml(s.label)}</span></li>`,

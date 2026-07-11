@@ -102,6 +102,11 @@ describe("renderDashboard", () => {
     expect(html).toContain("2 of the last 3 estimates were out-of-coverage voids");
   });
 
+  it("uses singular copy for exactly one void", () => {
+    const html = renderDashboard([entry("est_1"), voidEntry("est_void")], NONCE);
+    expect(html).toContain("1 of the last 2 estimates was an out-of-coverage void");
+  });
+
   it("omits the void-rate stat when there are no voids", () => {
     const html = renderDashboard([entry("est_1"), entry("est_2")], NONCE);
     expect(html).not.toContain("out-of-coverage void");

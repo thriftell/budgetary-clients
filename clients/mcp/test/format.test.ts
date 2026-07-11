@@ -83,6 +83,9 @@ describe("renderEstimate — honest presentation", () => {
     expect(text).toContain("wasn't billed");
     expect(text).not.toContain("No charge");
     expect(text).not.toContain("Estimated");
+    // The void path returns early — no footer, and NO "Estimate id" line (that
+    // is only added on the non-void render).
+    expect(text).not.toContain("Estimate id");
   });
 
   it("clamps a malformed confidence into [0,1] rather than printing a raw decimal", () => {
