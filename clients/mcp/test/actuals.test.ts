@@ -17,8 +17,9 @@ import {
   runRolloutActuals,
   submitActuals,
   type ActualCounts,
+  type PendingWriter,
 } from "../src/actuals.js";
-import { PendingStore, type PendingStoreFile } from "../src/store.js";
+import { PendingStore, type PendingEntry, type PendingStoreFile } from "../src/store.js";
 import { projectIdFromCwd } from "../src/tools/estimate.js";
 import { readTranscriptTotals } from "../src/transcript.js";
 import { TOOLS, TOOL_NAME } from "../src/server.js";
@@ -801,6 +802,86 @@ describe("submitActuals — outcome", () => {
     const outcome = await submitting;
     // The entry is gone, but THIS call did not submit — do not claim success.
     expect(outcome.submitted).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Store write faults must degrade, never crash (P-A2). `store.write` rethrows
+// on any fs failure (an immutable / perm-lost ~/.budgetary, ENOSPC); a submit
+// that has already committed to an outcome must report it honestly rather than
+// throw a raw stack — most critically the auto hook, which fails closed.
+// ---------------------------------------------------------------------------
+
+describe("submitActuals — store.write faults degrade (never crash the caller)", () => {
+  function makeEntry(id: string): PendingEntry {
+    return { estimate_id: id, query: "q", project_id: "p", created_at: RECENT, attempts: 0 };
+  }
+  // A store whose read works but whose every write throws.
+  function faultingStore(entries: PendingEntry[]) {
+    const state: PendingStoreFile = { version: 1, entries };
+    let writeAttempts = 0;
+    const store: PendingWriter = {
+      read: () => JSON.parse(JSON.stringify(state)) as PendingStoreFile,
+      write: () => {
+        writeAttempts += 1;
+        throw new Error("EPERM: operation not permitted");
+      },
+    };
+    return { store, attempts: () => writeAttempts };
+  }
+
+  it("post-success remove faults → still submitted:true (never reclassified retryable)", async () => {
+    const entry = makeEntry("est_wok");
+    const { store, attempts } = faultingStore([entry]);
+    const warns: string[] = [];
+    const outcome = await submitActuals({
+      store,
+      client: asClient(makeFakeClient()),
+      entry,
+      counts: { tokensIn: 1, tokensOut: 1, success: true, durationMs: 0 },
+      logger: { warn: (m) => warns.push(m) },
+    });
+    // The POST won — a failed remove must NOT turn a committed submit retryable.
+    expect(outcome.submitted).toBe(true);
+    expect(outcome.retryable).toBe(false);
+    expect(attempts()).toBe(1); // it did attempt to persist the removal
+    expect(warns.some((w) => w.includes("could not update the pending store"))).toBe(true);
+  });
+
+  it("attempts-bump write fault on a 5xx → retryable outcome, no throw", async () => {
+    const entry = makeEntry("est_wbump");
+    const { store } = faultingStore([entry]);
+    const fake = makeFakeClient(async () => {
+      throw new BudgetaryError({ code: "internal_error", message: "boom", httpStatus: 500, requestId: "r" });
+    });
+    const warns: string[] = [];
+    const outcome = await submitActuals({
+      store,
+      client: asClient(fake),
+      entry,
+      counts: { tokensIn: 1, tokensOut: 1, success: true, durationMs: 0 },
+      logger: { warn: (m) => warns.push(m) },
+    });
+    expect(outcome.submitted).toBe(false);
+    expect(outcome.retryable).toBe(true);
+    expect(warns.some((w) => w.includes("could not update the pending store"))).toBe(true);
+  });
+
+  it("terminal-4xx drop write fault → terminal outcome, no throw", async () => {
+    const entry = makeEntry("est_wdrop");
+    const { store } = faultingStore([entry]);
+    const fake = makeFakeClient(async () => {
+      throw new BudgetaryError({ code: "invalid_request", message: "bad", httpStatus: 400, requestId: "r" });
+    });
+    const outcome = await submitActuals({
+      store,
+      client: asClient(fake),
+      entry,
+      counts: { tokensIn: 1, tokensOut: 1, success: true, durationMs: 0 },
+      logger: { warn: () => {} },
+    });
+    expect(outcome.submitted).toBe(false);
+    expect(outcome.terminal).toBe(true);
   });
 });
 

@@ -315,12 +315,25 @@ export async function runOnSessionEndCli(
     );
     return 0;
   }
-  return (deps.runAuto ?? runAutoActuals)({
-    payload,
-    env,
-    cwd: process.cwd(),
-    stderr,
-  });
+  // Last-resort guard: the hook's contract is to FAIL CLOSED (exit 0) so an
+  // environmental fault never crashes the host with a raw stack. runAutoActuals
+  // already degrades its own store/network faults, but any unforeseen throw here
+  // must still exit 0 rather than escape.
+  try {
+    return await (deps.runAuto ?? runAutoActuals)({
+      payload,
+      env,
+      cwd: process.cwd(),
+      stderr,
+    });
+  } catch (err) {
+    stderr.write(
+      `Budgetary: the session-end hook hit an unexpected error and did nothing (${
+        err instanceof Error ? err.message : String(err)
+      }).\n`,
+    );
+    return 0;
+  }
 }
 
 function runPendingCli(): number {
@@ -341,9 +354,21 @@ function runPendingCli(): number {
  */
 export async function main(argv: string[]): Promise<number | null> {
   const sub = argv[0];
-  if (sub === "pending") return runPendingCli();
-  if (sub === "report-actual") return runReportActualCli();
-  if (sub === "on-session-end") return runOnSessionEndCli(argv.slice(1));
-  await runStdioServer();
-  return null;
+  try {
+    if (sub === "pending") return runPendingCli();
+    if (sub === "report-actual") return await runReportActualCli();
+    if (sub === "on-session-end") return await runOnSessionEndCli(argv.slice(1));
+    await runStdioServer();
+    return null;
+  } catch (err) {
+    // Backstop so no subcommand ever exits on a raw stack. The session-end HOOK
+    // must fail closed (exit 0) whatever happens; every other subcommand is
+    // foreground, so a nonzero exit is the honest signal (never a raw trace).
+    process.stderr.write(
+      `Budgetary: unexpected error (${
+        err instanceof Error ? err.message : String(err)
+      }).\n`,
+    );
+    return sub === "on-session-end" ? 0 : 1;
+  }
 }

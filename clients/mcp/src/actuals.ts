@@ -96,6 +96,34 @@ function removeById(file: PendingStoreFile, estimateId: string): boolean {
   return true;
 }
 
+/**
+ * Persist `file`, degrading to a warning instead of rethrowing. `store.write`
+ * rethrows on any fs failure (an immutable/perm-lost `~/.budgetary`, ENOSPC),
+ * and every caller here has ALREADY committed to an outcome — most critically
+ * the session-end hook, whose contract is to fail closed (exit 0). Letting a
+ * write fault escape would crash the host with a raw stack AFTER a successful
+ * POST and mis-report a committed submit as a retryable failure. Returns whether
+ * the write landed so a caller can note that a queue mutation didn't persist (a
+ * leftover entry is reconciled next session by the server's `estimate_id` dedup).
+ */
+function tryWrite(
+  store: PendingWriter,
+  file: PendingStoreFile,
+  logger: { warn(message: string): void },
+): boolean {
+  try {
+    store.write(file);
+    return true;
+  } catch (err) {
+    logger.warn(
+      `Budgetary: could not update the pending store; leaving it as-is. (${
+        err instanceof Error ? err.message : String(err)
+      })`,
+    );
+    return false;
+  }
+}
+
 /** The outcome of one {@link submitActuals} call, so callers can report it honestly. */
 export interface SubmitOutcome {
   /** THIS call's POST succeeded and the entry was removed. */
@@ -183,7 +211,10 @@ export async function submitActuals(
         : {}),
     });
     const fresh = store.read();
-    if (removeById(fresh, entry.estimate_id)) store.write(fresh);
+    // The POST won. Removing the entry is best-effort: if the write faults we
+    // must NOT reclassify a committed submit as retryable — return submitted
+    // regardless. A leftover entry is reconciled next session by server dedup.
+    if (removeById(fresh, entry.estimate_id)) tryWrite(store, fresh, logger);
     return { submitted: true, retryable: false, terminal: false, gaveUp: false };
   } catch (err) {
     const retryable = isRetryableSubmitError(err);
@@ -202,9 +233,10 @@ export async function submitActuals(
       }
       // A terminal 4xx (400/404/409/413/…) will never succeed. DROP it so it
       // can't head-of-line-block this project's queue — the manual/rollout paths
-      // always act on the newest matching entry and have no TTL cleanup.
+      // always act on the newest matching entry and have no TTL cleanup. If the
+      // drop can't be persisted, still return the computed outcome (don't crash).
       fresh.entries.splice(idx, 1);
-      store.write(fresh);
+      tryWrite(store, fresh, logger);
       return { submitted: false, retryable: false, terminal: true, gaveUp: false, error: err };
     }
     const current = fresh.entries[idx]!;
@@ -214,7 +246,7 @@ export async function submitActuals(
     };
     if (updated.attempts >= MAX_ATTEMPTS) {
       fresh.entries.splice(idx, 1);
-      store.write(fresh);
+      tryWrite(store, fresh, logger);
       const detail = err instanceof BudgetaryError ? err.message : String(err);
       logger.warn(
         `Budgetary: giving up on actuals for ${entry.estimate_id} after ${MAX_ATTEMPTS} attempts (${detail}).`,
@@ -222,7 +254,7 @@ export async function submitActuals(
       return { submitted: false, retryable, terminal: false, gaveUp: true, error: err };
     }
     fresh.entries[idx] = updated;
-    store.write(fresh);
+    tryWrite(store, fresh, logger);
     return { submitted: false, retryable, terminal: false, gaveUp: false, error: err };
   }
 }
@@ -288,9 +320,10 @@ function sessionProjectId(args: AutoActualsArgs): string | null {
  * {@link submitActuals}.
  */
 export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
+  const logger = { warn: (m: string) => args.stderr.write(`${m}\n`) };
   const store = new PendingStore({
     path: pendingFilePath(args.home),
-    logger: { warn: (m) => args.stderr.write(`${m}\n`) },
+    logger,
   });
   const file = store.read();
   if (file.entries.length === 0) return 0;
@@ -304,7 +337,7 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
   if (!Number.isFinite(created) || now.getTime() - created > PENDING_TTL_MS) {
     // Drop just this stale entry (by id, re-reading first); leave the rest.
     const fresh = store.read();
-    if (removeById(fresh, entry.estimate_id)) store.write(fresh);
+    if (removeById(fresh, entry.estimate_id)) tryWrite(store, fresh, logger);
     return 0;
   }
 
@@ -361,7 +394,7 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
       durationMs: inferDurationMs(args.payload, entry, now),
       ...(trace ? { trace } : {}),
     },
-    logger: { warn: (m) => args.stderr.write(`${m}\n`) },
+    logger,
   });
   // A terminal rejection drops the entry inside submitActuals WITHOUT a warning
   // (the give-up branch warns; the manual/rollout paths report their own drops).

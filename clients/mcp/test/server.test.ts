@@ -234,6 +234,27 @@ describe("runOnSessionEndCli (stdin hook path)", () => {
     expect(errs.join("")).toBe("");
   });
 
+  it("fails closed (exit 0) with a clean stderr line when the auto path throws", async () => {
+    // The hook's contract is exit 0 whatever happens; an unforeseen throw from
+    // the auto path must be caught and reported, never a raw stack that crashes
+    // the host or a non-zero exit that reads as a retryable failure.
+    const errs: string[] = [];
+    const code = await runOnSessionEndCli([], {
+      stdin: streamOf(
+        JSON.stringify({ transcript_path: "/tmp/t.jsonl", reason: "clear", cwd: "/w" }),
+      ),
+      stderr: { write: (s: string) => { errs.push(s); } },
+      env: {},
+      runAuto: async () => {
+        throw new Error("boom from the store");
+      },
+    });
+    expect(code).toBe(0);
+    const text = errs.join("");
+    expect(text).toContain("unexpected error");
+    expect(text).toContain("boom from the store"); // the cause, not a swallowed error
+  });
+
   it("fails closed (exit 0, no auto) when stdin exceeds the size cap", async () => {
     const auto = autoSpy();
     const errs: string[] = [];
