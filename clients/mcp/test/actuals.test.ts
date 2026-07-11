@@ -265,6 +265,49 @@ describe("runManualActuals", () => {
     expect(text).not.toContain("still pending");
   });
 
+  it("--estimate-id on a TERMINAL 4xx says it can't succeed (not a key/plan retry loop)", async () => {
+    // The synthetic by-id entry is never in the store, so submitActuals can't
+    // reach its terminal-drop branch — a 409/404 must still be reported as
+    // terminal, NOT mis-blamed on the key/plan with a futile re-run.
+    writePending(home, { version: 1, entries: [] });
+    const fake = makeFakeClient(async () => {
+      throw new BudgetaryError({ code: "idempotency_conflict", message: "already recorded", httpStatus: 409, requestId: null });
+    });
+    const out: string[] = [];
+    const code = await runManualActuals({
+      env: ENV,
+      home,
+      estimateId: "est_short",
+      out: (l) => out.push(l),
+      prompt: scriptedPrompt(["1000", "2000", "y", "500"]),
+      clientFactory: () => asClient(fake),
+    });
+    expect(code).toBe(1);
+    const text = out.join("\n");
+    expect(text).toContain("It can't succeed, so nothing was recorded.");
+    expect(text).not.toContain("Fix your API key or plan");
+    expect(text).not.toContain("re-run");
+  });
+
+  it("--estimate-id on a user-fixable 403 points at the key/plan + a re-run", async () => {
+    writePending(home, { version: 1, entries: [] });
+    const fake = makeFakeClient(async () => {
+      throw new BudgetaryError({ code: "permission_denied", message: "no plan", httpStatus: 403, requestId: null });
+    });
+    const out: string[] = [];
+    await runManualActuals({
+      env: ENV,
+      home,
+      estimateId: "est_short",
+      out: (l) => out.push(l),
+      prompt: scriptedPrompt(["1000", "2000", "y", "500"]),
+      clientFactory: () => asClient(fake),
+    });
+    const text = out.join("\n");
+    expect(text).toContain("Fix your API key or plan");
+    expect(text).toContain("report-actual --estimate-id est_short");
+  });
+
   it("rejects non-integer token counts (after re-prompting) without submitting", async () => {
     writePending(home, {
       version: 1,

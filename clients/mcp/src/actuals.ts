@@ -1040,7 +1040,21 @@ export async function runManualActuals(args: ManualActualsArgs): Promise<number>
       `Budgetary rejected this submission${detail ? `: ${detail}` : ""}. It can't ` +
         "succeed, so the estimate has been discarded.",
     );
+  } else if (
+    byId &&
+    !isUserFixableRejection(outcome.error)
+  ) {
+    // By-id path only: the synthetic entry is never in the store, so submitActuals
+    // can't reach its terminal-drop branch — a terminal 4xx (400/404/409/…) lands
+    // here, not in the `terminal` branch above. Classify by the error itself so it
+    // isn't mis-blamed on the key/plan or advised a futile re-run.
+    args.out(
+      `Budgetary rejected this submission${detail ? `: ${detail}` : ""}. It can't ` +
+        "succeed, so nothing was recorded.",
+    );
   } else {
+    // A user-fixable rejection (401/403): fixing the key/plan lets the SAME submit
+    // succeed. (On the store-backed path the entry is also KEPT for the retry.)
     args.out(
       byId
         ? `Budgetary rejected this submission${detail ? `: ${detail}` : ""}. Fix your ` +
