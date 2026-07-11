@@ -14,6 +14,7 @@ import {
   redactBashTarget,
   redactFileTarget,
   redactTarget,
+  transcriptUnreadableReason,
   type TraceStep,
 } from "../src/transcript.js";
 
@@ -834,5 +835,44 @@ describe("readTranscriptUsage — opt-out suppresses target", () => {
       line("m1", use("Bash", "b1", { command: "pytest" }), { input_tokens: 1, output_tokens: 1 }),
     ]);
     expect(readTranscriptUsage(path)!.trace[0]!.target).toMatch(/^pytest /);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// transcriptUnreadableReason — DEBUG-only diagnostics naming WHY a transcript
+// yielded no usable counts. Never re-exposes content; only a category.
+// ---------------------------------------------------------------------------
+
+describe("transcriptUnreadableReason", () => {
+  it("names a missing file", () => {
+    expect(transcriptUnreadableReason(join(dir, "nope.jsonl"))).toMatch(
+      /does not exist/,
+    );
+  });
+
+  it("names an empty file", () => {
+    const path = join(dir, "empty.jsonl");
+    writeFileSync(path, "   \n", "utf8");
+    expect(transcriptUnreadableReason(path)).toMatch(/empty/);
+  });
+
+  it("names a non-regular path (a directory)", () => {
+    expect(transcriptUnreadableReason(dir)).toMatch(/not a regular file/);
+  });
+
+  it("names an over-cap file", () => {
+    const path = join(dir, "big.jsonl");
+    writeFileSync(path, "{}", "utf8");
+    // truncateSync extends the file (sparse) past the size cap cheaply.
+    truncateSync(path, MAX_TRANSCRIPT_BYTES + 1);
+    expect(transcriptUnreadableReason(path)).toMatch(/exceeds the size cap/);
+  });
+
+  it("reports the load-bearing case: present + non-empty but unrecognized format", () => {
+    // Exactly the silent-death scenario: a transcript whose shape the parser no
+    // longer recognizes (a Claude Code format change) → readTranscriptUsage null.
+    const path = write([{ hello: "world" }, { still: "not a transcript" }]);
+    expect(readTranscriptUsage(path)).toBeNull();
+    expect(transcriptUnreadableReason(path)).toMatch(/no recognizable token usage/);
   });
 });

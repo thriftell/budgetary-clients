@@ -211,6 +211,24 @@ export function traceTargetEnabled(env: NodeJS.ProcessEnv = process.env): boolea
 }
 
 /**
+ * Whether verbose session-end diagnostics are enabled. Default OFF: the
+ * unattended hook is silent on the happy path (stdout is the JSON-RPC channel;
+ * stderr is shown by the host only in debug mode), so an operator turns this on
+ * — `BUDGETARY_DEBUG=1` in the MCP host config's env — to have the hook narrate
+ * every decision on stderr while it chases a lost actual.
+ *
+ * Opt-IN and fail-safe toward SILENT: it is ON only for an explicit affirmative
+ * (`1` / `true` / `on` / `yes`, case-insensitive). Any other value — a typo, an
+ * off-value — stays OFF, so a misremembered flag never floods stderr.
+ */
+export function debugEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const v = env.BUDGETARY_DEBUG;
+  if (typeof v !== "string") return false;
+  const norm = v.trim().toLowerCase();
+  return norm === "1" || norm === "true" || norm === "on" || norm === "yes";
+}
+
+/**
  * Guidance returned when the key can't be resolved. Never echoes any value.
  * Host-aware: on `claude-code` it leads with the plugin's configure command.
  * `kind: "unreadable"` distinguishes a broken config file from no key at all, so
