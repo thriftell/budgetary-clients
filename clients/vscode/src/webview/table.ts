@@ -13,6 +13,12 @@ const ROW_CAP = 50;
 const QUERY_MAX = 48;
 
 function resultCell(entry: LedgerEntry): string {
+  // A void / out-of-domain estimate has no prediction and will NEVER receive an
+  // actual, so "○ pending" is a lie — it implies a measurement is still coming.
+  // Say "no prediction" so the row reads as terminal, not stuck.
+  if (entry.scenario === "out_of_domain") {
+    return `<span aria-label="no prediction">no prediction</span>`;
+  }
   // A glyph with an accessible label, so a screen reader announces the outcome
   // instead of an ambiguous symbol.
   if (entry.actual === null) return `<span aria-label="pending">○</span>`;

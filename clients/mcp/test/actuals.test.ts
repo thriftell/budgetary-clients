@@ -457,12 +457,16 @@ describe("runManualActuals", () => {
 });
 
 describe("runPendingList", () => {
-  it("says the loop is closed when there are no pending estimates", () => {
+  it("reports an empty queue honestly (never claims 'the loop is closed')", () => {
     writePending(home, { version: 1, entries: [] });
     const out: string[] = [];
     const code = runPendingList({ env: ENV, home, out: (l) => out.push(l) });
     expect(code).toBe(0);
-    expect(out.join("\n")).toContain("loop is closed");
+    const text = out.join("\n");
+    expect(text).toContain("No pending Budgetary estimates awaiting actuals.");
+    // Some estimates may have been DROPPED (gave-up/rejected/swept), so we must
+    // not imply everything closed successfully.
+    expect(text).not.toContain("loop is closed");
   });
 
   it("lists pending estimates and marks the ones for this project", () => {
@@ -481,6 +485,50 @@ describe("runPendingList", () => {
     expect(text).toContain("refactor the parser");
     expect(text).toContain("(this project)");
     expect(text).toContain("report-actual");
+  });
+
+  it("enriches each row: attempts, measured flag, expiry, and the short id (O-3/O-4)", () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        // A retry entry: measured counts persisted after a prior failed submit.
+        {
+          estimate_id: "est_measured", query: "q", project_id: projectIdFromCwd(cwd, home),
+          created_at: RECENT, attempts: 2,
+          tokens_in: 1000, tokens_out: 500, success: true, duration_ms: 42,
+        },
+        // A fresh entry: no persisted counts.
+        { estimate_id: "est_fresh", query: "q2", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const out: string[] = [];
+    runPendingList({ env: ENV, home, cwd, now: () => NOW, out: (l) => out.push(l) });
+    const text = out.join("\n");
+    // The measured (retry) row shows attempts, the measured flag, expiry, and id.
+    expect(text).toMatch(/est_measured.*/);
+    expect(text).toContain("2/5 attempts");
+    expect(text).toContain("measured ✓");
+    expect(text).toContain("id est_measured");
+    // RECENT is 14m before NOW → ~24h left in the 24h window (rounded).
+    expect(text).toContain("expires in ~24h");
+    // The fresh row shows attempts + id but NOT "measured" (no counts on disk).
+    const freshLine = out.find((l) => l.includes("id est_fresh"))!;
+    expect(freshLine).toContain("0/5 attempts");
+    expect(freshLine).not.toContain("measured");
+  });
+
+  it("says the auto-window passed for an aged entry (manual report still works)", () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_old", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: "2026-05-25T00:00:00Z", attempts: 1 },
+      ],
+    });
+    const out: string[] = [];
+    runPendingList({ env: ENV, home, cwd, now: () => NOW, out: (l) => out.push(l) });
+    const text = out.join("\n");
+    expect(text).toContain("auto-window passed");
+    expect(text).toContain("manual report still works");
   });
 });
 
@@ -1906,7 +1954,7 @@ describe("runPendingList — surfaces the last automatic run", () => {
     // Truncated to 12 chars + ellipsis, and the age tail is present.
     expect(text).toContain("Last automatic submission: submitted (est_abcdefgh…), 14m ago.");
     expect(text).not.toContain("est_abcdefghijklmnop"); // full id never shown
-    expect(text).toContain("loop is closed");
+    expect(text).toContain("No pending Budgetary estimates awaiting actuals.");
   });
 
   it("flags an interrupted (SIGKILLed) run from a start-only breadcrumb", () => {

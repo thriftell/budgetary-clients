@@ -34,6 +34,11 @@ const STYLES = `
     font-size: 12px;
     margin-left: 12px;
   }
+  p.b-stat {
+    margin: 0 0 16px;
+    color: var(--vscode-descriptionForeground);
+    font-size: 12px;
+  }
   button.b-refresh {
     background: var(--vscode-button-background);
     color: var(--vscode-button-foreground);
@@ -210,6 +215,19 @@ function refreshScript(nonce: string): string {
 </script>`;
 }
 
+/**
+ * A one-line coverage stat: how many of the fetched estimates were out-of-domain
+ * VOIDS (no prediction). Empty when there are none — a stat only worth surfacing
+ * when there is something to surface, and one that explains why some rows read
+ * "no prediction" instead of a calibration point.
+ */
+function voidRateNote(entries: readonly LedgerEntry[]): string {
+  const voids = entries.filter((e) => e.scenario === "out_of_domain").length;
+  if (voids === 0) return "";
+  const wasWere = voids === 1 ? "was an out-of-coverage void" : "were out-of-coverage voids";
+  return `<p class="b-stat">${voids} of the last ${entries.length} estimates ${wasWere} (no prediction — Budgetary declined to estimate).</p>`;
+}
+
 export function renderDashboard(
   entries: readonly LedgerEntry[],
   nonce: string,
@@ -221,6 +239,7 @@ export function renderDashboard(
     </div>
     <button class="b-refresh" id="refresh" type="button">⟳ Refresh</button>
   </header>
+  ${voidRateNote(entries)}
   <section class="b-chart" aria-labelledby="b-chart-h">
     <h2 id="b-chart-h">Calibration</h2>
     ${renderCalibrationChart(entries)}
