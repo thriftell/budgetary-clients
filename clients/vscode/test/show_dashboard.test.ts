@@ -89,23 +89,26 @@ function makeFakePanel(): FakePanel {
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
-function ledgerPage(id: string) {
+function makeEntry(id: string) {
   return {
-    entries: [
-      {
-        estimateId: id,
-        createdAt: "2026-05-27T10:14:00Z",
-        queryExcerpt: "q",
-        model: "m",
-        host: "h",
-        projectId: "p",
-        scenario: "confident",
-        predicted: { p10: 1, p50: 2, p90: 3 },
-        actual: null,
-      },
-    ],
-    nextCursor: null,
+    estimateId: id,
+    createdAt: "2026-05-27T10:14:00Z",
+    queryExcerpt: "q",
+    model: "m",
+    host: "h",
+    projectId: "p",
+    scenario: "confident",
+    predicted: { p10: 1, p50: 2, p90: 3 },
+    actual: null,
   };
+}
+
+function ledgerPage(id: string) {
+  return { entries: [makeEntry(id)], nextCursor: null };
+}
+
+function ledgerPageMulti(ids: string[], nextCursor: string | null) {
+  return { entries: ids.map(makeEntry), nextCursor };
 }
 
 let activePanel: FakePanel | undefined;
@@ -164,6 +167,52 @@ describe("dashboard load sequencing", () => {
     ctl.deferreds[1]!.resolve(ledgerPage("est_ref2"));
     await refreshing;
     expect(fp._html).toContain("est_ref2");
+  });
+
+  it("Load older fetches the next page, dedup-appends, and threads the new cursor", async () => {
+    const fp = makeFakePanel();
+    activePanel = fp;
+    vscodeStub.window.createWebviewPanel = () => fp;
+
+    showDashboard({} as never); // deferreds[0]
+    // Initial page has a next cursor → the "Load older" control renders.
+    ctl.deferreds[0]!.resolve(ledgerPageMulti(["est_1", "est_2"], "cursor_1"));
+    await tick();
+    expect(fp._html).toContain("est_1");
+    expect(fp._html).toContain('id="load-older"');
+
+    // Load older: the next page overlaps est_2 (cursor pages shift) and adds
+    // est_3, and reports no further pages (nextCursor null).
+    const more = load(fp, { loadMore: true }); // deferreds[1]
+    ctl.deferreds[1]!.resolve(ledgerPageMulti(["est_2", "est_3"], null));
+    await more;
+
+    expect(fp._html).toContain("est_3"); // appended
+    // Deduped: est_2 is rendered exactly once, not twice.
+    expect((fp._html.match(/>est_2</g) ?? []).length).toBe(1);
+    // No more pages → the control is gone.
+    expect(fp._html).not.toContain('id="load-older"');
+  });
+
+  it("a stale Load older (older cursor) does not clobber a newer refresh", async () => {
+    const fp = makeFakePanel();
+    activePanel = fp;
+    vscodeStub.window.createWebviewPanel = () => fp;
+
+    showDashboard({} as never); // deferreds[0]
+    ctl.deferreds[0]!.resolve(ledgerPageMulti(["est_1"], "cursor_1"));
+    await tick();
+
+    const older = load(fp, { loadMore: true }); // deferreds[1]
+    const newer = load(fp, { isRefresh: true }); // deferreds[2]
+    ctl.deferreds[2]!.resolve(ledgerPageMulti(["est_fresh"], null));
+    await newer;
+    // The stale load-older resolves last; it must neither render nor corrupt state.
+    ctl.deferreds[1]!.resolve(ledgerPageMulti(["est_stale"], "cursor_2"));
+    await older;
+
+    expect(fp._html).toContain("est_fresh");
+    expect(fp._html).not.toContain("est_stale");
   });
 
   it("renders the configure-key panel on an auth error (not a generic error)", async () => {

@@ -50,6 +50,8 @@ const STYLES = `
     cursor: pointer;
   }
   button.b-refresh:hover { background: var(--vscode-button-hoverBackground); }
+  button.b-refresh[disabled] { opacity: 0.6; cursor: default; }
+  .b-load-older { margin-top: 12px; text-align: center; }
   section.b-chart {
     border: 1px solid var(--vscode-panel-border);
     border-radius: 4px;
@@ -207,6 +209,18 @@ function refreshScript(nonce: string): string {
       vscode.postMessage({ type: "refresh" });
     });
   }
+  // "Load older" appends the next page. Like a refresh it keeps the current view
+  // (no blank interstitial) and re-uses the pendingRefresh announce; it preserves
+  // scroll so the newly-appended rows don't jump the viewport.
+  const older = document.getElementById("load-older");
+  if (older) {
+    older.addEventListener("click", function () {
+      vscode.setState({ scrollY: window.scrollY, pendingRefresh: true });
+      if (status) status.textContent = "Loading older estimates…";
+      older.setAttribute("disabled", "true");
+      vscode.postMessage({ type: "loadMore" });
+    });
+  }
   window.addEventListener("scroll", function () {
     const s = vscode.getState() || {};
     s.scrollY = window.scrollY;
@@ -232,7 +246,18 @@ function voidRateNote(entries: readonly LedgerEntry[]): string {
 export function renderDashboard(
   entries: readonly LedgerEntry[],
   nonce: string,
+  opts: { nextCursor?: string | null } = {},
 ): string {
+  // A non-null cursor means the server has OLDER pages this view hasn't fetched.
+  // Everything the dashboard says about coverage keys off this so it never
+  // implies the loaded window is the whole ledger.
+  const hasMore = opts.nextCursor != null;
+  const chartHeading = hasMore
+    ? `Calibration <span class="b-subtitle">— most recent; older history not loaded</span>`
+    : "Calibration";
+  const loadOlder = hasMore
+    ? `<div class="b-load-older"><button class="b-refresh" id="load-older" type="button">↓ Load older estimates</button></div>`
+    : "";
   const body = `
   <header class="b-header">
     <div>
@@ -242,14 +267,15 @@ export function renderDashboard(
   </header>
   ${voidRateNote(entries)}
   <section class="b-chart" aria-labelledby="b-chart-h">
-    <h2 id="b-chart-h">Calibration</h2>
-    ${renderCalibrationChart(entries)}
+    <h2 id="b-chart-h">${chartHeading}</h2>
+    ${renderCalibrationChart(entries, { windowed: hasMore })}
     <p class="b-visually-hidden" id="${CHART_SUMMARY_ID}">Each mark plots one estimate's predicted midpoint (x) against its actual token total (y), on logarithmic scales; the dashed diagonal is perfect calibration and the horizontal whisker is the p10–p90 range. The same estimates are listed in the table below.</p>
     ${LEGEND}
   </section>
   <section class="b-recent" aria-labelledby="b-recent-h">
     <h2 id="b-recent-h">Recent estimates</h2>
-    ${renderRecentTable(entries)}
+    ${renderRecentTable(entries, { hasMore })}
+    ${loadOlder}
   </section>
   ${refreshScript(nonce)}`;
   return shell(nonce, "Budgetary Dashboard", body);

@@ -11,6 +11,14 @@ const PAD_TOP = 24;
 const PAD_BOTTOM = 48;
 const MARKER_R = 4;
 
+/**
+ * Cap on plotted markers so the SVG stays bounded no matter how many pages the
+ * "Load older" control has accumulated — the most-recent {@link MAX_PLOT_POINTS}
+ * plottable points are drawn (they carry the current calibration signal); older
+ * ones are truncated flat rather than rendering thousands of markers.
+ */
+export const MAX_PLOT_POINTS = 300;
+
 const REFERENCE_LINE_COLOR = "var(--vscode-charts-foreground)";
 const AXIS_COLOR = "var(--vscode-foreground)";
 const GRID_COLOR = "var(--vscode-panel-border)";
@@ -94,13 +102,23 @@ function formatTick(value: number): string {
   return `${value}`;
 }
 
-function emptyState(plottable: number): string {
-  // <2 points can't anchor a calibration line. Distinguish "nothing yet" from
-  // "one point, need one more" so the message isn't misleading with 1 datum.
-  const msg =
-    plottable === 0
-      ? "No calibration data yet. Run an estimate and record its actuals to start collecting points."
-      : "Only one completed estimate so far — at least 2 are needed to plot calibration.";
+function emptyState(plottable: number, windowed: boolean): string {
+  // <2 points can't anchor a calibration line. Distinguish the cases so the copy
+  // is honest — critically, when the fetched page is only a WINDOW of the ledger
+  // (`windowed`), an empty plot is NOT a global "no data" claim: older completed
+  // pairs may exist beyond the window (e.g. a host with 50 orphans up top).
+  let msg: string;
+  if (windowed) {
+    msg =
+      plottable === 0
+        ? "No completed estimates in the latest window — older history is not loaded. Use Load older below, or record actuals to start plotting."
+        : "Only one completed estimate in the latest window — at least 2 are needed; older history is not loaded (use Load older).";
+  } else {
+    msg =
+      plottable === 0
+        ? "No calibration data yet. Run an estimate and record its actuals to start collecting points."
+        : "Only one completed estimate so far — at least 2 are needed to plot calibration.";
+  }
   // The message is the accessible name (aria-label), so a screen reader reads
   // the actual guidance — not just "Empty calibration chart".
   return `<svg viewBox="0 0 ${VIEW_W} ${VIEW_H}" role="img" aria-label="${escapeHtml(msg)}">
@@ -108,9 +126,15 @@ function emptyState(plottable: number): string {
 </svg>`;
 }
 
-export function renderCalibrationChart(entries: readonly LedgerEntry[]): string {
-  const points = pickPoints(entries);
-  if (points.length < 2) return emptyState(points.length);
+export function renderCalibrationChart(
+  entries: readonly LedgerEntry[],
+  opts: { windowed?: boolean } = {},
+): string {
+  const all = pickPoints(entries);
+  // Keep the most-recent points (entries arrive newest-first) so the plot stays
+  // bounded as "Load older" accumulates pages; older points truncate flat.
+  const points = all.length > MAX_PLOT_POINTS ? all.slice(0, MAX_PLOT_POINTS) : all;
+  if (points.length < 2) return emptyState(points.length, opts.windowed ?? false);
 
   const domain = computeDomain(points);
 

@@ -70,14 +70,26 @@ describe("renderRecentTable", () => {
     expect(html).toContain("b-scenario-sparse_evidence");
   });
 
-  it("notes the 50-row cap in the caption only when the cap is reached", () => {
-    const few = renderRecentTable([entry("e1", "2026-05-27T10:14:00Z", 100)]);
-    expect(few).not.toContain("most recent");
-
+  it("notes the window in the caption only when the server has older pages (hasMore)", () => {
     const many = Array.from({ length: 50 }, (_, i) =>
       entry(`e${i}`, "2026-05-27T10:14:00Z", 100),
     );
-    expect(renderRecentTable(many)).toContain("Showing the 50 most recent");
+    // No note when there is no more history — even at exactly 50 rows (the old
+    // hardcoded ROW_CAP wrongly claimed "more" on a full-but-final page).
+    expect(renderRecentTable(many)).not.toContain("most recent");
+    expect(renderRecentTable(many, { hasMore: false })).not.toContain("most recent");
+
+    // With older pages, the note keys on the ACTUAL rendered count — not 50 — so
+    // a load-more'd view of 120 rows says 120, not a stale 50.
+    expect(renderRecentTable(many, { hasMore: true })).toContain(
+      "Showing the 50 most recent",
+    );
+    const oneWithMore = renderRecentTable(
+      [entry("e1", "2026-05-27T10:14:00Z", 100)],
+      { hasMore: true },
+    );
+    expect(oneWithMore).toContain("Showing the 1 most recent");
+    expect(oneWithMore).toContain("older history isn't loaded");
   });
 
   it("has a caption, scope=col headers, and a Result column with accessible glyphs", () => {

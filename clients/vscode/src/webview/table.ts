@@ -8,8 +8,6 @@ import {
 } from "../format";
 import { scenarioLabel } from "./scenario";
 
-/** How many rows the dashboard fetches (getLedger limit); shown in the caption. */
-const ROW_CAP = 50;
 const QUERY_MAX = 48;
 
 function resultCell(entry: LedgerEntry): string {
@@ -71,7 +69,10 @@ function row(entry: LedgerEntry): string {
   </tr>`;
 }
 
-export function renderRecentTable(entries: readonly LedgerEntry[]): string {
+export function renderRecentTable(
+  entries: readonly LedgerEntry[],
+  opts: { hasMore?: boolean } = {},
+): string {
   if (entries.length === 0) {
     return `<p class="b-empty">No estimates yet.</p>`;
   }
@@ -90,10 +91,14 @@ export function renderRecentTable(entries: readonly LedgerEntry[]): string {
     return ta === tb ? 0 : tb - ta;
   });
 
-  // Honest about the cap: the dashboard fetches at most ROW_CAP rows, so when we
-  // render exactly that many there are likely older estimates not shown.
-  const capNote =
-    sorted.length >= ROW_CAP ? ` Showing the ${ROW_CAP} most recent.` : "";
+  // Honest about the window: key the note on whether the server reported MORE
+  // pages (`hasMore`, i.e. a non-null next cursor) AND the actual rendered count —
+  // not a hardcoded 50, which was wrong at both boundaries (a full-but-final page
+  // claimed more existed; a load-more'd view of 120 still said "50"). When there
+  // is genuinely more history the user hasn't loaded, say so with the true count.
+  const capNote = opts.hasMore
+    ? ` Showing the ${sorted.length} most recent — older history isn't loaded (use “Load older”).`
+    : "";
 
   return `<table class="b-table">
   <caption class="b-caption">Recent estimates — predicted vs. actual, newest first.${capNote}</caption>

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { LedgerEntry } from "@budgetary/sdk";
 
-import { renderCalibrationChart } from "../src/webview/chart";
+import { MAX_PLOT_POINTS, renderCalibrationChart } from "../src/webview/chart";
 
 function entry(
   estimateId: string,
@@ -88,6 +88,29 @@ describe("renderCalibrationChart", () => {
     expect(onePoint).toContain("at least 2 are needed");
     expect(onePoint).not.toContain("No calibration data yet");
     expect(countMarkers(onePoint)).toBe(0);
+  });
+
+  it("scopes the empty-state copy when the fetched window has older pages", () => {
+    // A windowed empty plot is NOT a global "no data" claim — older completed
+    // pairs may exist beyond the fetched window (e.g. 50 orphans up top).
+    const windowedEmpty = renderCalibrationChart([], { windowed: true });
+    expect(windowedEmpty).not.toContain("No calibration data yet");
+    expect(windowedEmpty).toContain("older history is not loaded");
+
+    const windowedOne = renderCalibrationChart(
+      [entry("e1", "confident", 1_000, 1_200)],
+      { windowed: true },
+    );
+    expect(windowedOne).toContain("at least 2 are needed");
+    expect(windowedOne).toContain("older history is not loaded");
+  });
+
+  it("caps plotted markers at MAX_PLOT_POINTS so the SVG stays bounded", () => {
+    const many = Array.from({ length: MAX_PLOT_POINTS + 60 }, (_, i) =>
+      entry(`e${i}`, "confident", 1_000 + i, 1_200 + i),
+    );
+    const svg = renderCalibrationChart(many);
+    expect(countMarkers(svg)).toBe(MAX_PLOT_POINTS);
   });
 
   it("distinguishes scenarios by SHAPE, not color alone (non-color channel)", () => {
