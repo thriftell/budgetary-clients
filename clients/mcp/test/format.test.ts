@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { EstimateResponse } from "@budgetary/sdk";
 
-import { renderEstimate } from "../src/format.js";
+import {
+  renderAuthFailed,
+  renderEstimate,
+  renderPermissionDenied,
+  renderRateLimited,
+  shortEstimateId,
+} from "../src/format.js";
 
 function estimate(overrides: Partial<EstimateResponse> = {}): EstimateResponse {
   return {
@@ -77,10 +83,41 @@ describe("renderEstimate — honest presentation", () => {
     expect(text).toContain("wasn't billed");
     expect(text).not.toContain("No charge");
     expect(text).not.toContain("Estimated");
+    // The void path returns early — no footer, and NO "Estimate id" line (that
+    // is only added on the non-void render).
+    expect(text).not.toContain("Estimate id");
   });
 
   it("clamps a malformed confidence into [0,1] rather than printing a raw decimal", () => {
     expect(renderEstimate(estimate({ confidence: 1.5 }))).toContain("Confidence: 1.00 (high)");
     expect(renderEstimate(estimate({ confidence: Number.NaN }))).toContain("(very low)");
+  });
+});
+
+describe("estimate_id visibility (O-4)", () => {
+  it("renderEstimate shows the short estimate id, correlating with pending + submit", () => {
+    const text = renderEstimate(estimate({ estimateId: "est_abcdefghijklmnop" }));
+    expect(text).toContain("Estimate id: est_abcdefgh…");
+    expect(text).not.toContain("est_abcdefghijklmnop"); // truncated, never full
+  });
+
+  it("shortEstimateId truncates only past 12 chars", () => {
+    expect(shortEstimateId("est_short")).toBe("est_short");
+    expect(shortEstimateId("est_abcdefghijklmnop")).toBe("est_abcdefgh…");
+  });
+});
+
+describe("request_id threading into the auth/plan/rate-limit renderers (O-4)", () => {
+  it("appends request_id when the server surfaced one, omits it otherwise", () => {
+    expect(renderAuthFailed("mcp", "env", "req_a")).toContain("(request_id: req_a)");
+    expect(renderAuthFailed("mcp", "env")).not.toContain("request_id");
+    expect(renderAuthFailed("mcp", "env", null)).not.toContain("request_id");
+
+    expect(renderPermissionDenied("req_b")).toContain("(request_id: req_b)");
+    expect(renderPermissionDenied()).not.toContain("request_id");
+
+    expect(renderRateLimited(5, "req_c")).toContain("(request_id: req_c)");
+    expect(renderRateLimited(5)).not.toContain("request_id");
+    expect(renderRateLimited(null, "req_d")).toContain("(request_id: req_d)");
   });
 });

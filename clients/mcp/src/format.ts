@@ -4,6 +4,22 @@ function commas(n: number): string {
   return n.toLocaleString("en-US");
 }
 
+/**
+ * A short, non-sensitive form of an `estimate_id` for a one-line surface — the
+ * estimate footer, a submit confirmation, and each `pending` row all show the
+ * SAME short form so a user can correlate a rendered estimate with its pending
+ * entry and its eventual actuals submission. The full id lives server-side; this
+ * is only a human-legible correlation handle, never a secret.
+ */
+export function shortEstimateId(id: string): string {
+  return id.length > 12 ? `${id.slice(0, 12)}…` : id;
+}
+
+/** Append a ` (request_id: X)` tail when the server surfaced one. */
+function requestIdTail(requestId: string | null | undefined): string {
+  return requestId ? ` (request_id: ${requestId})` : "";
+}
+
 interface ScenarioView {
   /** One-line, plain-language meaning of the scenario (contract §5). */
   meaning: string;
@@ -164,14 +180,17 @@ export function renderEstimate(
   lines.push(`Scenario: ${meaning}`);
   lines.push(`Confidence: ${confidenceLabel(estimate.confidence)}`);
   lines.push(`Model: ${estimate.model}`);
+  // The short estimate id, so a user can correlate this render with its `pending`
+  // row and its eventual actuals submission (all show the same short form).
+  lines.push(`Estimate id: ${shortEstimateId(estimate.estimateId)}`);
   lines.push("");
   lines.push(...storedFooter(options.host, options.stored ?? true));
   return lines.join("\n");
 }
 
 /** 403: a valid key that is not on an active plan. Distinct from 401. */
-export function renderPermissionDenied(): string {
-  return "Your Budgetary key isn't on an active plan. Start one at https://budgetary.tools";
+export function renderPermissionDenied(requestId?: string | null): string {
+  return `Your Budgetary key isn't on an active plan. Start one at https://budgetary.tools${requestIdTail(requestId)}`;
 }
 
 /**
@@ -182,6 +201,7 @@ export function renderPermissionDenied(): string {
 export function renderAuthFailed(
   host?: string,
   source?: "env" | "config",
+  requestId?: string | null,
 ): string {
   const sourceLine =
     source === "env"
@@ -193,17 +213,23 @@ export function renderAuthFailed(
     host === "claude-code"
       ? "Update it with `/plugin configure budgetary@budgetary`, or set BUDGETARY_API_KEY (checked first) / edit ~/.budgetary/config.json."
       : "Set a valid BUDGETARY_API_KEY (checked first), or update ~/.budgetary/config.json.";
-  return [sourceLine, fixLine, "Get or check a key at https://budgetary.tools"].join(
-    "\n",
-  );
+  return [
+    sourceLine,
+    fixLine,
+    `Get or check a key at https://budgetary.tools${requestIdTail(requestId)}`,
+  ].join("\n");
 }
 
 /** 429: rate limited. Includes the retry hint when the server surfaced one. */
-export function renderRateLimited(retryAfterSeconds: number | null): string {
+export function renderRateLimited(
+  retryAfterSeconds: number | null,
+  requestId?: string | null,
+): string {
+  const tail = requestIdTail(requestId);
   if (retryAfterSeconds !== null && Number.isFinite(retryAfterSeconds)) {
-    return `Budgetary rate limit reached. Try again in ${retryAfterSeconds} seconds.`;
+    return `Budgetary rate limit reached. Try again in ${retryAfterSeconds} seconds.${tail}`;
   }
-  return "Budgetary rate limit reached. Try again in a little while.";
+  return `Budgetary rate limit reached. Try again in a little while.${tail}`;
 }
 
 /**

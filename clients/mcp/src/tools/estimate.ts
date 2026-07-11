@@ -175,20 +175,22 @@ function renderEstimateError(
   source: "env" | "config",
 ): string {
   if (err instanceof BudgetaryRateLimitError) {
-    return renderRateLimited(err.retryAfterSeconds);
+    return renderRateLimited(err.retryAfterSeconds, err.requestId);
   }
   if (err instanceof BudgetaryError) {
     // The SDK maps 401 → BudgetaryAuthError and 403 → BudgetaryPermissionError
     // (both extend BudgetaryError). Distinguish by HTTP status / wire code so
-    // this stays correct regardless of the class hierarchy.
+    // this stays correct regardless of the class hierarchy. Thread the
+    // server's request_id through every branch so a user reporting a rejected
+    // key / plan / rate-limit can be traced (parity with the transport errors).
     if (err.httpStatus === 403 || err.code === "permission_denied") {
-      return renderPermissionDenied();
+      return renderPermissionDenied(err.requestId);
     }
     if (err.httpStatus === 401 || err.code === "authentication_failed") {
-      return renderAuthFailed(host, source);
+      return renderAuthFailed(host, source, err.requestId);
     }
     if (err.httpStatus === 429 || err.code === "rate_limited") {
-      return renderRateLimited(null);
+      return renderRateLimited(null, err.requestId);
     }
     // A 4xx the server deliberately rejected — state the reason + fix, never
     // "couldn't be reached, try again" (which is reserved for network / 5xx).

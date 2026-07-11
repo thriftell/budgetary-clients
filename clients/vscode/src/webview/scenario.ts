@@ -1,8 +1,9 @@
 // Single source of truth for scenario presentation, shared by the chart markers
 // and the legend so they can never drift. Every scenario carries a color AND a
 // non-color channel (marker SHAPE) AND a human label — so a color-vision-
-// deficient viewer can still tell scenarios apart. `out_of_domain` is included
-// (it was previously missing from both the color map and the legend).
+// deficient viewer can still tell scenarios apart. `out_of_domain` has a style
+// (used by the table's Scenario column) but is intentionally kept OUT of the
+// chart legend — it is never plotted as a marker (see LEGEND_STYLES).
 
 export type MarkerShape = "circle" | "square" | "triangle" | "diamond";
 
@@ -83,11 +84,18 @@ export function legendSwatchSvg(style: ScenarioStyle): string {
   )}</svg>`;
 }
 
-/** The scenarios shown in the legend, in order (known set + the "other" bucket). */
+/**
+ * The scenarios shown in the CHART legend, in order (plottable set + the "other"
+ * bucket). `out_of_domain` is deliberately EXCLUDED: a void/out-of-domain estimate
+ * has no prediction and no actual, so `pickPoints` (chart.ts) never plots a marker
+ * for it — a legend swatch would advertise a shape the chart never draws. The
+ * scenario still appears in the table's Scenario column (via {@link SCENARIO_STYLES}
+ * and {@link scenarioLabel}); it's only absent from the marker legend until it can
+ * actually be plotted.
+ */
 export const LEGEND_STYLES: readonly ScenarioStyle[] = [
   SCENARIO_STYLES.confident!,
   SCENARIO_STYLES.uncertain!,
   SCENARIO_STYLES.sparse_evidence!,
-  SCENARIO_STYLES.out_of_domain!,
   UNKNOWN_STYLE,
 ];

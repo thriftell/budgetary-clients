@@ -18,6 +18,7 @@ import {
   resolveConfigStatus,
   traceTargetEnabled,
 } from "./config.js";
+import { shortEstimateId } from "./format.js";
 import { PendingStore, type PendingEntry, type PendingStoreFile } from "./store.js";
 import { projectIdFromCwd } from "./tools/estimate.js";
 import {
@@ -851,7 +852,9 @@ export async function runManualActuals(args: ManualActualsArgs): Promise<number>
   });
 
   if (outcome.submitted) {
-    args.out("Actuals submitted. Thanks — this calibrates future estimates.");
+    args.out(
+      `Actuals submitted (${shortEstimateId(entry.estimate_id)}). Thanks — this calibrates future estimates.`,
+    );
     return 0;
   }
   if (outcome.gaveUp) {
@@ -1040,7 +1043,7 @@ export async function runRolloutActuals(
   if (outcome.submitted) {
     const commas = (n: number) => n.toLocaleString("en-US");
     args.out(
-      `Actuals submitted: ${commas(usage.tokensIn)} in / ${commas(usage.tokensOut)} out, ` +
+      `Actuals submitted (${shortEstimateId(entry.estimate_id)}): ${commas(usage.tokensIn)} in / ${commas(usage.tokensOut)} out, ` +
         `recorded as ${args.success ? "successful" : "failed"}. ` +
         "Thanks — this calibrates future estimates.",
     );
@@ -1095,11 +1098,6 @@ export interface PendingListArgs {
   out: (line: string) => void;
 }
 
-/** A short, non-sensitive form of an estimate id for a one-line status row. */
-function shortEstimateId(id: string): string {
-  return id.length > 12 ? `${id.slice(0, 12)}…` : id;
-}
-
 /**
  * One honest line describing the last automatic (session-end hook) run, read
  * back from the breadcrumb {@link runAutoActuals} leaves. This is how the
@@ -1114,6 +1112,22 @@ function formatBreadcrumbHeader(crumb: SessionEndBreadcrumb, now: Date): string 
   }
   const id = crumb.estimateId ? ` (${shortEstimateId(crumb.estimateId)})` : "";
   return `Last automatic submission: ${crumb.outcome}${id}, ${age}.`;
+}
+
+/**
+ * Human "expires in ~1h" / "expires in ~30m" for a pending row, or a note that
+ * the 24h AUTO-submit window has passed. Manual `report-actual` still works past
+ * that window — the estimate isn't gone, only auto-submission stops — so say so
+ * rather than implying the row is dead.
+ */
+function describeExpiry(createdAt: string, now: Date): string {
+  const created = Date.parse(createdAt);
+  if (!Number.isFinite(created)) return "expiry unknown";
+  const remaining = created + PENDING_TTL_MS - now.getTime();
+  if (remaining <= 0) return "auto-window passed (manual report still works)";
+  const mins = Math.round(remaining / 60000);
+  if (mins < 60) return `expires in ~${Math.max(1, mins)}m`;
+  return `expires in ~${Math.round(mins / 60)}h`;
 }
 
 /** A short human age like "just now", "3h ago", "2d ago". */
@@ -1149,7 +1163,11 @@ export function runPendingList(args: PendingListArgs): number {
   if (crumb !== null) args.out(formatBreadcrumbHeader(crumb, now));
 
   if (entries.length === 0) {
-    args.out("No pending Budgetary estimates — the loop is closed.");
+    // Honest terminal copy: an empty queue does NOT mean every estimate was
+    // successfully closed — some may have been dropped (gave-up / rejected /
+    // TTL-swept), which the breadcrumb header above reports. Don't claim "the
+    // loop is closed".
+    args.out("No pending Budgetary estimates awaiting actuals.");
     return 0;
   }
 
@@ -1170,7 +1188,22 @@ export function runPendingList(args: PendingListArgs): number {
     const here = projectId !== null && e.project_id === projectId ? " (this project)" : "";
     const excerpt = e.query.slice(0, 60);
     const ellipsis = e.query.length > 60 ? "…" : "";
-    args.out(`  • ${excerpt}${ellipsis} — ${describeAge(e.created_at, now)}${here}`);
+    // Row facts: age, attempts (out of the give-up cap), whether a prior failed
+    // submit already MEASURED counts (so a retry resends THOSE), the auto-window
+    // expiry, and the short id that also appears on the estimate render + submit.
+    const parts = [
+      describeAge(e.created_at, now),
+      `${e.attempts}/${MAX_ATTEMPTS} attempts`,
+    ];
+    if (typeof e.tokens_in === "number" && typeof e.tokens_out === "number") {
+      parts.push("measured ✓");
+    }
+    parts.push(describeExpiry(e.created_at, now));
+    args.out(
+      `  • ${excerpt}${ellipsis} — ${parts.join(", ")}, id ${shortEstimateId(
+        e.estimate_id,
+      )}${here}`,
+    );
   }
   args.out("");
   args.out(

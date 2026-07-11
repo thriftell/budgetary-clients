@@ -110,6 +110,17 @@ describe("renderRecentTable", () => {
     expect(html).toContain("&lt;b&gt;x&lt;/b&gt;");
   });
 
+  it("shows 'no prediction' (not 'pending') for an out-of-domain void row", () => {
+    // A void has no prediction and never gets an actual — "○ pending" would imply
+    // a measurement is still coming. It isn't.
+    const html = renderRecentTable([
+      entry("est_void", "2026-05-27T10:14:00Z", null, "out_of_domain"),
+    ]);
+    expect(html).toContain('aria-label="no prediction"');
+    expect(html).toContain("no prediction");
+    expect(html).not.toContain('aria-label="pending"');
+  });
+
   it("sorts newest-first and tolerates unparseable dates (transitive, no throw)", () => {
     const html = renderRecentTable([
       entry("est_old", "2020-01-01T00:00:00Z", 100),

@@ -31,6 +31,15 @@ function entry(id: string): LedgerEntry {
   };
 }
 
+/** An out-of-domain VOID: no prediction, and it never receives an actual. */
+function voidEntry(id: string): LedgerEntry {
+  return {
+    ...entry(id),
+    scenario: "out_of_domain",
+    actual: null,
+  };
+}
+
 describe("renderDashboard", () => {
   it("emits a CSP meta tag that carries the nonce", () => {
     const html = renderDashboard([entry("est_1"), entry("est_2")], NONCE);
@@ -73,12 +82,34 @@ describe("renderDashboard", () => {
     expect(html).toContain('id="b-chart-summary"');
   });
 
-  it("legend lists all scenarios (incl. out of domain) with shape marks, from one source", () => {
+  it("legend lists the PLOTTABLE scenarios with shape marks, from one source", () => {
     const html = renderDashboard([entry("est_1")], NONCE);
-    expect(html).toContain("out of domain"); // previously missing from the legend
+    expect(html).toContain("confident");
+    expect(html).toContain("sparse evidence");
     expect(html).toContain("b-legend-mark"); // each item carries a shape swatch
     // The legend is a semantic list, not a pile of spans.
     expect(html).toContain('<ul class="b-legend"');
+    // out_of_domain is never plotted (pickPoints skips voids), so it must NOT
+    // carry a dead legend swatch advertising a marker the chart never draws.
+    expect(html).not.toContain("out of domain");
+  });
+
+  it("surfaces the out-of-coverage void rate when there are voids", () => {
+    const html = renderDashboard(
+      [entry("est_1"), voidEntry("est_void_a"), voidEntry("est_void_b")],
+      NONCE,
+    );
+    expect(html).toContain("2 of the last 3 estimates were out-of-coverage voids");
+  });
+
+  it("uses singular copy for exactly one void", () => {
+    const html = renderDashboard([entry("est_1"), voidEntry("est_void")], NONCE);
+    expect(html).toContain("1 of the last 2 estimates was an out-of-coverage void");
+  });
+
+  it("omits the void-rate stat when there are no voids", () => {
+    const html = renderDashboard([entry("est_1"), entry("est_2")], NONCE);
+    expect(html).not.toContain("out-of-coverage void");
   });
 
   it("announces refresh via aria-live and preserves scroll/focus across reloads", () => {
