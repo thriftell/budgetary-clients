@@ -130,6 +130,7 @@ export function readTranscriptUsage(
   // through to the per-turn parse below.
   const codex = readCodexTotals(raw);
   if (codex !== null) {
+    if (!safeTotals(codex.tokensIn, codex.tokensOut)) return null;
     return { tokensIn: codex.tokensIn, tokensOut: codex.tokensOut, trace: [] };
   }
 
@@ -198,7 +199,22 @@ export function readTranscriptUsage(
     appendTurnSteps(trace, turn, results, includeTarget, targetSalt);
   }
 
+  // Guard the SUMS, not just each field: individually-finite per-turn counts can
+  // sum past Number.MAX_SAFE_INTEGER (or to Infinity), and JSON.stringify then
+  // serializes such a value as `null` on the wire — a corrupt/zeroed actual.
+  // Fail closed (submit nothing) instead.
+  if (!safeTotals(tokensIn, tokensOut)) return null;
+
   return { tokensIn, tokensOut, trace };
+}
+
+/**
+ * Whether both realized totals are safe integers. A non-finite or
+ * precision-lost total must never reach the wire (it serializes to `null`), so
+ * an out-of-range sum fails closed rather than submitting a fabricated figure.
+ */
+function safeTotals(tokensIn: number, tokensOut: number): boolean {
+  return Number.isSafeInteger(tokensIn) && Number.isSafeInteger(tokensOut);
 }
 
 /**

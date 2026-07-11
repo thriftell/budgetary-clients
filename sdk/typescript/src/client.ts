@@ -1,3 +1,4 @@
+import { BudgetaryNetworkError } from "./errors.js";
 import { HttpClient, type HttpClientConfig } from "./internal/http.js";
 import { assertAllowedBaseUrl } from "./internal/url.js";
 import { resolveClientRequestId } from "./internal/idempotency.js";
@@ -51,6 +52,46 @@ const DEFAULT_TIMEOUT_MS = 10_000;
 // 4 retries + the initial attempt = 5 total, per contract §8.
 const DEFAULT_MAX_RETRIES = 4;
 
+/**
+ * Shape-validate a 2xx estimate body before it becomes an `EstimateResponse`.
+ * The transport layer only checks that numbers are finite; it does not check
+ * SHAPE or TYPE, so an empty body (parsed to `null`), a wrong-shape 200 (missing
+ * `distribution`), or a wrong-TYPE 200 (string percentiles — `"123"` renders as
+ * a real number and gets stored as a fabricated estimate) would otherwise reach
+ * the caller intact. Require the load-bearing fields — a non-empty string
+ * `estimateId`, a boolean `void`, and a distribution with finite-number
+ * `p10`/`p50`/`p90` when not void — and reject anything else as a network-class
+ * failure (mirrors the Python SDK's `parse`). Runs OUTSIDE `withRetry`, so a
+ * deterministically-bad body fails fast rather than being retried.
+ */
+function parseEstimateResponse(raw: unknown): EstimateResponse {
+  const unusable = (why: string): never => {
+    throw new BudgetaryNetworkError({
+      code: "network",
+      message: `unusable response body from Budgetary API (${why})`,
+    });
+  };
+  if (raw === null || typeof raw !== "object") unusable("not an object");
+  const o = raw as Record<string, unknown>;
+  if (typeof o.estimateId !== "string" || o.estimateId.length === 0) {
+    unusable("missing estimateId");
+  }
+  if (typeof o.void !== "boolean") unusable("missing void");
+  if (o.void !== true) {
+    const d = o.distribution;
+    if (d === null || typeof d !== "object") unusable("missing distribution");
+    const dist = d as Record<string, unknown>;
+    for (const k of ["p10", "p50", "p90"] as const) {
+      // typeof-number is the real gate: `assertFiniteNumbers` upstream never runs
+      // on a string, so a string percentile would otherwise render as a number.
+      if (typeof dist[k] !== "number" || !Number.isFinite(dist[k])) {
+        unusable(`non-numeric ${k}`);
+      }
+    }
+  }
+  return raw as EstimateResponse;
+}
+
 export class BudgetaryClient {
   private readonly http: HttpClient;
 
@@ -86,12 +127,13 @@ export class BudgetaryClient {
     if (opts.context !== undefined) body.context = opts.context;
     if (clientRequestId !== undefined) body.clientRequestId = clientRequestId;
 
-    return this.http.request<EstimateResponse>({
+    const raw = await this.http.request<unknown>({
       method: "POST",
       path: "/v1/estimate",
       body,
       timeoutMs: opts.timeoutMs,
     });
+    return parseEstimateResponse(raw);
   }
 
   async submitActuals(actuals: ActualsRequest): Promise<ActualsResponse> {

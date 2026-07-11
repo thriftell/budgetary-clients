@@ -4,7 +4,7 @@ import {
   BudgetaryError,
   BudgetaryNetworkError,
 } from "../src/index.js";
-import { HttpClient, toSnakeCase } from "../src/internal/http.js";
+import { HttpClient, toCamelCase, toSnakeCase } from "../src/internal/http.js";
 
 describe("toSnakeCase — protocol snake-cased, metadata verbatim", () => {
   it("snake-cases known keys but passes the free-form metadata map through untouched", () => {
@@ -21,6 +21,36 @@ describe("toSnakeCase — protocol snake-cased, metadata verbatim", () => {
       context: { project_id: "p", depth_budget: 2 },
       metadata: { toolCalls: 47, camelKey: "v", nested: { innerKey: 1 } },
     });
+  });
+});
+
+describe("toCamelCase — iterative, deep-nesting safe (P-C3)", () => {
+  it("camelCases keys through nested objects and arrays", () => {
+    expect(
+      toCamelCase({
+        estimate_id: "e",
+        distribution: { p10: 1, unit: "tokens" },
+        items: [{ inner_key: 1 }, { inner_key: 2 }],
+      }),
+    ).toEqual({
+      estimateId: "e",
+      distribution: { p10: 1, unit: "tokens" },
+      items: [{ innerKey: 1 }, { innerKey: 2 }],
+    });
+  });
+
+  it("passes primitives and null through unchanged", () => {
+    expect(toCamelCase(5)).toBe(5);
+    expect(toCamelCase(null)).toBeNull();
+    expect(toCamelCase("s")).toBe("s");
+  });
+
+  it("does not blow the call stack on a deeply-nested body", () => {
+    // A recursive walk would throw a raw RangeError here; the iterative walk
+    // keeps the traversal on the heap. Build the depth without recursion.
+    let deep: Record<string, unknown> = { leaf_key: 1 };
+    for (let i = 0; i < 100_000; i++) deep = { nested_key: deep };
+    expect(() => toCamelCase(deep)).not.toThrow();
   });
 });
 

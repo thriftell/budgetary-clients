@@ -144,6 +144,29 @@ describe("readTranscriptUsage — per-turn granularity (the crux)", () => {
   });
 });
 
+describe("readTranscriptUsage — fail closed on an out-of-range SUM (P-C5)", () => {
+  it("returns null when per-turn totals sum past Number.MAX_SAFE_INTEGER", () => {
+    // Each turn's count is individually a safe integer, but their SUM is not —
+    // JSON.stringify would serialize the overflow as `null` on the wire, a
+    // corrupt actual. The reader must fail closed (submit nothing) instead.
+    const half = 9_000_000_000_000_000; // < MAX_SAFE_INTEGER; 2× is not
+    const path = write([
+      line("msg_a", text, { input_tokens: 1, output_tokens: half }),
+      line("msg_b", text, { input_tokens: 1, output_tokens: half }),
+    ]);
+    expect(readTranscriptUsage(path)).toBeNull();
+    expect(readTranscriptTotals(path)).toBeNull();
+  });
+
+  it("still returns an in-range total unchanged", () => {
+    const path = write([
+      line("msg_a", text, { input_tokens: 1000, output_tokens: 2000 }),
+      line("msg_b", text, { input_tokens: 500, output_tokens: 250 }),
+    ]);
+    expect(readTranscriptTotals(path)).toEqual({ tokensIn: 1500, tokensOut: 2250 });
+  });
+});
+
 describe("readTranscriptUsage — back-compat & robustness", () => {
   it("does not dedupe lines that carry usage but no message.id", () => {
     // Older single-line / synthetic transcripts each form their own turn and

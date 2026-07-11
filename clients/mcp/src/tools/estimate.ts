@@ -116,41 +116,57 @@ export async function runEstimateTool(
     return { text: renderEstimateError(err, host, resolved.source), isError: true };
   }
 
-  // Only claim "stored" when the append actually succeeded; the footer degrades
-  // to an honest "couldn't be stored" line otherwise. The store gets a logger so
-  // the underlying cause is visible on stderr, not swallowed.
-  let stored = true;
-  if (!response.void) {
-    const store = new PendingStore({
-      path: pendingFilePath(args.home),
-      logger: { warn: (m) => process.stderr.write(`${m}\n`) },
-    });
-    const entry: PendingEntry = {
-      estimate_id: response.estimateId,
-      query,
-      project_id: projectId,
-      created_at: (args.now ?? (() => new Date()))().toISOString(),
-      attempts: 0,
-    };
-    stored = store.append(entry);
-  }
-
-  let text = renderEstimate(response, { host, stored });
-  // Nudge: if earlier estimates for THIS project were never closed out, surface
-  // it once (a lost actual shouldn't stay invisible). Best-effort — never fatal.
-  if (stored) {
-    const others = new PendingStore({ path: pendingFilePath(args.home) })
-      .read()
-      .entries.filter(
-        (e) => e.project_id === projectId && e.estimate_id !== response.estimateId,
-      ).length;
-    if (others > 0) {
-      text +=
-        `\n\n(${others} earlier ${others === 1 ? "estimate" : "estimates"} for ` +
-        "this project still await actuals — run `npx @budgetary/mcp pending`.)";
+  // Belt-and-suspenders: the SDK now shape-validates the estimate body (a
+  // wrong-shape/typed 2xx throws BudgetaryNetworkError, caught above), but this
+  // render+store block still destructures `response` and must NEVER throw out of
+  // the tool — the tool's contract is to return text, never throw. A malformed
+  // shape that somehow reached here (an older SDK, an unexpected store/render
+  // fault) is surfaced as graceful transport-error text, not a raw TypeError.
+  try {
+    // Only claim "stored" when the append actually succeeded; the footer degrades
+    // to an honest "couldn't be stored" line otherwise. The store gets a logger so
+    // the underlying cause is visible on stderr, not swallowed.
+    let stored = true;
+    if (!response.void) {
+      const store = new PendingStore({
+        path: pendingFilePath(args.home),
+        logger: { warn: (m) => process.stderr.write(`${m}\n`) },
+      });
+      const entry: PendingEntry = {
+        estimate_id: response.estimateId,
+        query,
+        project_id: projectId,
+        created_at: (args.now ?? (() => new Date()))().toISOString(),
+        attempts: 0,
+      };
+      stored = store.append(entry);
     }
+
+    let text = renderEstimate(response, { host, stored });
+    // Nudge: if earlier estimates for THIS project were never closed out, surface
+    // it once (a lost actual shouldn't stay invisible). Best-effort — never fatal.
+    if (stored) {
+      const others = new PendingStore({ path: pendingFilePath(args.home) })
+        .read()
+        .entries.filter(
+          (e) => e.project_id === projectId && e.estimate_id !== response.estimateId,
+        ).length;
+      if (others > 0) {
+        text +=
+          `\n\n(${others} earlier ${others === 1 ? "estimate" : "estimates"} for ` +
+          "this project still await actuals — run `npx @budgetary/mcp pending`.)";
+      }
+    }
+    return { text, isError: false };
+  } catch (err) {
+    return {
+      text: renderTransportError(
+        err instanceof Error ? err.message : String(err),
+        null,
+      ),
+      isError: true,
+    };
   }
-  return { text, isError: false };
 }
 
 function renderEstimateError(

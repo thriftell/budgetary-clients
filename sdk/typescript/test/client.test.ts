@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { http, HttpResponse } from "msw";
-import { BudgetaryClient } from "../src/index.js";
+import { BudgetaryClient, BudgetaryNetworkError } from "../src/index.js";
 import {
   TEST_API_KEY,
   TEST_BASE_URL,
@@ -85,6 +85,72 @@ describe("BudgetaryClient.estimate", () => {
     expect(res.void).toBe(true);
     expect(res.distribution).toBeNull();
   });
+});
+
+describe("BudgetaryClient.estimate — response shape validation (P-C1)", () => {
+  // The transport layer only checks finiteness, not shape/type. A malformed 2xx
+  // must surface as a typed BudgetaryNetworkError — never a crash downstream and
+  // never a fabricated estimate rendered from a string percentile.
+  async function expectUnusable(body: unknown | undefined): Promise<void> {
+    handle.use(
+      http.post(`${TEST_BASE_URL}/v1/estimate`, () =>
+        body === undefined
+          ? new HttpResponse(null, { status: 200 }) // empty body
+          : HttpResponse.json(body as never, { status: 200 }),
+      ),
+    );
+    const client = newClient();
+    await expect(client.estimate("q")).rejects.toBeInstanceOf(
+      BudgetaryNetworkError,
+    );
+  }
+
+  it("rejects an empty 200 body", () => expectUnusable(undefined));
+
+  it("rejects an empty object", () => expectUnusable({}));
+
+  it("rejects a missing estimateId", () =>
+    expectUnusable({
+      scenario: "confident",
+      void: false,
+      distribution: { p10: 1, p50: 2, p90: 3, unit: "tokens" },
+      confidence: 0.8,
+      model: "m",
+      expires_at: "t",
+    }));
+
+  it("rejects STRING percentiles (the fabrication vector)", () =>
+    expectUnusable({
+      estimate_id: "est_bad",
+      scenario: "confident",
+      void: false,
+      distribution: { p10: "100", p50: "500", p90: "2000", unit: "tokens" },
+      confidence: 0.8,
+      model: "m",
+      expires_at: "t",
+    }));
+
+  it("rejects a non-void response missing p90", () =>
+    expectUnusable({
+      estimate_id: "est_bad",
+      scenario: "confident",
+      void: false,
+      distribution: { p10: 1, p50: 2, unit: "tokens" },
+      confidence: 0.8,
+      model: "m",
+      expires_at: "t",
+    }));
+
+  it("rejects a non-void response with a null distribution", () =>
+    expectUnusable({
+      estimate_id: "est_bad",
+      scenario: "confident",
+      void: false,
+      distribution: null,
+      confidence: 0.8,
+      model: "m",
+      expires_at: "t",
+    }));
 });
 
 describe("BudgetaryClient.submitActuals", () => {

@@ -41,17 +41,48 @@ def _known(data: dict[str, Any], allowed: frozenset[str]) -> dict[str, Any]:
     return {k: v for k, v in data.items() if k in allowed}
 
 
+def _require_number(value: Any, field: str) -> None:
+    """Raise ``TypeError`` unless ``value`` is a real (non-bool) number. ``bool``
+    is a subclass of ``int`` in Python, so a boolean percentile would sneak past
+    a bare ``isinstance(v, (int, float))`` check and get stored as a fabricated
+    number. ``json.loads`` already rejected non-finite floats upstream, so a
+    number here is finite. The raised ``TypeError`` is caught by the HTTP layer
+    and re-surfaced as a network-class ``unusable response body``."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(
+            f"{field} must be a number, got {type(value).__name__}"
+        )
+
+
 def _parse_estimate(body: dict[str, Any]) -> EstimateResponse:
+    # Validate TYPES, not just presence: a wrong-typed 2xx (e.g. string
+    # percentiles) would otherwise build an EstimateResponse that renders and
+    # stores fabricated numbers. A raised TypeError is caught in the HTTP layer
+    # and re-surfaced as a typed network error.
+    estimate_id = body["estimate_id"]
+    void = body["void"]
+    if not isinstance(estimate_id, str):
+        raise TypeError("estimate_id must be a string")
+    if not isinstance(void, bool):
+        raise TypeError("void must be a boolean")
+
     dist_body = body.get("distribution")
-    distribution = (
-        Distribution(**_known(dist_body, _DISTRIBUTION_FIELDS))
-        if dist_body is not None
-        else None
-    )
+    if dist_body is not None:
+        known = _known(dist_body, _DISTRIBUTION_FIELDS)
+        for field in ("p10", "p50", "p90"):
+            _require_number(known.get(field), field)
+        distribution = Distribution(**known)
+    else:
+        if not void:
+            # A non-void estimate must carry a distribution to be usable.
+            raise TypeError("distribution is required when void is false")
+        distribution = None
+
+    _require_number(body["confidence"], "confidence")
     return EstimateResponse(
-        estimate_id=body["estimate_id"],
+        estimate_id=estimate_id,
         scenario=body["scenario"],
-        void=body["void"],
+        void=void,
         distribution=distribution,
         confidence=body["confidence"],
         model=body["model"],

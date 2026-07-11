@@ -65,7 +65,13 @@ def _parse_retry_after(header: str | None) -> float | None:
     if header is None:
         return None
     try:
-        return float(header)
+        value = float(header)
+        # `float("nan")` / `float("inf")` parse without raising; a non-finite
+        # floor would pierce the min/max clamp in `with_retry` and reach
+        # `time.sleep(nan)` → a raw ValueError. Only a finite number is a valid
+        # delay; anything else falls through to the HTTP-date path (→ None).
+        if math.isfinite(value):
+            return value
     except (TypeError, ValueError):
         pass
     try:
@@ -254,7 +260,12 @@ class HttpClient:
                     parse_constant=_reject_non_finite,
                     parse_float=_reject_non_finite_float,
                 )
-            except ValueError:
+            except (ValueError, RecursionError):
+                # A deeply-nested body overflows `json.loads`' own recursion with a
+                # RecursionError (NOT a ValueError), which would otherwise escape
+                # the SDK's taxonomy as a raw crash. Treat it like any other
+                # unparseable body: body=None → a 2xx then surfaces as the
+                # network-class "unusable response body" below.
                 body = None
 
         if status_code >= 400:
