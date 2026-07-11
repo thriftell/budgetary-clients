@@ -254,13 +254,26 @@ export async function runOnSessionEndCli(
   // Foreground form: an explicit rollout/transcript file path. Reads real counts
   // from the file and reports what it did — the working Codex actuals path.
   if (transcript !== null) {
-    return runRolloutActuals({
-      transcriptPath: transcript,
-      success,
-      env,
-      cwd: process.cwd(),
-      out: (line) => process.stdout.write(`${line}\n`),
-    });
+    try {
+      return await runRolloutActuals({
+        transcriptPath: transcript,
+        success,
+        env,
+        cwd: process.cwd(),
+        out: (line) => process.stdout.write(`${line}\n`),
+      });
+    } catch (err) {
+      // A foreground command must surface an unforeseen fault as a NON-zero exit
+      // (an honest failure signal) with a clean message — never a raw stack, and
+      // never the hook path's exit-0, which a caller would read as "submitted".
+      // (Covers e.g. `process.cwd()` throwing when the cwd was unlinked.)
+      stderr.write(
+        `Budgetary: couldn't submit actuals from ${transcript} (${
+          err instanceof Error ? err.message : String(err)
+        }).\n`,
+      );
+      return 1;
+    }
   }
 
   // Hook form: a host (e.g. Claude Code SessionEnd) pipes one JSON payload
