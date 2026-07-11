@@ -1426,6 +1426,96 @@ describe("runAutoActuals — cross-session retry never mis-pairs (P-B1)", () => 
 });
 
 // ---------------------------------------------------------------------------
+// TTL sweep (P-A4/B2/T1): expired entries from ALL projects are dropped (not
+// just the one this session would close), with a single honest warning; an
+// unparseable/future created_at has an unknown age and is never discarded.
+// ---------------------------------------------------------------------------
+
+describe("runAutoActuals — TTL sweep", () => {
+  const EXPIRED = "2026-05-25T09:00:00Z"; // > 24h before NOW (2026-05-27T10:14)
+
+  it("sweeps ALL expired entries incl. an abandoned other-project one, warning once", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_abandoned", query: "q", project_id: "0000000other0000", created_at: EXPIRED, attempts: 2 },
+        { estimate_id: "est_mine_old", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: EXPIRED, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient();
+    const errs: string[] = [];
+
+    const code = await runAutoActuals({
+      payload: { transcript_path: "/tmp/t.jsonl", reason: "clear" },
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      stderr: { write: (s) => errs.push(s) },
+      clientFactory: () => asClient(fake),
+      readUsage: () => ({ tokensIn: 5, tokensOut: 5, trace: [] }),
+    });
+
+    expect(code).toBe(0);
+    // The abandoned OTHER-project entry — which no per-entry drop would ever have
+    // selected — is swept too.
+    expect(readPending(home).entries).toEqual([]);
+    expect(fake.submitActuals).not.toHaveBeenCalled();
+    expect(errs.join("")).toContain("dropped 2 pending estimates older than 24h");
+  });
+
+  it("sweeps an expired sibling but still submits the recent entry", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_old", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: EXPIRED, attempts: 0 },
+        { estimate_id: "est_recent", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient();
+
+    await runAutoActuals({
+      payload: { transcript_path: "/tmp/t.jsonl", reason: "clear" },
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      stderr: { write: () => {} },
+      clientFactory: () => asClient(fake),
+      readUsage: () => ({ tokensIn: 7, tokensOut: 8, trace: [] }),
+    });
+
+    expect(fake.submitActuals.mock.calls[0]![0].estimateId).toBe("est_recent");
+    expect(readPending(home).entries).toEqual([]); // old swept, recent submitted
+  });
+
+  it("KEEPS an entry with an unparseable created_at (unknown age, never discarded)", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_weird", query: "q", project_id: "0000000other0000", created_at: "not-a-date", attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient();
+    const errs: string[] = [];
+
+    await runAutoActuals({
+      payload: { transcript_path: "/tmp/t.jsonl", reason: "clear" },
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      stderr: { write: (s) => errs.push(s) },
+      clientFactory: () => asClient(fake),
+      readUsage: () => ({ tokensIn: 1, tokensOut: 1, trace: [] }),
+    });
+
+    expect(readPending(home).entries.map((e) => e.estimate_id)).toEqual(["est_weird"]);
+    expect(errs.join("")).not.toContain("dropped");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Store integrity under concurrency (the shared ~/.budgetary/pending.json is
 // written by multiple sessions and both plugins).
 // ---------------------------------------------------------------------------

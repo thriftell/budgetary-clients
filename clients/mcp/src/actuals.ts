@@ -311,6 +311,38 @@ export async function submitActuals(
   }
 }
 
+/**
+ * Drop EVERY pending entry older than the TTL (not just the one this session is
+ * about to close), re-reading first so a concurrent append isn't clobbered, and
+ * warn ONCE with the count. Without this, an abandoned project's entry is
+ * immortal — nothing else ever selects it, so it never expires. An unparseable
+ * or FUTURE `created_at` has an unknown age and is deliberately KEPT (discarding
+ * it could silently lose a session's own actual); it is left for a later run.
+ */
+function sweepExpired(
+  store: PendingWriter,
+  now: Date,
+  logger: { warn(message: string): void },
+): void {
+  const fresh = store.read();
+  const before = fresh.entries.length;
+  const kept = fresh.entries.filter((e) => {
+    const created = Date.parse(e.created_at);
+    if (!Number.isFinite(created)) return true; // unknown age → keep
+    const age = now.getTime() - created;
+    if (age < 0) return true; // future timestamp (clock skew) → keep
+    return age <= PENDING_TTL_MS;
+  });
+  const dropped = before - kept.length;
+  if (dropped === 0) return;
+  tryWrite(store, { version: 1, entries: kept }, logger);
+  logger.warn(
+    `Budgetary: dropped ${dropped} pending ${
+      dropped === 1 ? "estimate" : "estimates"
+    } older than 24h without recorded actuals.`,
+  );
+}
+
 /** The newest pending entry belonging to `projectId`, or null if none match. */
 function newestForProject(
   entries: readonly PendingEntry[],
@@ -407,8 +439,9 @@ function belongsToThisSession(
  *
  * The entry is selected by `project_id` (this session's cwd hash); the retry
  * uses its persisted counts, the fresh path is additionally session-bound.
- * Submits nothing unless real counts are available; drops a matched entry older
- * than 24h silently. Routes the submit through {@link submitActuals}.
+ * Submits nothing unless real counts are available. Expired entries (all
+ * projects) are swept first with a single warning naming the count. Routes the
+ * submit through {@link submitActuals}.
  */
 export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
   const logger = { warn: (m: string) => args.stderr.write(`${m}\n`) };
@@ -416,21 +449,20 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
     path: pendingFilePath(args.home),
     logger,
   });
+  const now = (args.now ?? (() => new Date()))();
+
+  // Sweep ALL expired entries first — every project's, not just the one this
+  // session would close — so an abandoned entry can't live forever, warning
+  // once with the count. The selected entry below is therefore within the TTL
+  // (or has an unknown/future age the sweep deliberately keeps).
+  sweepExpired(store, now, logger);
+
   const file = store.read();
   if (file.entries.length === 0) return 0;
 
   // Bind to this session's own estimate; leave other sessions' entries alone.
   const entry = newestForProject(file.entries, sessionProjectId(args));
   if (entry === null) return 0;
-
-  const now = (args.now ?? (() => new Date()))();
-  const created = Date.parse(entry.created_at);
-  if (!Number.isFinite(created) || now.getTime() - created > PENDING_TTL_MS) {
-    // Drop just this stale entry (by id, re-reading first); leave the rest.
-    const fresh = store.read();
-    if (removeById(fresh, entry.estimate_id)) tryWrite(store, fresh, logger);
-    return 0;
-  }
 
   // RETRY vs FRESH. A prior FAILED submit persisted this estimate's OWN measured
   // counts onto the entry (part 1); resubmit THOSE — baked in, so this
