@@ -9,6 +9,7 @@ import httpx
 
 from budgetary._internal.http import HttpClient
 from budgetary._internal.idempotency import _UNSET, resolve_client_request_id
+from budgetary._internal.retry import OnRetry
 from budgetary._internal.url import is_base_url_allowed
 from budgetary.types import (
     ActualsResponse,
@@ -136,6 +137,7 @@ class BudgetaryClient:
         max_retries: int = DEFAULT_MAX_RETRIES,
         allow_insecure: bool = False,
         http_client: httpx.Client | None = None,
+        on_retry: OnRetry | None = None,
     ) -> None:
         # Fail fast on a missing key rather than sending `Bearer ` and surfacing
         # an opaque 401 on the first call. Parity with the TypeScript SDK.
@@ -159,6 +161,7 @@ class BudgetaryClient:
             timeout_ms=timeout_ms,
             max_retries=max_retries,
             http_client=http_client,
+            on_retry=on_retry,
         )
 
     def close(self) -> None:

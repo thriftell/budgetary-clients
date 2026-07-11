@@ -1,7 +1,18 @@
 import {
+  BudgetaryError,
   BudgetaryRateLimitError,
   BudgetaryServerError,
 } from "../errors.js";
+
+/** Detail passed to {@link RetryOptions.onRetry} before each backoff sleep. */
+export interface RetryInfo {
+  /** Attempts made so far, including the one that just failed (1-based). */
+  attempt: number;
+  /** The backoff about to be slept before the next attempt, in ms. */
+  delayMs: number;
+  /** HTTP status of the failing response, or `null` for a transport failure. */
+  httpStatus: number | null;
+}
 
 export interface RetryOptions {
   maxRetries: number;
@@ -10,6 +21,10 @@ export interface RetryOptions {
   maxDelayMs?: number;
   sleep?: (ms: number) => Promise<void>;
   random?: () => number;
+  /** Injectable monotonic clock (ms) for elapsed tracking; defaults to `Date.now`. */
+  now?: () => number;
+  /** Observe each retry (attempt just failed, backoff about to sleep). Never throws the run. */
+  onRetry?: (info: RetryInfo) => void;
 }
 
 const DEFAULT_INITIAL_DELAY_MS = 1000;
@@ -37,13 +52,23 @@ export async function withRetry<T>(
   const maxDelay = options.maxDelayMs ?? DEFAULT_MAX_DELAY_MS;
   const sleep = options.sleep ?? defaultSleep;
   const random = options.random ?? Math.random;
+  const now = options.now ?? Date.now;
+  const onRetry = options.onRetry;
 
+  const startedAt = now();
   let attempt = 0;
   while (true) {
     try {
       return await fn();
     } catch (err) {
+      // `attempt` is 0-based (retries taken); this attempt just failed, so the
+      // number of attempts MADE is attempt + 1.
+      const attemptsMade = attempt + 1;
       if (!isRetryable(err) || attempt >= maxRetries) {
+        // Terminal (non-retryable) or exhausted: annotate the error with how many
+        // attempts and how long the whole ordeal took, so ~4 min of 429 backoff
+        // doesn't read as a first-attempt blip. Additive — never changes the type.
+        annotateAttempts(err, attemptsMade, now() - startedAt);
         throw err;
       }
       const computed = Math.min(initialDelay * factor ** attempt, maxDelay);
@@ -62,8 +87,26 @@ export async function withRetry<T>(
           maxDelay,
         );
       }
+      if (onRetry !== undefined) {
+        const httpStatus = err instanceof BudgetaryError ? err.httpStatus : null;
+        // The observer is a diagnostic hook; a throw from it must not derail the
+        // request (or convert a retryable failure into an uncaught error).
+        try {
+          onRetry({ attempt: attemptsMade, delayMs: delay, httpStatus });
+        } catch {
+          // ignore observer faults
+        }
+      }
       await sleep(delay);
       attempt += 1;
     }
+  }
+}
+
+/** Stamp `attempts` + `totalElapsedMs` onto a Budgetary error (additive, best-effort). */
+function annotateAttempts(err: unknown, attempts: number, elapsedMs: number): void {
+  if (err instanceof BudgetaryError) {
+    err.attempts = attempts;
+    err.totalElapsedMs = elapsedMs;
   }
 }

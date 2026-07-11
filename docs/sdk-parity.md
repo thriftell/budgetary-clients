@@ -24,6 +24,7 @@ a paired follow-up referenced from the PR body.
 | 9 | **Idempotency.** `client_request_id`: unset → fresh UUID v4; `None`/`null` → omit; string → verbatim. | `idempotency.ts` | `_internal/idempotency.py` |
 | 10 | **Metadata forwarded verbatim.** Only known protocol fields are transformed; caller keys reach the wire unchanged. | `http.ts` / `client.ts` | `client.py` `submit_actuals` |
 | 11 | **Typed marker.** The package advertises inline types so downstream type-checkers see them. | `.d.ts` via dual-publish | `src/budgetary/py.typed` (must ship in the wheel) |
+| 12 | **Retry-exhaustion diagnostics (additive).** On the final throw the retry wrapper stamps `attempts` (1-based) + `totalElapsedMs` / `total_elapsed_ms` onto the `BudgetaryError`; an optional `onRetry` / `on_retry` observer fires before each backoff (a throw from it is swallowed). | `retry.ts` sets fields + `RetryInfo`; `onRetry` on client options | `_internal/retry.py` sets fields; `on_retry` on client options (`OnRetry`) |
 
 ## Before you merge an `sdk/**` PR
 

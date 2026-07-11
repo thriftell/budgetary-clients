@@ -198,7 +198,14 @@ function renderEstimateError(
     if (s !== null && s >= 400 && s < 500) {
       return renderRequestRejected(err.message, err.requestId, s);
     }
-    return renderTransportError(err.message, err.requestId);
+    // Network / 5xx: surface how many attempts + how long the SDK's retry ladder
+    // burned (additive fields set on exhaustion), so a ~4 min ordeal is legible.
+    return renderTransportError(
+      err.message,
+      err.requestId,
+      err.attempts,
+      err.totalElapsedMs,
+    );
   }
   return renderTransportError(
     err instanceof Error ? err.message : String(err),

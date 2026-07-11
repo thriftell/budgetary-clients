@@ -2,11 +2,12 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { http, HttpResponse } from "msw";
 import {
   BudgetaryClient,
+  BudgetaryError,
   BudgetaryRateLimitError,
   BudgetaryServerError,
   BudgetaryValidationError,
 } from "../src/index.js";
-import { withRetry } from "../src/internal/retry.js";
+import { withRetry, type RetryInfo } from "../src/internal/retry.js";
 import {
   TEST_API_KEY,
   TEST_BASE_URL,
@@ -153,6 +154,91 @@ describe("withRetry unit", () => {
 
     expect(attempt).toBe(3);
     expect(err).toBeInstanceOf(BudgetaryServerError);
+  });
+});
+
+describe("withRetry — attempts / totalElapsedMs / onRetry (O-6)", () => {
+  // A shared fake clock so totalElapsedMs is deterministic: sleep advances it.
+  function fakeClock() {
+    let ms = 0;
+    return {
+      now: () => ms,
+      sleep: async (d: number) => {
+        ms += d;
+      },
+    };
+  }
+
+  it("annotates the error with attempts + totalElapsedMs on EXHAUSTION", async () => {
+    const clk = fakeClock();
+    const err = await withRetry(
+      async () => {
+        throw new BudgetaryServerError({ code: "internal_error", message: "boom", httpStatus: 500, requestId: null });
+      },
+      { maxRetries: 2, sleep: clk.sleep, now: clk.now, random: () => 1 },
+    ).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(BudgetaryServerError);
+    // 3 total attempts (initial + 2 retries).
+    expect((err as BudgetaryError).attempts).toBe(3);
+    // 2 sleeps: 1000 + 2000 (factor 2, no jitter).
+    expect((err as BudgetaryError).totalElapsedMs).toBe(3000);
+  });
+
+  it("annotates a non-retryable error with attempts = 1", async () => {
+    const err = await withRetry(
+      async () => {
+        throw new BudgetaryValidationError({ code: "invalid_request", message: "nope", httpStatus: 400, requestId: null });
+      },
+      { maxRetries: 5, sleep: async () => {}, random: () => 0 },
+    ).catch((e: unknown) => e);
+
+    expect((err as BudgetaryError).attempts).toBe(1);
+    expect((err as BudgetaryError).totalElapsedMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("invokes onRetry before each backoff with the attempt, delay, and status", async () => {
+    const clk = fakeClock();
+    const seen: RetryInfo[] = [];
+    let attempt = 0;
+    await withRetry(
+      async () => {
+        attempt += 1;
+        if (attempt < 3) {
+          throw new BudgetaryServerError({ code: "internal_error", message: "x", httpStatus: 503, requestId: null });
+        }
+        return "ok";
+      },
+      { maxRetries: 5, sleep: clk.sleep, now: clk.now, random: () => 1, onRetry: (i) => seen.push(i) },
+    );
+
+    // Two failures → two onRetry calls (before the 2 sleeps); the 3rd attempt succeeds.
+    expect(seen).toEqual([
+      { attempt: 1, delayMs: 1000, httpStatus: 503 },
+      { attempt: 2, delayMs: 2000, httpStatus: 503 },
+    ]);
+  });
+
+  it("swallows a throw from onRetry (a diagnostic hook never derails the request)", async () => {
+    let attempt = 0;
+    const res = await withRetry(
+      async () => {
+        attempt += 1;
+        if (attempt < 2) {
+          throw new BudgetaryServerError({ code: "internal_error", message: "x", httpStatus: 500, requestId: null });
+        }
+        return "ok";
+      },
+      {
+        maxRetries: 3,
+        sleep: async () => {},
+        random: () => 0,
+        onRetry: () => {
+          throw new Error("observer blew up");
+        },
+      },
+    );
+    expect(res).toBe("ok"); // the request still completed
   });
 });
 

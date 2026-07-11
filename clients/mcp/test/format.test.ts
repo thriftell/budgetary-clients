@@ -6,6 +6,7 @@ import {
   renderEstimate,
   renderPermissionDenied,
   renderRateLimited,
+  renderTransportError,
   shortEstimateId,
 } from "../src/format.js";
 
@@ -119,5 +120,23 @@ describe("request_id threading into the auth/plan/rate-limit renderers (O-4)", (
     expect(renderRateLimited(5, "req_c")).toContain("(request_id: req_c)");
     expect(renderRateLimited(5)).not.toContain("request_id");
     expect(renderRateLimited(null, "req_d")).toContain("(request_id: req_d)");
+  });
+});
+
+describe("renderTransportError — retry-ordeal visibility (O-6)", () => {
+  it("shows 'after N attempts over Ns' when the SDK exhausted its ladder", () => {
+    const text = renderTransportError("fetch failed", "req_1", 5, 240000);
+    expect(text).toContain("after 5 attempts over 240s");
+    expect(text).toContain("(request_id: req_1)");
+  });
+
+  it("omits the attempts phrase for a single-attempt (or unknown) failure", () => {
+    expect(renderTransportError("fetch failed", null, 1)).not.toContain("attempts");
+    expect(renderTransportError("fetch failed", null)).not.toContain("attempts");
+  });
+
+  it("shows attempts without an elapsed clause when elapsed is absent", () => {
+    expect(renderTransportError("x", null, 3)).toContain("after 3 attempts.");
+    expect(renderTransportError("x", null, 3)).not.toContain("over");
   });
 });

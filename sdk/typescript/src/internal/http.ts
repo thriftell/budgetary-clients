@@ -8,7 +8,7 @@ import {
   BudgetaryServerError,
   BudgetaryValidationError,
 } from "../errors.js";
-import { withRetry } from "./retry.js";
+import { withRetry, type RetryInfo } from "./retry.js";
 
 export interface HttpClientConfig {
   apiKey: string;
@@ -16,6 +16,8 @@ export interface HttpClientConfig {
   timeoutMs: number;
   maxRetries: number;
   fetchImpl?: typeof fetch;
+  /** Observe each retry (additive; forwarded to the retry wrapper). */
+  onRetry?: (info: RetryInfo) => void;
 }
 
 export interface HttpRequest {
@@ -292,6 +294,7 @@ export class HttpClient {
   async request<T>(req: HttpRequest): Promise<T> {
     const result = await withRetry(() => this.attempt(req), {
       maxRetries: this.config.maxRetries,
+      onRetry: this.config.onRetry,
     });
     return result as T;
   }
@@ -301,6 +304,9 @@ export class HttpClient {
       stripTrailingSlashes(this.config.baseUrl) +
       req.path +
       buildQueryString(req.query);
+    // The target host (never the path/query — those can carry ids) for a
+    // diagnosable transport error message.
+    const host = safeHost(this.config.baseUrl);
 
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.config.apiKey}`,
@@ -330,7 +336,7 @@ export class HttpClient {
         redirect: "error",
       });
     } catch (err) {
-      throw mapNetworkError(err);
+      throw mapNetworkError(err, host);
     }
 
     let text: string;
@@ -342,7 +348,7 @@ export class HttpClient {
       // AbortSignal also covers the body). Classify it as a network error —
       // exactly like a failure of the fetch call itself — instead of letting a
       // raw undici/stream error escape unclassified.
-      throw mapNetworkError(err);
+      throw mapNetworkError(err, host);
     }
 
     let parsed: unknown = null;
@@ -403,12 +409,26 @@ function assertFiniteNumbers(root: unknown): void {
   }
 }
 
-function mapNetworkError(err: unknown): BudgetaryError {
+/** The target host (`host[:port]`) for an error message, or `undefined` if unparseable. */
+function safeHost(baseUrl: string): string | undefined {
+  try {
+    return new URL(baseUrl).host || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Append ` (host: X)` when a host is known. Host only — never the path/query. */
+function withHost(base: string, host?: string): string {
+  return host ? `${base} (host: ${host})` : base;
+}
+
+function mapNetworkError(err: unknown, host?: string): BudgetaryError {
   if (err instanceof Error) {
     if (err.name === "TimeoutError") {
       return new BudgetaryNetworkError({
         code: "timeout",
-        message: TIMEOUT_ERROR_MESSAGE,
+        message: withHost(TIMEOUT_ERROR_MESSAGE, host),
       });
     }
     if (err.name === "AbortError") {
@@ -417,13 +437,22 @@ function mapNetworkError(err: unknown): BudgetaryError {
         message: "request was aborted",
       });
     }
+    // Undici wraps the REAL reason (ECONNREFUSED / ENOTFOUND / a TLS failure) in
+    // `err.cause`, while `err.message` is often just the opaque "fetch failed".
+    // Surface the cause message + the target host so a transport failure is
+    // diagnosable rather than a dead end. (Python already interpolates this; the
+    // TS path previously dropped both.)
+    const cause =
+      err.cause instanceof Error && err.cause.message
+        ? ` (${err.cause.message})`
+        : "";
     return new BudgetaryNetworkError({
       code: "network",
-      message: `${NETWORK_ERROR_MESSAGE}: ${err.message}`,
+      message: `${withHost(NETWORK_ERROR_MESSAGE, host)}: ${err.message}${cause}`,
     });
   }
   return new BudgetaryNetworkError({
     code: "network",
-    message: NETWORK_ERROR_MESSAGE,
+    message: withHost(NETWORK_ERROR_MESSAGE, host),
   });
 }

@@ -98,3 +98,45 @@ describe("HttpClient — a failed body read is classified, not raw", () => {
     expect(err.code).toBe("timeout");
   });
 });
+
+describe("mapNetworkError names the host + the underlying cause (O-6)", () => {
+  function fetchThatThrows(err: unknown): typeof fetch {
+    return (async () => {
+      throw err;
+    }) as unknown as typeof fetch;
+  }
+  function makeClient(fetchImpl: typeof fetch): HttpClient {
+    return new HttpClient({
+      apiKey: "k",
+      baseUrl: "https://api.test.budgetary.tools",
+      timeoutMs: 1000,
+      maxRetries: 0,
+      fetchImpl,
+    });
+  }
+
+  it("appends err.cause?.message and the target host (previously both dropped)", async () => {
+    const fetchErr = new Error("fetch failed");
+    (fetchErr as Error & { cause?: unknown }).cause = new Error(
+      "connect ECONNREFUSED 127.0.0.1:9",
+    );
+    const client = makeClient(fetchThatThrows(fetchErr));
+    const err = (await client
+      .request({ method: "GET", path: "/v1/health" })
+      .catch((e: unknown) => e)) as BudgetaryError;
+    expect(err).toBeInstanceOf(BudgetaryNetworkError);
+    // The host is named (host only — never the path/query)...
+    expect(err.message).toContain("host: api.test.budgetary.tools");
+    // ...and the real reason from err.cause is surfaced, not just "fetch failed".
+    expect(err.message).toContain("connect ECONNREFUSED 127.0.0.1:9");
+  });
+
+  it("still works when there is no cause", async () => {
+    const client = makeClient(fetchThatThrows(new Error("fetch failed")));
+    const err = (await client
+      .request({ method: "GET", path: "/v1/health" })
+      .catch((e: unknown) => e)) as BudgetaryError;
+    expect(err.message).toContain("host: api.test.budgetary.tools");
+    expect(err.message).toContain("fetch failed");
+  });
+});

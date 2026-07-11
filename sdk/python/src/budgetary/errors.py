@@ -19,6 +19,13 @@ class BudgetaryError(Exception):
         self.message = message
         self.http_status = http_status
         self.request_id = request_id
+        # Additive, diagnostic, set by the retry wrapper on the final throw (see
+        # ``with_retry``): how many attempts were made (``1`` for a first-attempt
+        # terminal failure, up to ``max_retries + 1`` on exhaustion) and the total
+        # wall-clock across all attempts + backoff sleeps (ms). ``None`` when the
+        # error never passed through the retry wrapper. Parity with the TS SDK.
+        self.attempts: int | None = None
+        self.total_elapsed_ms: float | None = None
 
 
 class BudgetaryAuthError(BudgetaryError):

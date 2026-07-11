@@ -92,6 +92,22 @@ describe("HTTP status to error mapping", () => {
     expect(rate.retryAfterSeconds).toBe(7);
   });
 
+  it("annotates a returned error with attempts + totalElapsedMs (O-6)", async () => {
+    // The client (maxRetries: 0) makes exactly one attempt, so the retry wrapper
+    // annotates the thrown error with attempts=1 and a numeric elapsed.
+    handle.use(
+      http.post(`${TEST_BASE_URL}/v1/estimate`, () =>
+        HttpResponse.json(errorBody("internal_error", "boom"), { status: 500 }),
+      ),
+    );
+    const err = (await client()
+      .estimate("test", { clientRequestId: null })
+      .catch((e: unknown) => e)) as BudgetaryServerError;
+    expect(err).toBeInstanceOf(BudgetaryServerError);
+    expect(err.attempts).toBe(1);
+    expect(typeof err.totalElapsedMs).toBe("number");
+  });
+
   it("distinguishes 403 (gated) from 401 (bad key)", async () => {
     handle.use(
       http.post(`${TEST_BASE_URL}/v1/estimate`, () =>
