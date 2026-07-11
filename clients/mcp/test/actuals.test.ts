@@ -1461,7 +1461,7 @@ describe("runAutoActuals — TTL sweep", () => {
     // selected — is swept too.
     expect(readPending(home).entries).toEqual([]);
     expect(fake.submitActuals).not.toHaveBeenCalled();
-    expect(errs.join("")).toContain("dropped 2 pending estimates older than 24h");
+    expect(errs.join("")).toContain("dropped 2 pending estimates past the 24h retry window");
   });
 
   it("sweeps an expired sibling but still submits the recent entry", async () => {
@@ -1489,11 +1489,17 @@ describe("runAutoActuals — TTL sweep", () => {
     expect(readPending(home).entries).toEqual([]); // old swept, recent submitted
   });
 
-  it("KEEPS an entry with an unparseable created_at (unknown age, never discarded)", async () => {
+  it("KEEPS an entry with an unparseable created_at, and never mis-pairs onto it", async () => {
+    // Regression for the mis-pair the adversarial review caught: the sweep keeps
+    // an unknown-age (unparseable created_at) entry, so it reaches selection. It
+    // belongs to THIS project (so newestForProject would pick it), yet a FRESH
+    // submit must NOT attach this session's usage to an estimate of unknown
+    // provenance — the fresh-path age guard blocks it. (The earlier version of
+    // this test used a FOREIGN project_id, which masked the bug via a null select.)
     writePending(home, {
       version: 1,
       entries: [
-        { estimate_id: "est_weird", query: "q", project_id: "0000000other0000", created_at: "not-a-date", attempts: 0 },
+        { estimate_id: "est_weird", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: "not-a-date", attempts: 0 },
       ],
     });
     const fake = makeFakeClient();
@@ -1507,9 +1513,13 @@ describe("runAutoActuals — TTL sweep", () => {
       now: () => NOW,
       stderr: { write: (s) => errs.push(s) },
       clientFactory: () => asClient(fake),
-      readUsage: () => ({ tokensIn: 1, tokensOut: 1, trace: [] }),
+      readUsage: () => ({ tokensIn: 999999, tokensOut: 888888, trace: [] }),
     });
 
+    // Unknown age → kept (not swept), and NOT submitted (age guard blocks the
+    // fresh mis-pair). Same guard covers a stale entry that survives a
+    // sweep-write fault.
+    expect(fake.submitActuals).not.toHaveBeenCalled();
     expect(readPending(home).entries.map((e) => e.estimate_id)).toEqual(["est_weird"]);
     expect(errs.join("")).not.toContain("dropped");
   });

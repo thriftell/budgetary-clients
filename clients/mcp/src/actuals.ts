@@ -339,7 +339,7 @@ function sweepExpired(
   logger.warn(
     `Budgetary: dropped ${dropped} pending ${
       dropped === 1 ? "estimate" : "estimates"
-    } older than 24h without recorded actuals.`,
+    } past the 24h retry window.`,
   );
 }
 
@@ -472,10 +472,19 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
   if (retryCounts !== null) {
     counts = retryCounts;
   } else {
-    // FRESH path: derive counts from THIS session's transcript, but only for an
-    // entry that belongs to this session — never attach a later session's usage
-    // to an older estimate. If it isn't ours and has no persisted counts, leave
-    // it (a later session, or the 24h TTL sweep, handles it).
+    // FRESH path: this attaches THIS session's transcript to `entry`, so the
+    // selected entry must be a live, this-session estimate — never a stale one.
+    // Re-guard its age HERE and not only via the sweep: the sweep's write is
+    // best-effort (a store-write fault leaves an expired entry on disk) and it
+    // deliberately KEEPS unknown-age (unparseable created_at) entries, either of
+    // which would otherwise reach this point and mis-pair this session's tokens
+    // onto a foreign/stale estimate. (The retry path above is exempt: it submits
+    // the entry's OWN persisted counts, which cannot mis-pair.)
+    const created = Date.parse(entry.created_at);
+    if (!Number.isFinite(created) || now.getTime() - created > PENDING_TTL_MS) {
+      return 0;
+    }
+    // Bind to the session too, when the host provides a boundary (started_at).
     if (!belongsToThisSession(entry, args.payload)) return 0;
     if (args.payload === null) return 0;
     const transcriptPath =
