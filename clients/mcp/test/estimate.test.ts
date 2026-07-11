@@ -201,6 +201,61 @@ describe("runEstimateTool — happy path", () => {
   });
 });
 
+describe("runEstimateTool — malformed 2xx never throws out of the tool (P-C1)", () => {
+  it("surfaces graceful error text (not a raw TypeError) on a wrong-shape response", async () => {
+    // The SDK now shape-validates the estimate body; this exercises the tool's
+    // belt-and-suspenders wrap directly — a fake client returns a malformed
+    // response (distribution is a string, not an object), so renderEstimate would
+    // throw a raw TypeError without the wrap.
+    const malformed = {
+      estimateId: "est_bad",
+      scenario: "confident",
+      void: false,
+      distribution: "oops-not-an-object",
+      confidence: 0.5,
+      model: "m",
+      expiresAt: "t",
+    } as unknown as EstimateResponse;
+    const fake = makeFakeClient(async () => malformed);
+
+    const result = await runEstimateTool({
+      query: "q",
+      env: { BUDGETARY_API_KEY: "bg_test_dummy" } as NodeJS.ProcessEnv,
+      cwd,
+      home,
+      clientFactory: () => asClient(fake),
+    });
+
+    // Graceful text + isError, never a thrown exception.
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("Budgetary couldn't be reached");
+  });
+
+  it("stores NO pending entry when the SDK rejects a garbage body as a network error", async () => {
+    // In production the SDK's validator throws before the response reaches the
+    // tool; that path returns graceful text and must store nothing.
+    const fake = makeFakeClient(async () => {
+      throw new BudgetaryError({
+        code: "network",
+        message: "unusable response body from Budgetary API (missing estimateId)",
+        httpStatus: null,
+        requestId: null,
+      });
+    });
+
+    const result = await runEstimateTool({
+      query: "q",
+      env: { BUDGETARY_API_KEY: "bg_test_dummy" } as NodeJS.ProcessEnv,
+      cwd,
+      home,
+      clientFactory: () => asClient(fake),
+    });
+
+    expect(result.isError).toBe(true);
+    expect(existsSync(join(home, ".budgetary", "pending.json"))).toBe(false);
+  });
+});
+
 describe("runEstimateTool — void", () => {
   it("renders the void message and does NOT write a pending entry", async () => {
     const fake = makeFakeClient(async () => voidEstimate());

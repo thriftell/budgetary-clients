@@ -87,3 +87,61 @@ def test_non_object_json_success_body_raises_network_error(respx_mock, client):
     )
     with pytest.raises(BudgetaryNetworkError):
         client.estimate("hi", client_request_id=None)
+
+
+def _bad_estimate_body(**overrides) -> dict:
+    body = {
+        "estimate_id": "est_x",
+        "scenario": "confident",
+        "void": False,
+        "distribution": {"p10": 1, "p50": 2, "p90": 3, "unit": "tokens"},
+        "confidence": 0.9,
+        "model": "m",
+        "expires_at": "2026-05-27T10:14:00Z",
+    }
+    body.update(overrides)
+    return body
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # STRING percentiles — the fabrication vector (a "123" would otherwise be
+        # stored as a real number). (P-C6)
+        _bad_estimate_body(
+            distribution={"p10": "1", "p50": "2", "p90": "3", "unit": "tokens"}
+        ),
+        # A BOOLEAN percentile: `bool` is an `int` subclass in Python, so a bare
+        # isinstance(int) check would let `True` through as a number.
+        _bad_estimate_body(
+            distribution={"p10": True, "p50": 2, "p90": 3, "unit": "tokens"}
+        ),
+        # A non-void response with no distribution at all.
+        _bad_estimate_body(distribution=None),
+        # A non-numeric confidence.
+        _bad_estimate_body(confidence="high"),
+    ],
+)
+def test_wrong_typed_estimate_body_raises_network_error(respx_mock, client, body):
+    # `_parse_estimate` validates TYPES, not just presence; a wrong-typed 2xx is
+    # surfaced inside the taxonomy rather than building a fabricated estimate.
+    respx_mock.post("/v1/estimate").mock(
+        return_value=httpx.Response(200, json=body)
+    )
+    with pytest.raises(BudgetaryNetworkError):
+        client.estimate("hi", client_request_id=None)
+
+
+def test_deeply_nested_success_body_raises_network_error(respx_mock, client):
+    # A deeply-nested 2xx overflows `json.loads`' own recursion with a
+    # RecursionError (not a ValueError); it must be caught and surfaced as a
+    # network-class failure, never a raw crash. (P-C3)
+    depth = 100_000
+    payload = "[" * depth + "]" * depth
+    respx_mock.post("/v1/estimate").mock(
+        return_value=httpx.Response(
+            200, text=payload, headers={"content-type": "application/json"}
+        )
+    )
+    with pytest.raises(BudgetaryNetworkError):
+        client.estimate("hi", client_request_id=None)

@@ -10,7 +10,21 @@ from budgetary import (
     BudgetaryServerError,
     BudgetaryValidationError,
 )
+from budgetary._internal.http import _parse_retry_after
 from budgetary._internal.retry import with_retry
+
+
+def test_parse_retry_after_rejects_non_finite_values():
+    # `float("nan")` / `float("inf")` parse without raising; a non-finite floor
+    # would pierce the min/max clamp in with_retry and reach time.sleep(nan) →
+    # a raw ValueError. Only a finite number is a valid delay. (P-C4)
+    assert _parse_retry_after("nan") is None
+    assert _parse_retry_after("inf") is None
+    assert _parse_retry_after("-inf") is None
+    # A finite numeric header still parses.
+    assert _parse_retry_after("2") == 2.0
+    # A non-numeric header falls through to the (failed) HTTP-date path → None.
+    assert _parse_retry_after("garbage") is None
 
 
 def _server_error() -> BudgetaryServerError:

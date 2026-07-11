@@ -105,6 +105,13 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
+/** A container the key-transform walks recurse into: an array or a plain object. */
+function isContainer(
+  value: unknown,
+): value is unknown[] | Record<string, unknown> {
+  return Array.isArray(value) || isPlainObject(value);
+}
+
 /**
  * Remove trailing slashes from a base URL with a single linear scan.
  *
@@ -137,18 +144,55 @@ export function toSnakeCase(value: unknown): unknown {
   return value;
 }
 
+/**
+ * Deep-camelCase a parsed response body, ITERATIVELY. A recursive walk throws a
+ * raw `RangeError` (stack overflow) on a deeply-nested body from a hostile or
+ * misbehaving endpoint — escaping the SDK's error taxonomy. An explicit worklist
+ * keeps the traversal on the heap, so depth is bounded only by the already-capped
+ * 8 MiB body, never by the call stack. Behavior is otherwise identical: array
+ * and plain-object keys are camelCased; every other value passes through.
+ */
 export function toCamelCase(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(toCamelCase);
-  }
-  if (isPlainObject(value)) {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value)) {
-      out[camelKey(k)] = toCamelCase(v);
+  if (!isContainer(value)) return value;
+  const root: unknown[] | Record<string, unknown> = Array.isArray(value)
+    ? []
+    : {};
+  const stack: Array<
+    [unknown[] | Record<string, unknown>, unknown[] | Record<string, unknown>]
+  > = [[value, root]];
+  while (stack.length > 0) {
+    const [src, dst] = stack.pop()!;
+    if (Array.isArray(src)) {
+      const out = dst as unknown[];
+      for (let i = 0; i < src.length; i++) {
+        const v = src[i];
+        if (isContainer(v)) {
+          const child: unknown[] | Record<string, unknown> = Array.isArray(v)
+            ? []
+            : {};
+          out[i] = child;
+          stack.push([v, child]);
+        } else {
+          out[i] = v;
+        }
+      }
+    } else {
+      const out = dst as Record<string, unknown>;
+      for (const [k, v] of Object.entries(src as Record<string, unknown>)) {
+        const nk = camelKey(k);
+        if (isContainer(v)) {
+          const child: unknown[] | Record<string, unknown> = Array.isArray(v)
+            ? []
+            : {};
+          out[nk] = child;
+          stack.push([v, child]);
+        } else {
+          out[nk] = v;
+        }
+      }
     }
-    return out;
   }
-  return value;
+  return root;
 }
 
 interface WireErrorBody {
@@ -334,26 +378,27 @@ export class HttpClient {
 
 /**
  * Throw a network error if any number anywhere in a (successful) response body is
- * non-finite. Applied only to 2xx bodies — an error body's numbers are never read
- * as numbers.
+ * non-finite. ITERATIVE (explicit worklist) so a deeply-nested body can't blow
+ * the call stack with a raw `RangeError`. Applied only to 2xx bodies — an error
+ * body's numbers are never read as numbers.
  */
-function assertFiniteNumbers(value: unknown): void {
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) {
-      throw new BudgetaryNetworkError({
-        code: "network",
-        message: "response from Budgetary API contained a non-finite number",
-      });
-    }
-    return;
-  }
-  if (Array.isArray(value)) {
-    for (const v of value) assertFiniteNumbers(v);
-    return;
-  }
-  if (value !== null && typeof value === "object") {
-    for (const v of Object.values(value as Record<string, unknown>)) {
-      assertFiniteNumbers(v);
+function assertFiniteNumbers(root: unknown): void {
+  const stack: unknown[] = [root];
+  while (stack.length > 0) {
+    const value = stack.pop();
+    if (typeof value === "number") {
+      if (!Number.isFinite(value)) {
+        throw new BudgetaryNetworkError({
+          code: "network",
+          message: "response from Budgetary API contained a non-finite number",
+        });
+      }
+    } else if (Array.isArray(value)) {
+      for (const v of value) stack.push(v);
+    } else if (value !== null && typeof value === "object") {
+      for (const v of Object.values(value as Record<string, unknown>)) {
+        stack.push(v);
+      }
     }
   }
 }
