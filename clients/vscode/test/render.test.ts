@@ -124,6 +124,25 @@ describe("renderDashboard", () => {
     // Focus is consumed, not sticky — a later reload won't steal it back.
     expect(html).toContain("refreshFocused: false");
   });
+
+  it("renders a 'Load older' control + window qualifier when nextCursor is non-null", () => {
+    const html = renderDashboard([entry("e1"), entry("e2")], NONCE, {
+      nextCursor: "cur_abc",
+    });
+    expect(html).toContain('id="load-older"');
+    expect(html).toContain('postMessage({ type: "loadMore" })');
+    // The Calibration heading is qualified so it never implies "the whole ledger".
+    expect(html).toContain("older history not loaded");
+    expect(html).not.toContain('<h2 id="b-chart-h">Calibration</h2>');
+  });
+
+  it("omits the 'Load older' control and heading qualifier when there are no older pages", () => {
+    const html = renderDashboard([entry("e1"), entry("e2")], NONCE, {
+      nextCursor: null,
+    });
+    expect(html).not.toContain('id="load-older"');
+    expect(html).toContain('<h2 id="b-chart-h">Calibration</h2>');
+  });
 });
 
 describe("renderConfigureKey", () => {

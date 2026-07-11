@@ -1,7 +1,12 @@
 import { randomBytes } from "node:crypto";
 import * as vscode from "vscode";
 
-import { BudgetaryAuthError, BudgetaryClient, BudgetaryError } from "@budgetary/sdk";
+import {
+  BudgetaryAuthError,
+  BudgetaryClient,
+  BudgetaryError,
+  type LedgerEntry,
+} from "@budgetary/sdk";
 
 import { resolveConfigStatus } from "../config";
 import {
@@ -12,13 +17,46 @@ import {
   renderLoading,
 } from "../webview/render";
 
+/** Entries fetched per ledger page. Load-older appends the next page of this size. */
+const LEDGER_LIMIT = 50;
+
 let panel: vscode.WebviewPanel | undefined;
 // Monotonic load counter: every load() captures the value it started with, and
 // only writes to the webview while it is still the latest — see load().
 let loadGeneration = 0;
 
+// Accumulated pagination state. A fresh load / refresh resets both; "Load older"
+// fetches the next page (via `cursor`) and appends to `accumulated` (deduped by
+// estimateId, since cursor pages shift as new estimates arrive mid-pagination).
+// The extension MUST hold this — each render reloads the whole webview document,
+// so the webview can't retain it.
+let accumulated: LedgerEntry[] = [];
+let cursor: string | null = null;
+
 function makeNonce(): string {
   return randomBytes(16).toString("base64").replace(/[+/=]/g, "");
+}
+
+/** Append `incoming` to `existing`, skipping any estimateId already present. */
+function dedupAppend(
+  existing: readonly LedgerEntry[],
+  incoming: readonly LedgerEntry[],
+): LedgerEntry[] {
+  const seen = new Set(existing.map((e) => e.estimateId));
+  const merged = existing.slice();
+  for (const e of incoming) {
+    if (!seen.has(e.estimateId)) {
+      seen.add(e.estimateId);
+      merged.push(e);
+    }
+  }
+  return merged;
+}
+
+/** Reset pagination state (on dispose, so a reopened panel starts clean). */
+function resetPagination(): void {
+  accumulated = [];
+  cursor = null;
 }
 
 export function showDashboard(_context: vscode.ExtensionContext): void {
@@ -43,13 +81,19 @@ export function showDashboard(_context: vscode.ExtensionContext): void {
 
   panel.onDidDispose(() => {
     panel = undefined;
+    resetPagination();
   });
 
   panel.webview.onDidReceiveMessage((msg) => {
-    if (msg && typeof msg === "object" && (msg as { type?: unknown }).type === "refresh") {
+    const type =
+      msg && typeof msg === "object" ? (msg as { type?: unknown }).type : undefined;
+    if (type === "refresh") {
       // A manual refresh keeps the current view (no full "Loading…" blank); the
       // webview announces "Refreshing…" via aria-live and restores focus/scroll.
       if (panel) void load(panel, { isRefresh: true });
+    } else if (type === "loadMore") {
+      // "Load older": fetch + append the next page without blanking the view.
+      if (panel) void load(panel, { loadMore: true });
     }
   });
 
@@ -58,7 +102,7 @@ export function showDashboard(_context: vscode.ExtensionContext): void {
 
 export async function load(
   p: vscode.WebviewPanel,
-  opts: { isRefresh?: boolean } = {},
+  opts: { isRefresh?: boolean; loadMore?: boolean } = {},
 ): Promise<void> {
   // Newest-wins + disposed guard. A ledger fetch can resolve after a newer
   // refresh started, or after the panel was disposed. `apply` writes only while
@@ -66,10 +110,9 @@ export async function load(
   // response can't clobber fresher content, and a resolve on a disposed panel
   // can't throw (VS Code throws when you set `.html` on a disposed webview).
   const generation = ++loadGeneration;
+  const isCurrent = (): boolean => generation === loadGeneration && panel === p;
   const apply = (html: string): void => {
-    if (generation === loadGeneration && panel === p) {
-      p.webview.html = html;
-    }
+    if (isCurrent()) p.webview.html = html;
   };
 
   const status = resolveConfigStatus();
@@ -85,10 +128,14 @@ export async function load(
   }
   const config = status.config;
 
-  // A manual refresh keeps the current dashboard visible (no full "Loading…"
-  // blank that would lose scroll/focus); the webview announces "Refreshing…"
-  // via aria-live. Only the first paint shows the loading interstitial.
-  if (!opts.isRefresh) apply(renderLoading(makeNonce()));
+  // A "Load older" request with no cursor is a no-op (the button only renders
+  // when one exists, but guard against a stale click after the last page).
+  if (opts.loadMore && cursor === null) return;
+
+  // A manual refresh / load-older keeps the current dashboard visible (no full
+  // "Loading…" blank that would lose scroll/focus); the webview announces via
+  // aria-live. Only the first paint shows the loading interstitial.
+  if (!opts.isRefresh && !opts.loadMore) apply(renderLoading(makeNonce()));
 
   const client = new BudgetaryClient({
     apiKey: config.apiKey,
@@ -102,7 +149,13 @@ export async function load(
   try {
     // includeOrphans: pending estimates have no actuals yet; show them as rows
     // rather than hiding them (and mislabeling a non-empty ledger "No estimates").
-    const page = await client.getLedger({ limit: 50, includeOrphans: true });
+    // Load-older passes the cursor captured at call time as `after`.
+    const after = opts.loadMore ? (cursor ?? undefined) : undefined;
+    const page = await client.getLedger({
+      limit: LEDGER_LIMIT,
+      includeOrphans: true,
+      ...(after !== undefined ? { after } : {}),
+    });
     // Guard the response shape: a malformed page (entries not an array) must
     // read as an honest "unexpected response", never throw out of the renderer.
     if (!page || !Array.isArray(page.entries)) {
@@ -115,7 +168,16 @@ export async function load(
       );
       return;
     }
-    apply(renderDashboard(page.entries, makeNonce()));
+    // Commit pagination state only while still current, so a stale load (a newer
+    // refresh started, or the panel was disposed) can't corrupt the accumulated
+    // set. A fresh load / refresh replaces it; load-older dedup-appends.
+    if (!isCurrent()) return;
+    const nextCursor = typeof page.nextCursor === "string" ? page.nextCursor : null;
+    accumulated = opts.loadMore
+      ? dedupAppend(accumulated, page.entries)
+      : page.entries.slice();
+    cursor = nextCursor;
+    apply(renderDashboard(accumulated, makeNonce(), { nextCursor: cursor }));
   } catch (err) {
     const nonce = makeNonce();
     if (err instanceof BudgetaryAuthError) {

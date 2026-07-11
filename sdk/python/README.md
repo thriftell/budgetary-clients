@@ -34,6 +34,20 @@ print(estimate.scenario, estimate.distribution)
 ```python
 with BudgetaryClient(api_key=...) as client:
     page = client.get_ledger(project_id="proj_kx7", limit=50)
+    for entry in page.entries:
+        print(entry.query_excerpt, entry.predicted.p50, entry.actual)
+```
+
+`get_ledger` is paginated — pass the returned `next_cursor` as `after` for the next page, and set `include_orphans=True` to include estimates with no actuals yet:
+
+```python
+cursor = None
+while True:
+    page = client.get_ledger(project_id="proj_kx7", limit=50, after=cursor, include_orphans=True)
+    ...  # process page.entries
+    if page.next_cursor is None:
+        break
+    cursor = page.next_cursor
 ```
 
 ## Error handling
