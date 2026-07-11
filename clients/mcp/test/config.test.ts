@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  configDiagnostics,
   debugEnabled,
   looksLikeBudgetaryKey,
   resolveLanguage,
@@ -150,5 +151,75 @@ describe("resolveLanguage — declared signal, fail-open by omission", () => {
     mkdirSync(join(home, ".budgetary"), { recursive: true });
     writeFileSync(join(home, ".budgetary", "config.json"), "{ not json", "utf8");
     expect(resolveLanguage({} as NodeJS.ProcessEnv, home)).toBeUndefined();
+  });
+});
+
+describe("configDiagnostics — printable, secret-free config view (O-7)", () => {
+  let home: string;
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "budgetary-diag-"));
+    mkdirSync(join(home, ".budgetary"), { recursive: true });
+  });
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+  const writeConfig = (obj: unknown): void => {
+    writeFileSync(join(home, ".budgetary", "config.json"), JSON.stringify(obj), "utf8");
+  };
+
+  it("reports source=none with no key", () => {
+    const d = configDiagnostics({} as NodeJS.ProcessEnv, home);
+    expect(d).toEqual({ source: "none", baseUrl: null, keyPrefix: null, warnings: [] });
+  });
+
+  it("reports the env source, default base URL, and the key PREFIX (never the value)", () => {
+    const d = configDiagnostics({ BUDGETARY_API_KEY: "bg_live_supersecret" } as NodeJS.ProcessEnv, home);
+    expect(d.source).toBe("env");
+    expect(d.keyPrefix).toBe("bg_live_");
+    expect(d.baseUrl).toBe("https://api.budgetary.tools");
+    expect(JSON.stringify(d)).not.toContain("supersecret");
+  });
+
+  it("warns when a non-HTTPS config base_url is refused (fell back to the default)", () => {
+    writeConfig({ api_key: "bg_test_x", base_url: "http://staging:8080" });
+    const d = configDiagnostics({} as NodeJS.ProcessEnv, home);
+    expect(d.source).toBe("config");
+    expect(d.baseUrl).toBe("https://api.budgetary.tools");
+    expect(d.warnings.join(" ")).toMatch(/refused/);
+    expect(d.warnings.join(" ")).toContain("http://staging:8080");
+  });
+
+  it("honors an https config base_url with no warning", () => {
+    writeConfig({ api_key: "bg_test_x", base_url: "https://custom.example.com" });
+    const d = configDiagnostics({} as NodeJS.ProcessEnv, home);
+    expect(d.baseUrl).toBe("https://custom.example.com");
+    expect(d.warnings).toEqual([]);
+  });
+
+  it("honors a localhost http base_url (allowed loopback) with no 'refused' warning", () => {
+    // isBaseUrlAllowed permits http on a loopback host — it must NOT be flagged as
+    // refused, and the resolved URL is the localhost one, not the prod default.
+    writeConfig({ api_key: "bg_test_x", base_url: "http://localhost:8787" });
+    const d = configDiagnostics({} as NodeJS.ProcessEnv, home);
+    expect(d.baseUrl).toBe("http://localhost:8787");
+    expect(d.warnings).toEqual([]);
+  });
+
+  it("warns that an env key shadows a config base_url", () => {
+    writeConfig({ api_key: "bg_test_fromfile", base_url: "https://custom.example.com" });
+    const d = configDiagnostics({ BUDGETARY_API_KEY: "bg_live_env" } as NodeJS.ProcessEnv, home);
+    expect(d.source).toBe("env");
+    expect(d.warnings.join(" ")).toMatch(/config\.json is not read/);
+    expect(d.warnings.join(" ")).toContain("https://custom.example.com");
+  });
+
+  it("marks an unrecognized key shape", () => {
+    const d = configDiagnostics({ BUDGETARY_API_KEY: "not-a-bg-key" } as NodeJS.ProcessEnv, home);
+    expect(d.keyPrefix).toBe("unrecognized");
+  });
+
+  it("reports source=unreadable for a broken config file", () => {
+    writeFileSync(join(home, ".budgetary", "config.json"), "{ not json", "utf8");
+    expect(configDiagnostics({} as NodeJS.ProcessEnv, home).source).toBe("unreadable");
   });
 });

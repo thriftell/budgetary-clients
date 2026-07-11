@@ -1,14 +1,16 @@
 import { readFileSync } from "node:fs";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { CallToolRequest } from "@modelcontextprotocol/sdk/types.js";
 
 import type { AutoActualsArgs } from "../src/actuals.js";
 import {
   handleCallTool,
+  main,
   parseOnSessionEndArgs,
   runOnSessionEndCli,
+  runStdioServer,
   SERVER_VERSION,
   TOOL_NAME,
 } from "../src/server.js";
@@ -269,5 +271,90 @@ describe("runOnSessionEndCli (stdin hook path)", () => {
     expect(code).toBe(0);
     expect(auto.calls).toHaveLength(0); // never dispatched to the auto path
     expect(errs.join("")).toContain("size limit");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR-2: main() dispatch — no argument silently blocks on the server; every other
+// token gets a real answer. (The argv-less server path is not exercised here —
+// it would block on stdin — but every non-server branch is.)
+// ---------------------------------------------------------------------------
+
+describe("main — subcommand dispatch never silently starts the server", () => {
+  // Capture process stdout/stderr without printing during the test run.
+  function capture() {
+    const out: string[] = [];
+    const err: string[] = [];
+    const so = vi.spyOn(process.stdout, "write").mockImplementation((c: string | Uint8Array) => {
+      out.push(String(c));
+      return true;
+    });
+    const se = vi.spyOn(process.stderr, "write").mockImplementation((c: string | Uint8Array) => {
+      err.push(String(c));
+      return true;
+    });
+    return { out, err, restore: () => { so.mockRestore(); se.mockRestore(); } };
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("--version prints the version to stdout and exits 0 (never the server)", async () => {
+    const cap = capture();
+    const code = await main(["--version"]);
+    cap.restore();
+    expect(code).toBe(0);
+    expect(cap.out.join("")).toContain(SERVER_VERSION);
+  });
+
+  it("-v and `version` are aliases", async () => {
+    for (const arg of ["-v", "version"]) {
+      const cap = capture();
+      const code = await main([arg]);
+      cap.restore();
+      expect(code).toBe(0);
+      expect(cap.out.join("")).toContain(SERVER_VERSION);
+    }
+  });
+
+  it("--help / -h / help print usage to stdout and exit 0", async () => {
+    for (const arg of ["--help", "-h", "help"]) {
+      const cap = capture();
+      const code = await main([arg]);
+      cap.restore();
+      expect(code).toBe(0);
+      expect(cap.out.join("")).toContain("Usage:");
+      expect(cap.out.join("")).toContain("doctor");
+    }
+  });
+
+  it("an unknown subcommand prints usage to STDERR and exits 2 (never the server)", async () => {
+    const cap = capture();
+    const code = await main(["definitely-not-a-command"]);
+    cap.restore();
+    expect(code).toBe(2);
+    expect(cap.err.join("")).toContain('unknown subcommand "definitely-not-a-command"');
+    expect(cap.err.join("")).toContain("Usage:");
+    // The usage text is the answer — it never fell through to stdout/server.
+    expect(cap.out.join("")).toBe("");
+  });
+});
+
+describe("runStdioServer — readiness banner goes to STDERR, never stdout", () => {
+  it("writes the version banner to stderr and NOTHING to stdout (JSON-RPC channel)", async () => {
+    // Inject a no-op connect so no real stdio transport is stood up; capture the
+    // injected stderr and spy on process.stdout to prove the channel stays clean.
+    const err: string[] = [];
+    const so = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    await runStdioServer({
+      connect: async () => {},
+      stderr: { write: (s: string) => { err.push(s); } },
+    });
+    so.mockRestore();
+    expect(err.join("")).toContain(`Budgetary MCP server v${SERVER_VERSION} ready`);
+    // stdout is reserved for the MCP transport's JSON-RPC — the banner must not
+    // have gone there.
+    expect(so).not.toHaveBeenCalled();
   });
 });
