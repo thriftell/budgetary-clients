@@ -276,6 +276,27 @@ export function capTrace(trace: TraceStep[]): TraceStep[] | null {
   return trace;
 }
 
+/**
+ * When a NON-EMPTY trace is dropped by {@link capTrace} for exceeding a cap,
+ * describe why (its step count and byte size) so the drop can be surfaced in a
+ * debug line and the session-end breadcrumb instead of vanishing — the longest,
+ * highest-spend sessions are exactly the ones that trip the 16 KiB byte cap
+ * (which binds near ~181 steps, well before {@link TRACE_MAX_STEPS}), and a
+ * silently dropped trace reads identically to a tool-free run (`trace_steps=0`).
+ * Returns `null` for an empty trace (no tools — nothing was dropped) or a trace
+ * within both caps.
+ */
+export function traceCapOverage(
+  trace: TraceStep[],
+): { steps: number; bytes: number } | null {
+  if (trace.length === 0) return null;
+  const bytes = Buffer.byteLength(JSON.stringify(trace), "utf8");
+  if (trace.length > TRACE_MAX_STEPS || bytes > TRACE_MAX_BYTES) {
+    return { steps: trace.length, bytes };
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Target redaction — utility WITHOUT leakage
 //

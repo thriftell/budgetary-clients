@@ -127,6 +127,9 @@ export async function runEstimateTool(
     // to an honest "couldn't be stored" line otherwise. The store gets a logger so
     // the underlying cause is visible on stderr, not swallowed.
     let stored = true;
+    // Count of THIS project's OTHER still-open estimates, computed from the
+    // snapshot the append already returned — no second read/parse of the file.
+    let others = 0;
     if (!response.void) {
       const store = new PendingStore({
         path: pendingFilePath(args.home),
@@ -139,23 +142,24 @@ export async function runEstimateTool(
         created_at: (args.now ?? (() => new Date()))().toISOString(),
         attempts: 0,
       };
-      stored = store.append(entry);
+      // Pass the tool's clock so the append-time TTL sweep is consistent with
+      // the created_at just stamped above.
+      const result = store.append(entry, { now: args.now });
+      stored = result.stored;
+      if (stored) {
+        others = result.entries.filter(
+          (e) => e.project_id === projectId && e.estimate_id !== response.estimateId,
+        ).length;
+      }
     }
 
     let text = renderEstimate(response, { host, stored });
     // Nudge: if earlier estimates for THIS project were never closed out, surface
     // it once (a lost actual shouldn't stay invisible). Best-effort — never fatal.
-    if (stored) {
-      const others = new PendingStore({ path: pendingFilePath(args.home) })
-        .read()
-        .entries.filter(
-          (e) => e.project_id === projectId && e.estimate_id !== response.estimateId,
-        ).length;
-      if (others > 0) {
-        text +=
-          `\n\n(${others} earlier ${others === 1 ? "estimate" : "estimates"} for ` +
-          "this project still await actuals — run `npx @budgetary/mcp pending`.)";
-      }
+    if (stored && others > 0) {
+      text +=
+        `\n\n(${others} earlier ${others === 1 ? "estimate" : "estimates"} for ` +
+        "this project still await actuals — run `npx @budgetary/mcp pending`.)";
     }
     return { text, isError: false };
   } catch (err) {

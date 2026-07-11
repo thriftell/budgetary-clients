@@ -996,6 +996,45 @@ describe("runAutoActuals", () => {
     expect(readPending(home).entries).toEqual([]);
   });
 
+  it("records an honest trace-drop when the trace exceeds the cap (totals still submit)", async () => {
+    // The longest, highest-spend sessions trip the trace cap. Dropping it whole
+    // (a trimmed trace would misstate composition) must NOT read as a tool-free
+    // run: the drop is recorded in the breadcrumb and, under debug, on stderr.
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_bigtrace", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient();
+    // 600 steps > TRACE_MAX_STEPS (512) → capTrace drops it.
+    const bigTrace = Array.from({ length: 600 }, (_, i) => ({ tool: "Bash", tokens: i }));
+    const errs: string[] = [];
+
+    const code = await runAutoActuals({
+      payload: PAYLOAD,
+      env: { ...ENV, BUDGETARY_DEBUG: "1" },
+      home,
+      cwd,
+      now: () => NOW,
+      stderr: { write: (s) => errs.push(s) },
+      clientFactory: () => asClient(fake),
+      readUsage: () => ({ tokensIn: 100, tokensOut: 200, trace: bigTrace }),
+    });
+
+    expect(code).toBe(0);
+    // Totals still submitted, with NO trace attached (fail-closed).
+    const sent = fake.submitActuals.mock.calls[0]![0];
+    expect(sent.tokensIn).toBe(100);
+    expect(sent.trace).toBeUndefined();
+    // The drop is visible on stderr (debug) …
+    expect(errs.join("")).toContain("trace over cap: 600 steps");
+    // … and durably in the breadcrumb (read by `pending`/`doctor`).
+    const crumb = readBreadcrumb(home);
+    expect(crumb?.note).toContain("trace over cap: 600 steps");
+    expect(crumb?.outcome).toBe("submitted");
+  });
+
   it("warns (does not silently drop) when the server terminally rejects an auto actual", async () => {
     // INV-2: a terminal 4xx drops the entry to drain the queue, but this silent
     // hook path must leave a signal rather than lose a measured actual quietly.
