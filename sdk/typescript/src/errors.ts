@@ -52,10 +52,38 @@ export class BudgetaryServerError extends BudgetaryError {}
 
 export class BudgetaryRateLimitError extends BudgetaryError {
   readonly retryAfterSeconds: number | null;
+  /**
+   * `X-RateLimit-Limit` (contract §7) — the tier's request ceiling for the
+   * current window. `null` when the header is absent or unparseable. Additive:
+   * lets a client surface "you've hit your tier limit of N" rather than a bare
+   * "rate limited".
+   */
+  readonly limit: number | null;
+  /** `X-RateLimit-Remaining` (contract §7) — requests left in the window. `null` if absent. */
+  readonly remaining: number | null;
+  /**
+   * `X-RateLimit-Reset` (contract §7) — UNIX epoch SECONDS at which the window
+   * resets (NOT a relative duration; a renderer subtracts the current time to
+   * show "resets in ~Ns"). `null` when the header is absent or unparseable.
+   */
+  readonly resetSeconds: number | null;
 
-  constructor(args: BudgetaryErrorArgs & { retryAfterSeconds: number | null }) {
+  constructor(
+    args: BudgetaryErrorArgs & {
+      retryAfterSeconds: number | null;
+      // Optional + null-defaulted so existing constructors (tests, older call
+      // sites) that pass only `retryAfterSeconds` keep compiling and behave as
+      // before (all three fields `null`). Only the HTTP layer populates them.
+      limit?: number | null;
+      remaining?: number | null;
+      resetSeconds?: number | null;
+    },
+  ) {
     super(args);
     this.retryAfterSeconds = args.retryAfterSeconds;
+    this.limit = args.limit ?? null;
+    this.remaining = args.remaining ?? null;
+    this.resetSeconds = args.resetSeconds ?? null;
   }
 }
 

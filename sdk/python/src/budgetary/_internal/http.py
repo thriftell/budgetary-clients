@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
 from email.utils import parsedate_to_datetime
 from typing import Any, Callable, TypeVar
@@ -86,6 +87,24 @@ def _parse_retry_after(header: str | None) -> float | None:
     return max(0.0, seconds)
 
 
+def _parse_int_header(header: str | None) -> int | None:
+    """Parse an integer-valued ``X-RateLimit-*`` header (contract §7), or ``None``
+    when absent/blank/non-integer. Accepts ONLY a plain base-10 integer with an
+    optional sign, so a garbage / float-shaped / underscore-grouped header
+    degrades to ``None`` rather than surfacing a bogus number — identical grammar
+    to the TS SDK's ``parseIntHeader`` (bare ``int()`` would additionally accept
+    ``"1_000"``, a cross-SDK divergence). Never raises."""
+    if header is None:
+        return None
+    trimmed = header.strip()
+    if not re.fullmatch(r"[+-]?\d+", trimmed):
+        return None
+    try:
+        return int(trimmed)
+    except (TypeError, ValueError):
+        return None
+
+
 def _build_error(
     status: int, body: dict[str, Any] | None, headers: httpx.Headers
 ) -> BudgetaryError:
@@ -108,9 +127,16 @@ def _build_error(
     if status in (400, 409, 413):
         return BudgetaryValidationError(**kwargs)
     if status == 429:
+        # Additive: surface the tier's rate-limit window (contract §7) alongside
+        # Retry-After. Only read on 429 (where the contract documents them);
+        # whether they ride 2xx is a server concern, out of scope here. Parity
+        # with the TS SDK.
         return BudgetaryRateLimitError(
             **kwargs,
             retry_after_seconds=_parse_retry_after(headers.get("retry-after")),
+            limit=_parse_int_header(headers.get("x-ratelimit-limit")),
+            remaining=_parse_int_header(headers.get("x-ratelimit-remaining")),
+            reset_seconds=_parse_int_header(headers.get("x-ratelimit-reset")),
         )
     if status >= 500:
         return BudgetaryServerError(**kwargs)

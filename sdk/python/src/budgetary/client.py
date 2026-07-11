@@ -11,6 +11,7 @@ from budgetary._internal.http import HttpClient
 from budgetary._internal.idempotency import _UNSET, resolve_client_request_id
 from budgetary._internal.retry import OnRetry
 from budgetary._internal.url import is_base_url_allowed
+from budgetary.errors import BudgetaryValidationError
 from budgetary.types import (
     ActualsResponse,
     Distribution,
@@ -182,6 +183,17 @@ class BudgetaryClient:
         client_request_id: Any = _UNSET,
         timeout_ms: int | None = None,
     ) -> EstimateResponse:
+        # Reject an empty/whitespace query LOCALLY — it can only earn a billed
+        # 400. Mirrors the MCP tool's trim-guard and the TS SDK; raises the same
+        # validation type a server 400 would, but with ``http_status=None`` to
+        # mark it client-side, so no request (and no idempotency key) is sent.
+        if not isinstance(query, str) or not query.strip():
+            raise BudgetaryValidationError(
+                code="invalid_request",
+                message="estimate query must be a non-empty string",
+                http_status=None,
+                request_id=None,
+            )
         body: dict[str, Any] = {"query": query}
         if model is not None:
             body["model"] = model

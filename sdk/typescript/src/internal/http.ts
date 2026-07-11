@@ -223,6 +223,26 @@ function parseRetryAfter(header: string | null): number | null {
   return null;
 }
 
+/**
+ * Parse an integer-valued `X-RateLimit-*` header (contract §7), or `null` when
+ * absent/blank/non-integer. Accepts ONLY a plain base-10 integer with an
+ * optional sign — matching the Python SDK's stricter `int()`-based parse, so the
+ * same wire header yields the same value across both SDKs. A float / hex /
+ * scientific / underscore-grouped / garbage header degrades to `null` (never a
+ * fractional value on a field documented as an integer count, and never `NaN`).
+ * Never throws.
+ */
+function parseIntHeader(header: string | null): number | null {
+  if (header === null) return null;
+  const trimmed = header.trim();
+  // `Number("1.5")`/`Number("0x10")`/`Number("1e3")` are all finite, so gate on
+  // the integer grammar FIRST — otherwise a non-integer header would surface as
+  // a real number here while Python's `int()` rejects it (a cross-SDK divergence).
+  if (!/^[+-]?\d+$/.test(trimmed)) return null;
+  const n = Number(trimmed);
+  return Number.isFinite(n) ? n : null;
+}
+
 function buildError(
   status: number,
   body: WireErrorBody | null,
@@ -242,9 +262,16 @@ function buildError(
     return new BudgetaryValidationError(args);
   }
   if (status === 429) {
+    // Additive: surface the tier's rate-limit window (contract §7) alongside
+    // Retry-After so a client can say "you've used N/M, resets in ~Ns" rather
+    // than a bare "rate limited". Only read on 429 (where the contract documents
+    // them); whether they ride 2xx is a server concern, out of scope here.
     return new BudgetaryRateLimitError({
       ...args,
       retryAfterSeconds: parseRetryAfter(headers.get("retry-after")),
+      limit: parseIntHeader(headers.get("x-ratelimit-limit")),
+      remaining: parseIntHeader(headers.get("x-ratelimit-remaining")),
+      resetSeconds: parseIntHeader(headers.get("x-ratelimit-reset")),
     });
   }
   if (status >= 500) return new BudgetaryServerError(args);

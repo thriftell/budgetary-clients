@@ -58,7 +58,14 @@ class BudgetaryServerError(BudgetaryError):
 
 
 class BudgetaryRateLimitError(BudgetaryError):
-    """429 ``rate_limited``. Exposes the server's ``Retry-After`` when present."""
+    """429 ``rate_limited``. Exposes the server's ``Retry-After`` when present,
+    plus the ``X-RateLimit-*`` window (contract §7) when the server sends it.
+
+    ``limit`` / ``remaining`` / ``reset_seconds`` are additive and default to
+    ``None`` (existing call sites that pass only ``retry_after_seconds`` keep
+    working). ``reset_seconds`` is a UNIX epoch in SECONDS, not a relative
+    duration. Parity with the TypeScript SDK's ``BudgetaryRateLimitError``.
+    """
 
     def __init__(
         self,
@@ -68,6 +75,9 @@ class BudgetaryRateLimitError(BudgetaryError):
         http_status: int | None,
         request_id: str | None,
         retry_after_seconds: float | None,
+        limit: int | None = None,
+        remaining: int | None = None,
+        reset_seconds: int | None = None,
     ) -> None:
         super().__init__(
             code=code,
@@ -76,6 +86,9 @@ class BudgetaryRateLimitError(BudgetaryError):
             request_id=request_id,
         )
         self.retry_after_seconds = retry_after_seconds
+        self.limit = limit
+        self.remaining = remaining
+        self.reset_seconds = reset_seconds
 
 
 class BudgetaryNetworkError(BudgetaryError):

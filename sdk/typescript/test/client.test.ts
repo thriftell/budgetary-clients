@@ -1,6 +1,10 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { http, HttpResponse } from "msw";
-import { BudgetaryClient, BudgetaryNetworkError } from "../src/index.js";
+import {
+  BudgetaryClient,
+  BudgetaryNetworkError,
+  BudgetaryValidationError,
+} from "../src/index.js";
 import {
   TEST_API_KEY,
   TEST_BASE_URL,
@@ -323,5 +327,38 @@ describe("BudgetaryClient constructor validation", () => {
 
   it("accepts a non-empty apiKey", () => {
     expect(() => new BudgetaryClient({ apiKey: "bg_test_x" })).not.toThrow();
+  });
+});
+
+describe("BudgetaryClient.estimate — empty-query guard (E-2)", () => {
+  it("rejects an empty/whitespace query locally without hitting the wire", async () => {
+    // onUnhandledRequest is "error", so if any of these reached the network the
+    // test would fail — proving no request (and no idempotency key) was sent.
+    const client = newClient();
+    for (const q of ["", "   ", "\n\t "]) {
+      const err = await client
+        .estimate(q)
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(BudgetaryValidationError);
+      expect((err as BudgetaryValidationError).httpStatus).toBeNull();
+    }
+  });
+
+  it("accepts a non-empty query (the guard doesn't trim real content)", async () => {
+    handle.use(
+      jsonOk("/v1/estimate", {
+        estimate_id: "est_ok",
+        scenario: "confident",
+        void: false,
+        distribution: { p10: 1, p50: 2, p90: 3, unit: "tokens" },
+        confidence: 0.9,
+        model: "claude-opus-4-7",
+        expires_at: "2026-05-27T10:14:00Z",
+      }),
+    );
+    const res = await newClient().estimate("  real task  ", {
+      clientRequestId: null,
+    });
+    expect(res.estimateId).toBe("est_ok");
   });
 });

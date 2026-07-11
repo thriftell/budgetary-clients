@@ -69,6 +69,21 @@ def with_retry(
                 err.attempts = attempts_made
                 err.total_elapsed_ms = (monotonic() - started) * 1000.0
                 raise
+            # Retry-After budget guard: if the server's stated wait EXCEEDS the
+            # most we would ever sleep in one backoff (``max_delay_ms``), then
+            # sleeping the clamped ``max_delay_ms`` and retrying would fire BEFORE
+            # the server said success is possible — a guaranteed second 429 that
+            # wastes an attempt and hammers a strained engine. Fail fast instead,
+            # propagating the rate-limit error with ``retry_after_seconds`` intact
+            # so the caller honors the FULL wait. Parity with the TS SDK.
+            if (
+                isinstance(err, BudgetaryRateLimitError)
+                and err.retry_after_seconds is not None
+                and err.retry_after_seconds * 1000.0 > max_delay_ms
+            ):
+                err.attempts = attempts_made
+                err.total_elapsed_ms = (monotonic() - started) * 1000.0
+                raise
             computed_ms = min(initial_delay_ms * (factor**attempt), max_delay_ms)
             jitter_ms = random_fn() * computed_ms
             delay_ms = jitter_ms
@@ -81,8 +96,9 @@ def with_retry(
                 # all seeing the same Retry-After at a fixed-window boundary
                 # de-syncs across [retry_after, retry_after+computed) instead of
                 # re-synchronizing into one bucket and thundering-herd'ing the
-                # engine. Still clamped to max_delay_ms (a hostile header can't
-                # stall for minutes). Parity with the TS SDK.
+                # engine. Here retry_after*1000 <= max_delay_ms (a longer wait
+                # already failed fast above), so the clamp only trims the jitter
+                # tail — the floor is always honored. Parity with the TS SDK.
                 delay_ms = min(
                     err.retry_after_seconds * 1000.0 + jitter_ms,
                     max_delay_ms,

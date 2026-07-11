@@ -86,20 +86,58 @@ describe("withRetry unit", () => {
     expect(sleeps[0]).toBeGreaterThanOrEqual(2000);
   });
 
-  it("clamps an oversized Retry-After to maxDelay (never hangs for minutes)", async () => {
+  it("fails fast when Retry-After exceeds the max backoff (never retries before the server's stated time)", async () => {
     const sleeps: number[] = [];
     let attempt = 0;
 
-    await withRetry(
+    const err = await withRetry(
+      async () => {
+        attempt += 1;
+        throw new BudgetaryRateLimitError({
+          code: "rate_limited",
+          message: "come back in an hour",
+          httpStatus: 429,
+          requestId: null,
+          retryAfterSeconds: 3600, // 1 hour ≫ maxDelay
+        });
+      },
+      {
+        maxRetries: 3,
+        maxDelayMs: 5000,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+        random: () => 1, // no jitter
+      },
+    ).catch((e: unknown) => e);
+
+    // Retry-After (3_600_000 ms) > maxDelay (5000 ms): sleeping the clamped 5 s
+    // and retrying would fire long before the server said success is possible.
+    // So we DON'T sleep and DON'T retry — we surface the rate-limit error with
+    // Retry-After intact so the caller can honor the full wait.
+    expect(attempt).toBe(1);
+    expect(sleeps).toHaveLength(0);
+    expect(err).toBeInstanceOf(BudgetaryRateLimitError);
+    expect((err as BudgetaryRateLimitError).retryAfterSeconds).toBe(3600);
+    // Annotated on the terminal throw like any exhausted/non-retryable error.
+    expect((err as BudgetaryError).attempts).toBe(1);
+  });
+
+  it("still retries a Retry-After that fits within maxDelay", async () => {
+    // Guard the boundary from the other side: a wait AT/UNDER maxDelay is honored
+    // by sleeping (the floor), not by failing fast.
+    const sleeps: number[] = [];
+    let attempt = 0;
+    const res = await withRetry(
       async () => {
         attempt += 1;
         if (attempt === 1) {
           throw new BudgetaryRateLimitError({
             code: "rate_limited",
-            message: "come back in an hour",
+            message: "brief",
             httpStatus: 429,
             requestId: null,
-            retryAfterSeconds: 3600, // 1 hour
+            retryAfterSeconds: 3, // 3000 ms <= maxDelay
           });
         }
         return "ok";
@@ -110,13 +148,12 @@ describe("withRetry unit", () => {
         sleep: async (ms) => {
           sleeps.push(ms);
         },
-        random: () => 1, // no jitter
+        random: () => 0, // no jitter → delay is exactly the 3000 ms floor
       },
     );
-
-    expect(sleeps).toHaveLength(1);
-    // Clamped to maxDelay — NOT 3_600_000.
-    expect(sleeps[0]).toBe(5000);
+    expect(res).toBe("ok");
+    expect(attempt).toBe(2);
+    expect(sleeps).toEqual([3000]);
   });
 
   it("does not retry on non-retryable errors", async () => {
@@ -464,5 +501,53 @@ describe("BudgetaryClient retry integration", () => {
     const res = await client.estimate("hi", { clientRequestId: null });
     expect(res.estimateId).toBe("est_ok");
     expect(calls).toBe(3);
+  }, 15_000);
+
+  it("reuses ONE auto-generated client_request_id across retries (never re-bills)", async () => {
+    // The invariant the whole cost story rests on: the SDK resolves the
+    // idempotency key ONCE, outside the retry loop, so 500 → 500 → 200 replays
+    // the SAME client_request_id and the server dedups instead of double-billing.
+    // Deliberately does NOT pass `clientRequestId` — it exercises the DEFAULT,
+    // auto-generated id path (every other retry test opts out with `null`, so a
+    // refactor moving key resolution into the attempt loop would pass CI while
+    // silently re-billing). If this ever sees >1 distinct id, retries re-bill.
+    const ids: Array<string | undefined> = [];
+    let calls = 0;
+    handle.use(
+      http.post(`${TEST_BASE_URL}/v1/estimate`, async ({ request }) => {
+        calls += 1;
+        const body = (await request.json()) as { client_request_id?: string };
+        ids.push(body.client_request_id);
+        if (calls < 3) {
+          return HttpResponse.json(
+            { error: { code: "internal_error", message: "x", request_id: "r" } },
+            { status: 500 },
+          );
+        }
+        return HttpResponse.json({
+          estimate_id: "est_ok",
+          scenario: "confident",
+          void: false,
+          distribution: { p10: 1, p50: 2, p90: 3, unit: "tokens" },
+          confidence: 0.9,
+          model: "claude-opus-4-7",
+          expires_at: "2026-05-27T10:14:00Z",
+        });
+      }),
+    );
+
+    const client = new BudgetaryClient({
+      apiKey: TEST_API_KEY,
+      baseUrl: TEST_BASE_URL,
+      maxRetries: 5,
+    });
+
+    const res = await client.estimate("hi"); // default id — no opt-out
+    expect(res.estimateId).toBe("est_ok");
+    expect(calls).toBe(3);
+    expect(ids).toHaveLength(3);
+    // A real id was sent (not omitted) AND all three attempts carried the SAME one.
+    expect(ids[0]).toBeTruthy();
+    expect(new Set(ids).size).toBe(1);
   }, 15_000);
 });
