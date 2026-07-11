@@ -211,6 +211,87 @@ export function traceTargetEnabled(env: NodeJS.ProcessEnv = process.env): boolea
 }
 
 /**
+ * Read the RAW `base_url` a config file declares (before the HTTPS gate), or
+ * `null` when absent / unreadable / empty. Diagnostics-only: it lets `doctor`
+ * notice a config `base_url` that {@link resolveConfigStatus} silently REFUSED
+ * (non-HTTPS → fell back to the prod default) or that an env key SHADOWED (an env
+ * key short-circuits before the file is read). Mirrors resolveConfigStatus's
+ * own non-trimming string test so the comparison is apples-to-apples.
+ */
+function readConfigBaseUrl(home?: string): string | null {
+  const path = configFilePath(home);
+  if (!existsSync(path)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as { base_url?: unknown };
+    if (typeof parsed.base_url === "string" && parsed.base_url.length > 0) {
+      return parsed.base_url;
+    }
+  } catch {
+    // Unreadable / malformed config carries no usable base_url signal.
+  }
+  return null;
+}
+
+/** Non-secret, printable view of how config resolved — for `doctor`. */
+export interface ConfigDiagnostics {
+  /** `env` / `config` when a key resolved; `none` / `unreadable` otherwise. */
+  source: "env" | "config" | "none" | "unreadable";
+  /** The resolved base URL, or `null` when no key resolved. */
+  baseUrl: string | null;
+  /** The key's public prefix — NEVER the value — or `null` when no key resolved. */
+  keyPrefix: "bg_live_" | "bg_test_" | "unrecognized" | null;
+  /** Human warnings about a refused or shadowed config `base_url` (may be empty). */
+  warnings: string[];
+}
+
+/**
+ * Resolve config into a PRINTABLE diagnostic view — source, resolved base URL,
+ * key prefix (never the key), and warnings about a config `base_url` that was
+ * silently refused (non-HTTPS) or shadowed by an env key. Traffic can otherwise
+ * hit prod while the operator believes it points elsewhere; surfacing the
+ * resolved URL + the reason is the fix. Deliberately carries NO secret so it is
+ * always safe to print in full.
+ */
+export function configDiagnostics(
+  env: NodeJS.ProcessEnv = process.env,
+  home?: string,
+): ConfigDiagnostics {
+  const status = resolveConfigStatus(env, home);
+  const warnings: string[] = [];
+  const rawBase = readConfigBaseUrl(home);
+
+  if (status.kind === "ok") {
+    const { source, baseUrl, apiKey } = status.config;
+    const keyPrefix = apiKey.startsWith("bg_live_")
+      ? "bg_live_"
+      : apiKey.startsWith("bg_test_")
+        ? "bg_test_"
+        : "unrecognized";
+    // A config base_url that differs from the resolved one was either shadowed
+    // by an env key (env source, file never read) or refused (config source,
+    // non-HTTPS → prod default). Either surprises the operator; name it.
+    if (rawBase !== null && rawBase !== baseUrl) {
+      if (source === "env") {
+        warnings.push(
+          `an env BUDGETARY_API_KEY is set, so ~/.budgetary/config.json is not read — ` +
+            `its base_url ${JSON.stringify(rawBase)} is ignored; using ${baseUrl}.`,
+        );
+      } else {
+        warnings.push(
+          `config.json base_url ${JSON.stringify(rawBase)} was refused (not https:// or ` +
+            `localhost) — using ${baseUrl} instead so the API key isn't sent in cleartext.`,
+        );
+      }
+    }
+    return { source, baseUrl, keyPrefix, warnings };
+  }
+  if (status.kind === "unreadable") {
+    return { source: "unreadable", baseUrl: null, keyPrefix: null, warnings };
+  }
+  return { source: "none", baseUrl: null, keyPrefix: null, warnings };
+}
+
+/**
  * Whether verbose session-end diagnostics are enabled. Default OFF: the
  * unattended hook is silent on the happy path (stdout is the JSON-RPC channel;
  * stderr is shown by the host only in debug mode), so an operator turns this on

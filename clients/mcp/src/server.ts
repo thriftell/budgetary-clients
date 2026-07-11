@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -18,7 +17,9 @@ import {
   runRolloutActuals,
   type SessionEndPayload,
 } from "./actuals.js";
+import { runDoctor } from "./doctor.js";
 import { runEstimateTool } from "./tools/estimate.js";
+import { SERVER_VERSION } from "./version.js";
 
 const SERVER_NAME = "budgetary";
 
@@ -29,27 +30,9 @@ const SERVER_NAME = "budgetary";
  */
 const MAX_STDIN_BYTES = 8 * 1024 * 1024;
 
-/**
- * The handshake version, read from the package's own package.json so it always
- * matches the published `@budgetary/mcp` rather than drifting from a hard-coded
- * literal. `src/server.ts` and `dist/server.js` are both one level below the
- * package root, so `../package.json` resolves in both. Falls back to `0.0.0` if
- * it can't be read (never throws at import time).
- */
-function readServerVersion(): string {
-  try {
-    const pkg = JSON.parse(
-      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
-    ) as { version?: unknown };
-    return typeof pkg.version === "string" && pkg.version.length > 0
-      ? pkg.version
-      : "0.0.0";
-  } catch {
-    return "0.0.0";
-  }
-}
-
-export const SERVER_VERSION = readServerVersion();
+// The handshake/CLI version. Re-exported so existing importers (and tests) keep
+// resolving it from `server.js`; the single source of truth lives in version.ts.
+export { SERVER_VERSION };
 
 /** The one and only model-invokable tool name. */
 export const TOOL_NAME = "estimate";
@@ -163,7 +146,37 @@ async function runStdioServer(): Promise<void> {
   const server = buildServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  // One-line readiness banner on STDERR (stdout is the JSON-RPC channel). Without
+  // it a bare `npx -y @budgetary/mcp` gives no sign of life — indistinguishable
+  // from a hang — even though it is correctly waiting for a client on stdin.
+  process.stderr.write(`Budgetary MCP server v${SERVER_VERSION} ready (stdio).\n`);
   // The transport keeps the process alive while stdin is open; do not exit.
+}
+
+/** One-line-per-form usage, printed for `--help` and an unknown subcommand. */
+function usageText(): string {
+  return [
+    "Budgetary MCP — pre-flight token-spend estimates for coding tasks.",
+    "",
+    "Usage:",
+    "  npx @budgetary/mcp                                run the MCP stdio server (no arguments)",
+    "  npx @budgetary/mcp doctor                         check version, key, base URL + connectivity",
+    "  npx @budgetary/mcp pending                        list estimates awaiting actuals (read-only)",
+    "  npx @budgetary/mcp report-actual                  enter realized counts by hand",
+    "  npx @budgetary/mcp on-session-end                 actuals from a session-end payload on stdin (host hook)",
+    "  npx @budgetary/mcp on-session-end --transcript P  actuals from a rollout/transcript file P",
+    "  npx @budgetary/mcp --version                      print the version and exit",
+    "  npx @budgetary/mcp --help                         show this help and exit",
+    "",
+  ].join("\n");
+}
+
+/** Run the `doctor` self-check against the real environment (foreground CLI). */
+async function runDoctorCli(): Promise<number> {
+  return runDoctor({
+    env: process.env,
+    out: (line) => process.stdout.write(`${line}\n`),
+  });
 }
 
 async function runReportActualCli(): Promise<number> {
@@ -360,19 +373,40 @@ function runPendingCli(): number {
 /**
  * CLI entry point. Subcommands:
  *   (none)                        → run the MCP stdio server (returns null: do not exit)
+ *   doctor                        → self-check: version, key source, base URL, connectivity
  *   pending                       → list pending estimates awaiting actuals (read-only)
  *   report-actual                 → manual, human-entered actuals
  *   on-session-end                → auto actuals from a session-end payload on stdin (hook)
  *   on-session-end --transcript P → submit actuals from a rollout/transcript file P
+ *   --version / --help            → print version / usage and exit
+ *
+ * ONLY a bare invocation (no arguments) starts the long-lived stdio server. Any
+ * unrecognized token gets a real answer (usage on stderr, exit 2) instead of
+ * silently falling through to the server, where the documented
+ * `npx -y @budgetary/mcp` smoke test would look like a freeze.
  */
 export async function main(argv: string[]): Promise<number | null> {
   const sub = argv[0];
   try {
+    if (sub === undefined) {
+      await runStdioServer();
+      return null;
+    }
+    if (sub === "--version" || sub === "-v" || sub === "version") {
+      process.stdout.write(`${SERVER_VERSION}\n`);
+      return 0;
+    }
+    if (sub === "--help" || sub === "-h" || sub === "help") {
+      process.stdout.write(usageText());
+      return 0;
+    }
+    if (sub === "doctor") return await runDoctorCli();
     if (sub === "pending") return runPendingCli();
     if (sub === "report-actual") return await runReportActualCli();
     if (sub === "on-session-end") return await runOnSessionEndCli(argv.slice(1));
-    await runStdioServer();
-    return null;
+    // Unknown subcommand: fail loud, never start the server.
+    process.stderr.write(`Budgetary: unknown subcommand "${sub}".\n\n${usageText()}`);
+    return 2;
   } catch (err) {
     // Backstop so no subcommand ever exits on a raw stack. The session-end HOOK
     // must fail closed (exit 0) whatever happens; every other subcommand is

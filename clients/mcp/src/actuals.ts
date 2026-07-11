@@ -1117,7 +1117,7 @@ function formatBreadcrumbHeader(crumb: SessionEndBreadcrumb, now: Date): string 
 }
 
 /** A short human age like "just now", "3h ago", "2d ago". */
-function describeAge(createdAt: string, now: Date): string {
+export function describeAge(createdAt: string, now: Date): string {
   const created = Date.parse(createdAt);
   if (!Number.isFinite(created)) return "unknown age";
   const ms = now.getTime() - created;
