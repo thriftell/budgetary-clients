@@ -19,11 +19,21 @@ import {
   traceTargetEnabled,
 } from "./config.js";
 import { shortEstimateId } from "./format.js";
-import { PendingStore, type PendingEntry, type PendingStoreFile } from "./store.js";
+import {
+  isEntryExpired,
+  PendingStore,
+  PENDING_TTL_MS,
+  type MutateContext,
+  type MutateOutcome,
+  type MutateReturn,
+  type PendingEntry,
+  type PendingStoreFile,
+} from "./store.js";
 import { projectIdFromCwd } from "./tools/estimate.js";
 import {
   capTrace,
   readTranscriptUsage,
+  traceCapOverage,
   transcriptUnreadableReason,
   type ReadUsageOptions,
   type TraceStep,
@@ -31,7 +41,6 @@ import {
 } from "./transcript.js";
 
 export const MAX_ATTEMPTS = 5;
-const PENDING_TTL_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Retry cap for the NON-INTERACTIVE actuals submit paths (the auto session-end
@@ -84,6 +93,37 @@ export interface ActualCounts {
 export interface PendingWriter {
   read(): PendingStoreFile;
   write(file: PendingStoreFile): void;
+  /**
+   * Optional serialized read-modify-write. The real {@link PendingStore}
+   * provides it (a fail-open cross-process lock); a first-party or test store
+   * may omit it, in which case {@link mutateStore} falls back to a plain
+   * read → mutate → write (unlocked — acceptable for a single-process caller).
+   */
+  mutate?<T>(fn: (ctx: MutateContext) => MutateReturn<T>): MutateOutcome<T>;
+}
+
+/**
+ * Run a serialized read-modify-write against `store`, preferring its
+ * cross-process-locked {@link PendingStore.mutate} and falling back to
+ * read → mutate → {@link tryWrite} when the store doesn't provide one. `fn`
+ * mutates the freshly-read `file.entries` in place and returns a `value` plus
+ * whether it `changed` anything (an unchanged result skips the write). Both
+ * paths route the write through the fail-closed {@link tryWrite}, so a write
+ * fault degrades to `wrote: false` and never crashes the caller.
+ */
+function mutateStore<T>(
+  store: PendingWriter,
+  logger: { warn(message: string): void },
+  fn: (ctx: MutateContext) => MutateReturn<T>,
+): MutateOutcome<T> {
+  if (store.mutate) return store.mutate(fn);
+  // Fallback: no lock available. `read()` gives no writable flag structurally,
+  // so treat it as writable — a foreign store that couldn't read returns an
+  // empty file, on which `fn` is a no-op (findIndex → -1, filter of [] → []).
+  const file = store.read();
+  const { value, changed } = fn({ file, writable: true });
+  if (!changed) return { value, wrote: false };
+  return { value, wrote: tryWrite(store, file, logger) };
 }
 
 export interface SubmitActualsArgs {
@@ -263,59 +303,78 @@ export async function submitActuals(
         ? { trace: counts.trace }
         : {}),
     });
-    const fresh = store.read();
     // The POST won. Removing the entry is best-effort: if the write faults we
     // must NOT reclassify a committed submit as retryable — return submitted
     // regardless. A leftover entry is reconciled next session by server dedup.
-    if (removeById(fresh, entry.estimate_id)) tryWrite(store, fresh, logger);
+    // Serialized so a concurrent append during the ~seconds-long POST isn't lost.
+    mutateStore(store, logger, ({ file }) => {
+      const removed = removeById(file, entry.estimate_id);
+      return { value: removed, changed: removed };
+    });
     return { submitted: true, retryable: false, terminal: false, gaveUp: false };
   } catch (err) {
     const retryable = isRetryableSubmitError(err);
-    const fresh = store.read();
-    const idx = fresh.entries.findIndex(
-      (e) => e.estimate_id === entry.estimate_id,
-    );
-    // Already closed by another path — THIS call did not submit; say so.
-    if (idx === -1)
-      return { submitted: false, retryable, terminal: false, gaveUp: false, error: err };
-    if (!retryable) {
-      if (isUserFixableRejection(err)) {
-        // 401/403: fixing the key/plan lets the SAME submit succeed. Keep the
-        // entry (don't count it toward give-up); the user resubmits after fixing.
-        // Persist the measured counts so a later session's retry resubmits THESE
-        // counts once the key/plan is fixed — never a new session's transcript.
-        fresh.entries[idx] = withPersistedCounts(fresh.entries[idx]!, counts);
-        tryWrite(store, fresh, logger);
-        return { submitted: false, retryable: false, terminal: false, gaveUp: false, error: err };
+    // Re-read + mutate under the lock, and compute the outcome from the fresh
+    // snapshot so a concurrent close/append during the POST is neither lost nor
+    // mis-reported. The entry is located by `estimate_id` (never by position).
+    const { value: outcome } = mutateStore<SubmitOutcome>(store, logger, ({ file }) => {
+      const idx = file.entries.findIndex((e) => e.estimate_id === entry.estimate_id);
+      // Already closed by another path — THIS call did not submit; say so.
+      if (idx === -1) {
+        return {
+          value: { submitted: false, retryable, terminal: false, gaveUp: false, error: err },
+          changed: false,
+        };
       }
-      // A terminal 4xx (400/404/409/413/…) will never succeed. DROP it so it
-      // can't head-of-line-block this project's queue — the manual/rollout paths
-      // always act on the newest matching entry and have no TTL cleanup. If the
-      // drop can't be persisted, still return the computed outcome (don't crash).
-      fresh.entries.splice(idx, 1);
-      tryWrite(store, fresh, logger);
-      return { submitted: false, retryable: false, terminal: true, gaveUp: false, error: err };
-    }
-    const current = fresh.entries[idx]!;
-    // Keep + bump attempts, AND persist the measured counts so a later session's
-    // retry resubmits THESE counts (the ones for this estimate's own run) rather
-    // than re-deriving them from whatever session happens to close the entry.
-    const updated: PendingEntry = {
-      ...withPersistedCounts(current, counts),
-      attempts: current.attempts + 1,
-    };
-    if (updated.attempts >= MAX_ATTEMPTS) {
-      fresh.entries.splice(idx, 1);
-      tryWrite(store, fresh, logger);
+      if (!retryable) {
+        if (isUserFixableRejection(err)) {
+          // 401/403: fixing the key/plan lets the SAME submit succeed. Keep the
+          // entry (don't count it toward give-up); the user resubmits after
+          // fixing. Persist the measured counts so a later session's retry
+          // resubmits THESE counts once the key/plan is fixed.
+          file.entries[idx] = withPersistedCounts(file.entries[idx]!, counts);
+          return {
+            value: { submitted: false, retryable: false, terminal: false, gaveUp: false, error: err },
+            changed: true,
+          };
+        }
+        // A terminal 4xx (400/404/409/413/…) will never succeed. DROP it so it
+        // can't head-of-line-block this project's queue — the manual/rollout
+        // paths always act on the newest matching entry and have no TTL cleanup.
+        file.entries.splice(idx, 1);
+        return {
+          value: { submitted: false, retryable: false, terminal: true, gaveUp: false, error: err },
+          changed: true,
+        };
+      }
+      const current = file.entries[idx]!;
+      // Keep + bump attempts, AND persist the measured counts so a later
+      // session's retry resubmits THESE counts (this estimate's own run) rather
+      // than re-deriving them from whatever session happens to close the entry.
+      const updated: PendingEntry = {
+        ...withPersistedCounts(current, counts),
+        attempts: current.attempts + 1,
+      };
+      if (updated.attempts >= MAX_ATTEMPTS) {
+        file.entries.splice(idx, 1);
+        return {
+          value: { submitted: false, retryable, terminal: false, gaveUp: true, error: err },
+          changed: true,
+        };
+      }
+      file.entries[idx] = updated;
+      return {
+        value: { submitted: false, retryable, terminal: false, gaveUp: false, error: err },
+        changed: true,
+      };
+    });
+    if (outcome.gaveUp) {
       const detail = err instanceof BudgetaryError ? err.message : String(err);
       logger.warn(
         `Budgetary: giving up on actuals for ${entry.estimate_id} after ${MAX_ATTEMPTS} attempts (${detail}).`,
       );
-      return { submitted: false, retryable, terminal: false, gaveUp: true, error: err };
     }
-    fresh.entries[idx] = updated;
-    tryWrite(store, fresh, logger);
-    return { submitted: false, retryable, terminal: false, gaveUp: false, error: err };
+    return outcome;
   }
 }
 
@@ -332,18 +391,16 @@ function sweepExpired(
   now: Date,
   logger: { warn(message: string): void },
 ): number {
-  const fresh = store.read();
-  const before = fresh.entries.length;
-  const kept = fresh.entries.filter((e) => {
-    const created = Date.parse(e.created_at);
-    if (!Number.isFinite(created)) return true; // unknown age → keep
-    const age = now.getTime() - created;
-    if (age < 0) return true; // future timestamp (clock skew) → keep
-    return age <= PENDING_TTL_MS;
+  const nowMs = now.getTime();
+  const { value: dropped } = mutateStore(store, logger, ({ file }) => {
+    const before = file.entries.length;
+    // Shared expiry rule (an unparseable/future created_at is kept — see
+    // isEntryExpired) so the append-time sweep and this one never diverge.
+    file.entries = file.entries.filter((e) => !isEntryExpired(e, nowMs));
+    const d = before - file.entries.length;
+    return { value: d, changed: d > 0 };
   });
-  const dropped = before - kept.length;
   if (dropped === 0) return 0;
-  tryWrite(store, { version: 1, entries: kept }, logger);
   logger.warn(
     `Budgetary: dropped ${dropped} pending ${
       dropped === 1 ? "estimate" : "estimates"
@@ -512,6 +569,11 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
   // whether it submitted, no-op'd, or failed.
   let outcome = "no-entry";
   let estimateId: string | undefined;
+  // Set when a non-empty trace is dropped for exceeding the cap: the totals
+  // still submit, but the composition is lost — recorded in the breadcrumb so
+  // this otherwise-silent degradation (debug would show trace_steps=0, ==a
+  // tool-free run) is legible to `pending`/`doctor`.
+  let traceNote: string | undefined;
   try {
     // Sweep ALL expired entries first — every project's, not just the one this
     // session would close — so an abandoned entry can't live forever, warning
@@ -636,6 +698,14 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
       // Fail-closed: an over-cap or empty trace becomes `undefined`, so the total
       // still submits with no `trace` rather than failing or shipping invented steps.
       const trace = capTrace(usage.trace) ?? undefined;
+      // Honest trace-drop: a NON-EMPTY trace that tripped the cap is dropped
+      // whole (a trimmed trace would misstate composition). Record it so the
+      // drop is visible instead of reading as a tool-free run.
+      const overage = traceCapOverage(usage.trace);
+      if (overage !== null) {
+        traceNote = `trace over cap: ${overage.steps} steps / ${overage.bytes} bytes — totals only`;
+        debug(`fresh path: ${traceNote}`);
+      }
       counts = {
         tokensIn: usage.tokensIn,
         tokensOut: usage.tokensOut,
@@ -718,7 +788,13 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
     throw err;
   } finally {
     const durationMs = Math.max(0, clock().getTime() - now.getTime());
-    writeBreadcrumb(args.home, { startedAt, durationMs, outcome, estimateId });
+    writeBreadcrumb(args.home, {
+      startedAt,
+      durationMs,
+      outcome,
+      estimateId,
+      ...(traceNote ? { note: traceNote } : {}),
+    });
     debug(
       `finished outcome=${outcome}${
         estimateId ? ` estimate_id=${estimateId}` : ""
@@ -1020,8 +1096,16 @@ export async function runRolloutActuals(
 
   const now = (args.now ?? (() => new Date()))();
   // Fail-closed: an empty/over-cap trace becomes undefined and only the totals
-  // submit. A Codex rollout always yields an empty trace (no per-tool data).
+  // submit. A Codex rollout always yields an empty trace (no per-tool data), so
+  // an over-cap drop here is rare — but say so plainly if it happens rather than
+  // silently shipping totals-only.
   const trace = capTrace(usage.trace) ?? undefined;
+  const traceOverage = traceCapOverage(usage.trace);
+  if (traceOverage !== null) {
+    args.out(
+      `(Trace over cap: ${traceOverage.steps} steps / ${traceOverage.bytes} bytes — submitting totals only.)`,
+    );
+  }
 
   // The submit reports its own outcome, so success is asserted from THIS call —
   // never inferred from the entry's absence (a concurrent close could make that
@@ -1111,7 +1195,10 @@ function formatBreadcrumbHeader(crumb: SessionEndBreadcrumb, now: Date): string 
     return `Last automatic session-end run: started ${age} but did not finish (interrupted).`;
   }
   const id = crumb.estimateId ? ` (${shortEstimateId(crumb.estimateId)})` : "";
-  return `Last automatic submission: ${crumb.outcome}${id}, ${age}.`;
+  // Surface a recorded degradation (e.g. a dropped-over-cap trace) alongside the
+  // outcome — the totals still submitted, but the operator should see the note.
+  const note = crumb.note ? ` [${crumb.note}]` : "";
+  return `Last automatic submission: ${crumb.outcome}${id}, ${age}.${note}`;
 }
 
 /**

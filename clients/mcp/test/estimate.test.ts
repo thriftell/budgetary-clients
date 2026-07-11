@@ -520,14 +520,17 @@ describe("runEstimateTool — honest failures & host-aware onboarding", () => {
   });
 
   it("nudges when earlier estimates for this project still await actuals", async () => {
-    // Pre-seed an older pending estimate for the same project.
+    // Pre-seed an older pending estimate for the same project. Use a recent
+    // timestamp: the tool runs with the real clock (no injected now), and
+    // append() now sweeps entries past the 24h TTL — a stale calendar date would
+    // be swept before the nudge could count it.
     mkdirSync(join(home, ".budgetary"), { recursive: true });
     writeFileSync(
       join(home, ".budgetary", "pending.json"),
       JSON.stringify({
         version: 1,
         entries: [
-          { estimate_id: "est_old", query: "earlier task", project_id: projectIdFromCwd(cwd, home), created_at: "2026-05-27T09:00:00Z", attempts: 0 },
+          { estimate_id: "est_old", query: "earlier task", project_id: projectIdFromCwd(cwd, home), created_at: new Date(Date.now() - 60_000).toISOString(), attempts: 0 },
         ],
       }),
       "utf8",

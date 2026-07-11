@@ -51,6 +51,14 @@ export interface SessionEndBreadcrumb {
   outcome?: string;
   /** The estimate the run acted on, when one was selected. Never sensitive. */
   estimateId?: string;
+  /**
+   * An optional secondary fact about the run, surfaced alongside the outcome so
+   * an otherwise-invisible degradation is legible. Currently used to record a
+   * trace dropped for exceeding the cap ("trace over cap: N steps / M bytes —
+   * totals only"): the totals still submitted, but the composition was lost.
+   * Local diagnostics only — never any transcript content or the API key.
+   */
+  note?: string;
 }
 
 /**
@@ -114,6 +122,9 @@ export function readBreadcrumb(home?: string): SessionEndBreadcrumb | null {
   }
   if (typeof o.estimateId === "string" && o.estimateId.length > 0) {
     crumb.estimateId = o.estimateId;
+  }
+  if (typeof o.note === "string" && o.note.length > 0) {
+    crumb.note = o.note;
   }
   return crumb;
 }
