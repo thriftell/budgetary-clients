@@ -148,6 +148,23 @@ export async function withRetry<T>(
         annotateAttempts(err, attemptsMade, now() - startedAt);
         throw err;
       }
+      // Retry-After budget guard: if the server's stated wait EXCEEDS the most
+      // we would ever sleep in one backoff (`maxDelay`), then sleeping the
+      // clamped `maxDelay` and retrying would fire BEFORE the server said success
+      // is possible — a guaranteed second 429 that wastes an attempt and hammers
+      // an already-strained engine the instant a too-short window "opens". Fail
+      // fast instead, propagating the rate-limit error with `retryAfterSeconds`
+      // intact so the caller can honor the FULL, honest wait. (An oversized or
+      // hostile header therefore no longer costs a wasted retry — it sheds load.)
+      if (
+        err instanceof BudgetaryRateLimitError &&
+        err.retryAfterSeconds !== null &&
+        err.retryAfterSeconds !== undefined &&
+        err.retryAfterSeconds * 1000 > maxDelay
+      ) {
+        annotateAttempts(err, attemptsMade, now() - startedAt);
+        throw err;
+      }
       const computed = Math.min(initialDelay * factor ** attempt, maxDelay);
       const jitter = random() * computed;
       let delay = jitter;
@@ -161,8 +178,9 @@ export async function withRetry<T>(
         // all seeing the same `Retry-After: 1` at a fixed-window boundary would
         // otherwise re-synchronize into one 1 s bucket and thundering-herd the
         // engine the instant the window opens; the additive jitter spreads them
-        // across [retryAfter, retryAfter+computed). Still clamped to `maxDelay`
-        // so an oversized/hostile header can't hang the client for minutes.
+        // across [retryAfter, retryAfter+computed). Here `retryAfter*1000 <=
+        // maxDelay` (a longer wait already failed fast above), so the clamp only
+        // trims the jitter tail — the floor is always honored.
         delay = Math.min(err.retryAfterSeconds * 1000 + jitter, maxDelay);
       }
       if (onRetry !== undefined) {

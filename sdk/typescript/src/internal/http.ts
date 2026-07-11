@@ -223,6 +223,20 @@ function parseRetryAfter(header: string | null): number | null {
   return null;
 }
 
+/**
+ * Parse an integer-valued `X-RateLimit-*` header (contract §7), or `null` when
+ * absent/blank/non-numeric. Uses `Number(...)` on the trimmed value and rejects
+ * anything non-finite, so a garbage or empty header degrades to `null` rather
+ * than surfacing `NaN` on the error. Never throws.
+ */
+function parseIntHeader(header: string | null): number | null {
+  if (header === null) return null;
+  const trimmed = header.trim();
+  if (trimmed.length === 0) return null;
+  const n = Number(trimmed);
+  return Number.isFinite(n) ? n : null;
+}
+
 function buildError(
   status: number,
   body: WireErrorBody | null,
@@ -242,9 +256,16 @@ function buildError(
     return new BudgetaryValidationError(args);
   }
   if (status === 429) {
+    // Additive: surface the tier's rate-limit window (contract §7) alongside
+    // Retry-After so a client can say "you've used N/M, resets in ~Ns" rather
+    // than a bare "rate limited". Only read on 429 (where the contract documents
+    // them); whether they ride 2xx is a server concern, out of scope here.
     return new BudgetaryRateLimitError({
       ...args,
       retryAfterSeconds: parseRetryAfter(headers.get("retry-after")),
+      limit: parseIntHeader(headers.get("x-ratelimit-limit")),
+      remaining: parseIntHeader(headers.get("x-ratelimit-remaining")),
+      resetSeconds: parseIntHeader(headers.get("x-ratelimit-reset")),
     });
   }
   if (status >= 500) return new BudgetaryServerError(args);

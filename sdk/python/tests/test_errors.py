@@ -81,3 +81,42 @@ def test_429_populates_retry_after_seconds(respx_mock, client):
     assert err.code == "rate_limited"
     assert err.http_status == 429
     assert err.retry_after_seconds == 7.0
+
+
+def test_429_populates_ratelimit_window_headers(respx_mock, client):
+    respx_mock.post("/v1/estimate").mock(
+        return_value=httpx.Response(
+            429,
+            headers={
+                "Retry-After": "7",
+                "X-RateLimit-Limit": "100",
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": "1717000000",
+            },
+            json=_error_body("rate_limited", message="too many"),
+        )
+    )
+
+    with pytest.raises(BudgetaryRateLimitError) as excinfo:
+        client.estimate("hi", client_request_id=None)
+
+    err = excinfo.value
+    assert err.limit == 100
+    assert err.remaining == 0
+    assert err.reset_seconds == 1717000000
+
+
+def test_429_without_ratelimit_headers_leaves_window_fields_none(respx_mock, client):
+    respx_mock.post("/v1/estimate").mock(
+        return_value=httpx.Response(
+            429, json=_error_body("rate_limited", message="too many")
+        )
+    )
+
+    with pytest.raises(BudgetaryRateLimitError) as excinfo:
+        client.estimate("hi", client_request_id=None)
+
+    err = excinfo.value
+    assert err.limit is None
+    assert err.remaining is None
+    assert err.reset_seconds is None

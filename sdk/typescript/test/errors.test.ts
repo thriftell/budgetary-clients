@@ -92,6 +92,47 @@ describe("HTTP status to error mapping", () => {
     expect(rate.retryAfterSeconds).toBe(7);
   });
 
+  it("429 → parses X-RateLimit-Limit/Remaining/Reset onto the error (§7)", async () => {
+    handle.use(
+      http.post(`${TEST_BASE_URL}/v1/estimate`, () =>
+        HttpResponse.json(errorBody("rate_limited", "too many"), {
+          status: 429,
+          headers: {
+            "Retry-After": "7",
+            "X-RateLimit-Limit": "100",
+            "X-RateLimit-Remaining": "0",
+            "X-RateLimit-Reset": "1717000000",
+          },
+        }),
+      ),
+    );
+
+    const err = (await client()
+      .estimate("test", { clientRequestId: null })
+      .catch((e: unknown) => e)) as BudgetaryRateLimitError;
+
+    expect(err).toBeInstanceOf(BudgetaryRateLimitError);
+    expect(err.limit).toBe(100);
+    expect(err.remaining).toBe(0);
+    expect(err.resetSeconds).toBe(1717000000);
+  });
+
+  it("429 without X-RateLimit headers leaves the window fields null (never NaN)", async () => {
+    handle.use(
+      http.post(`${TEST_BASE_URL}/v1/estimate`, () =>
+        HttpResponse.json(errorBody("rate_limited", "too many"), { status: 429 }),
+      ),
+    );
+
+    const err = (await client()
+      .estimate("test", { clientRequestId: null })
+      .catch((e: unknown) => e)) as BudgetaryRateLimitError;
+
+    expect(err.limit).toBeNull();
+    expect(err.remaining).toBeNull();
+    expect(err.resetSeconds).toBeNull();
+  });
+
   it("annotates a returned error with attempts + totalElapsedMs (O-6)", async () => {
     // The client (maxRetries: 0) makes exactly one attempt, so the retry wrapper
     // annotates the thrown error with attempts=1 and a numeric elapsed.

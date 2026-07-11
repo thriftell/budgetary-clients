@@ -1,4 +1,4 @@
-import { BudgetaryNetworkError } from "./errors.js";
+import { BudgetaryNetworkError, BudgetaryValidationError } from "./errors.js";
 import { HttpClient, type HttpClientConfig } from "./internal/http.js";
 import type { RetryInfo } from "./internal/retry.js";
 import { assertAllowedBaseUrl } from "./internal/url.js";
@@ -138,6 +138,18 @@ export class BudgetaryClient {
     query: string,
     opts: EstimateCallOptions = {},
   ): Promise<EstimateResponse> {
+    // Reject an empty/whitespace query LOCALLY — it can only earn a billed 400.
+    // Mirrors the MCP tool's trim-guard; throws the same validation type a
+    // server 400 would, but with `httpStatus: null` to mark it client-side, so
+    // no request (and no idempotency key) ever reaches the wire.
+    if (typeof query !== "string" || query.trim().length === 0) {
+      throw new BudgetaryValidationError({
+        code: "invalid_request",
+        message: "estimate query must be a non-empty string",
+        httpStatus: null,
+        requestId: null,
+      });
+    }
     const clientRequestId = resolveClientRequestId(opts.clientRequestId);
     const body: Record<string, unknown> = { query };
     if (opts.model !== undefined) body.model = opts.model;

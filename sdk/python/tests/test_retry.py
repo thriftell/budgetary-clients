@@ -122,28 +122,57 @@ def test_retry_after_jitter_desyncs_a_correlated_fleet():
     assert a != b  # de-synced
 
 
-def test_retry_after_is_clamped_to_max_delay():
+def test_retry_after_over_max_delay_fails_fast():
+    sleeps: list[float] = []
+    attempts = {"n": 0}
+
+    def fn() -> str:
+        attempts["n"] += 1
+        raise _rate_limit_error(retry_after=9999.0)  # 9,999,000 ms ≫ max_delay
+
+    with pytest.raises(BudgetaryRateLimitError) as excinfo:
+        with_retry(
+            fn,
+            max_retries=3,
+            max_delay_ms=60_000,
+            sleep=lambda s: sleeps.append(s),
+            random_fn=lambda: 1.0,
+        )
+
+    # Retry-After (9,999,000 ms) > max_delay_ms (60 s): sleeping the clamped 60 s
+    # and retrying would fire long before the server said success is possible, so
+    # we DON'T sleep and DON'T retry — the rate-limit error propagates with
+    # retry_after_seconds intact so the caller honors the full wait. Parity with
+    # the TS SDK.
+    assert attempts["n"] == 1
+    assert len(sleeps) == 0
+    assert excinfo.value.retry_after_seconds == 9999.0
+    assert excinfo.value.attempts == 1
+
+
+def test_retry_after_within_max_delay_still_retries():
+    # Boundary from the other side: a wait at/under max_delay_ms is honored by
+    # sleeping (the floor), not by failing fast.
     sleeps: list[float] = []
     attempts = {"n": 0}
 
     def fn() -> str:
         attempts["n"] += 1
         if attempts["n"] == 1:
-            raise _rate_limit_error(retry_after=9999.0)  # 9,999,000 ms
+            raise _rate_limit_error(retry_after=3.0)  # 3000 ms <= max_delay
         return "ok"
 
-    with_retry(
+    result = with_retry(
         fn,
         max_retries=3,
-        max_delay_ms=60_000,
+        max_delay_ms=5_000,
         sleep=lambda s: sleeps.append(s),
-        random_fn=lambda: 1.0,
+        random_fn=lambda: 0.0,  # no jitter → delay is exactly the 3 s floor
     )
 
-    assert len(sleeps) == 1
-    # Retry-After (9,999,000 ms) is clamped to max_delay_ms (60 s), so a huge or
-    # hostile header can't stall the client for minutes (parity with the TS SDK).
-    assert sleeps[0] == 60.0
+    assert result == "ok"
+    assert attempts["n"] == 2
+    assert sleeps == [3.0]
 
 
 def test_non_retryable_error_does_not_retry():

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 
 from budgetary import (
     ActualsResponse,
+    BudgetaryValidationError,
     Distribution,
     EstimateResponse,
     LedgerActual,
@@ -103,6 +105,30 @@ def test_estimate_void_response_does_not_raise(respx_mock, client):
     res = client.estimate("???", client_request_id=None)
     assert res.void is True
     assert res.distribution is None
+
+
+def test_estimate_rejects_empty_query_without_hitting_wire(respx_mock, client):
+    # E-2: an empty/whitespace query can only earn a billed 400, so it is
+    # rejected LOCALLY. respx would record a call if one were made; assert none is.
+    route = respx_mock.post("/v1/estimate").mock(
+        return_value=httpx.Response(200, json=_estimate_body())
+    )
+    for q in ["", "   ", "\n\t "]:
+        with pytest.raises(BudgetaryValidationError) as excinfo:
+            client.estimate(q)
+        # http_status None marks it client-side — the request never left.
+        assert excinfo.value.http_status is None
+    assert not route.called
+
+
+def test_estimate_accepts_query_with_surrounding_whitespace(respx_mock, client):
+    # The guard rejects only EMPTY/whitespace-only input; real content with
+    # surrounding spaces still goes to the wire unchanged.
+    respx_mock.post("/v1/estimate").mock(
+        return_value=httpx.Response(200, json=_estimate_body())
+    )
+    res = client.estimate("  real task  ", client_request_id=None)
+    assert isinstance(res, EstimateResponse)
 
 
 def test_submit_actuals_posts_body_and_parses_202(respx_mock, client):
