@@ -17,6 +17,8 @@ each, so `import` and `require` both work from TypeScript and JavaScript.
 ```ts
 import { BudgetaryClient, normalizeScenario } from "@budgetary/sdk";
 
+// A free `bg_test_` key works immediately for development; `bg_live_` is the
+// production key (and must be on an active plan). Get one at https://budgetary.tools
 const client = new BudgetaryClient({ apiKey: process.env.BUDGETARY_API_KEY! });
 
 const estimate = await client.estimate("fix the flaky test in the payments service", {

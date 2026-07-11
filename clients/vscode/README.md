@@ -30,12 +30,14 @@ The extension reads the API key from the same locations as the Claude Code plugi
 2. `~/.budgetary/config.json` → `{ "api_key": "bg_...", "base_url": "..." }` (optional `base_url`).
 
 ```bash
-export BUDGETARY_API_KEY=bg_live_...
+export BUDGETARY_API_KEY=bg_test_...
 
 # or, persistently:
 mkdir -p ~/.budgetary
-echo '{ "api_key": "bg_live_..." }' > ~/.budgetary/config.json
+echo '{ "api_key": "bg_test_..." }' > ~/.budgetary/config.json
 ```
+
+A **`bg_test_`** key is the free testing tier and works immediately; **`bg_live_`** is the production key (and must be on an active plan).
 
 If neither is set, the dashboard opens a **Configure your key** panel instead of crashing. The API key never appears in webview HTML, error messages, or logs.
 
