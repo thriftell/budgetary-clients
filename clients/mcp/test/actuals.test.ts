@@ -1217,6 +1217,315 @@ describe("runAutoActuals", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Cross-session actual pairing (P-B1). The auto path must never attach a LATER
+// session's transcript to an OLDER estimate. Two guards: (1) a failed submit
+// persists its OWN measured counts so a later retry resubmits those, never a new
+// transcript; (2) a fresh submit is bound to the session (started_at) so a
+// stale entry isn't paired with foreign usage.
+// ---------------------------------------------------------------------------
+
+describe("runAutoActuals — cross-session retry never mis-pairs (P-B1)", () => {
+  const SESSION_START = "2026-05-27T09:14:00Z"; // NOW − 1h
+  const BEFORE_SESSION = "2026-05-27T08:14:00Z"; // NOW − 2h (prior session, within TTL)
+
+  // Part 1: an entry that carries persisted counts from a prior FAILED submit is
+  // retried with THOSE counts — never the injected (different-session) usage.
+  it("resubmits an entry's PERSISTED counts, never the running session's transcript", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        {
+          estimate_id: "est_A",
+          query: "q",
+          project_id: projectIdFromCwd(cwd, home),
+          created_at: RECENT,
+          attempts: 1,
+          // Persisted by est_A's own (failed) submit in a PRIOR session:
+          tokens_in: 111,
+          tokens_out: 222,
+          success: true,
+          duration_ms: 5000,
+          has_trace: false,
+        },
+      ],
+    });
+    const fake = makeFakeClient();
+
+    await runAutoActuals({
+      payload: { transcript_path: "/tmp/t.jsonl", reason: "clear" },
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      stderr: { write: () => {} },
+      clientFactory: () => asClient(fake),
+      // A DIFFERENT session's usage — must NEVER be submitted under est_A.
+      readUsage: () => ({ tokensIn: 999999, tokensOut: 888888, trace: [] }),
+    });
+
+    expect(fake.submitActuals).toHaveBeenCalledTimes(1);
+    const sent = fake.submitActuals.mock.calls[0]![0];
+    expect(sent.estimateId).toBe("est_A");
+    expect(sent.tokensIn).toBe(111); // PERSISTED counts …
+    expect(sent.tokensOut).toBe(222);
+    expect(sent.tokensIn).not.toBe(999999); // … NOT the injected session's
+    // Retry sends totals only; the original trace was not persisted.
+    expect(sent.trace).toBeUndefined();
+    expect(readPending(home).entries).toEqual([]); // closed on success
+  });
+
+  // Part 1 (the persistence half): a failed submit stamps its counts on the kept
+  // entry so the NEXT session's run picks them up.
+  it("persists measured counts onto the entry when a submit fails (retryable)", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_fail", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient(async () => {
+      throw new BudgetaryError({ code: "internal_error", message: "boom", httpStatus: 500, requestId: "r" });
+    });
+
+    await runAutoActuals({
+      payload: { transcript_path: "/tmp/t.jsonl", reason: "clear" },
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      stderr: { write: () => {} },
+      clientFactory: () => asClient(fake),
+      readUsage: () => ({ tokensIn: 4242, tokensOut: 1717, trace: [] }),
+    });
+
+    const entry = readPending(home).entries[0]! as unknown as Record<string, unknown>;
+    expect(entry.attempts).toBe(1);
+    expect(entry.tokens_in).toBe(4242);
+    expect(entry.tokens_out).toBe(1717);
+    expect(entry.success).toBe(true);
+    expect(typeof entry.duration_ms).toBe("number");
+  });
+
+  // Part 2: with a session boundary (started_at), a fresh entry that predates the
+  // session is NOT closed with this session's usage — submit nothing.
+  it("submits NOTHING for a fresh entry that predates the session (started_at bind)", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        // Fresh (no persisted counts), created BEFORE this session began.
+        { estimate_id: "est_prior", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: BEFORE_SESSION, attempts: 1 },
+      ],
+    });
+    const fake = makeFakeClient();
+
+    await runAutoActuals({
+      payload: { transcript_path: "/tmp/t.jsonl", reason: "clear", started_at: SESSION_START },
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      stderr: { write: () => {} },
+      clientFactory: () => asClient(fake),
+      readUsage: () => ({ tokensIn: 999999, tokensOut: 888888, trace: [] }),
+    });
+
+    // Not ours + no persisted counts → nothing submitted, entry left for retry/TTL.
+    expect(fake.submitActuals).not.toHaveBeenCalled();
+    expect(readPending(home).entries.map((e) => e.estimate_id)).toEqual(["est_prior"]);
+  });
+
+  // Part 2 happy side: a fresh entry created DURING the session still submits.
+  it("submits a fresh entry created during the session (started_at satisfied)", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_now", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient();
+
+    await runAutoActuals({
+      payload: { transcript_path: "/tmp/t.jsonl", reason: "clear", started_at: SESSION_START },
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      stderr: { write: () => {} },
+      clientFactory: () => asClient(fake),
+      readUsage: () => ({ tokensIn: 500, tokensOut: 250, trace: [] }),
+    });
+
+    const sent = fake.submitActuals.mock.calls[0]![0];
+    expect(sent.estimateId).toBe("est_now");
+    expect(sent.tokensIn).toBe(500);
+  });
+
+  // A v1 file (no persisted-count fields) loads and takes the fresh path.
+  it("treats a v1 entry with no persisted counts as fresh", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_v1", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient();
+
+    await runAutoActuals({
+      payload: { transcript_path: "/tmp/t.jsonl", reason: "clear" },
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      stderr: { write: () => {} },
+      clientFactory: () => asClient(fake),
+      readUsage: () => ({ tokensIn: 77, tokensOut: 33, trace: [] }),
+    });
+
+    const sent = fake.submitActuals.mock.calls[0]![0];
+    expect(sent.tokensIn).toBe(77); // fresh transcript counts
+  });
+
+  // Corrupt persisted counts (e.g. a partial write) are ignored → fresh path,
+  // never submitted as a fabricated number.
+  it("ignores corrupt persisted counts and falls back to the fresh path", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        {
+          estimate_id: "est_corrupt",
+          query: "q",
+          project_id: projectIdFromCwd(cwd, home),
+          created_at: RECENT,
+          attempts: 1,
+          // A partial/garbage write: tokens_in is a string, not a number.
+          tokens_in: "garbage" as unknown as number,
+          tokens_out: 222,
+          success: true,
+          duration_ms: 5000,
+        },
+      ],
+    });
+    const fake = makeFakeClient();
+
+    await runAutoActuals({
+      payload: { transcript_path: "/tmp/t.jsonl", reason: "clear" },
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      stderr: { write: () => {} },
+      clientFactory: () => asClient(fake),
+      readUsage: () => ({ tokensIn: 55, tokensOut: 66, trace: [] }),
+    });
+
+    const sent = fake.submitActuals.mock.calls[0]![0];
+    // Fresh path used (corrupt persisted counts ignored), never "garbage".
+    expect(sent.tokensIn).toBe(55);
+    expect(sent.tokensOut).toBe(66);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TTL sweep (P-A4/B2/T1): expired entries from ALL projects are dropped (not
+// just the one this session would close), with a single honest warning; an
+// unparseable/future created_at has an unknown age and is never discarded.
+// ---------------------------------------------------------------------------
+
+describe("runAutoActuals — TTL sweep", () => {
+  const EXPIRED = "2026-05-25T09:00:00Z"; // > 24h before NOW (2026-05-27T10:14)
+
+  it("sweeps ALL expired entries incl. an abandoned other-project one, warning once", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_abandoned", query: "q", project_id: "0000000other0000", created_at: EXPIRED, attempts: 2 },
+        { estimate_id: "est_mine_old", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: EXPIRED, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient();
+    const errs: string[] = [];
+
+    const code = await runAutoActuals({
+      payload: { transcript_path: "/tmp/t.jsonl", reason: "clear" },
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      stderr: { write: (s) => errs.push(s) },
+      clientFactory: () => asClient(fake),
+      readUsage: () => ({ tokensIn: 5, tokensOut: 5, trace: [] }),
+    });
+
+    expect(code).toBe(0);
+    // The abandoned OTHER-project entry — which no per-entry drop would ever have
+    // selected — is swept too.
+    expect(readPending(home).entries).toEqual([]);
+    expect(fake.submitActuals).not.toHaveBeenCalled();
+    expect(errs.join("")).toContain("dropped 2 pending estimates past the 24h retry window");
+  });
+
+  it("sweeps an expired sibling but still submits the recent entry", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_old", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: EXPIRED, attempts: 0 },
+        { estimate_id: "est_recent", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient();
+
+    await runAutoActuals({
+      payload: { transcript_path: "/tmp/t.jsonl", reason: "clear" },
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      stderr: { write: () => {} },
+      clientFactory: () => asClient(fake),
+      readUsage: () => ({ tokensIn: 7, tokensOut: 8, trace: [] }),
+    });
+
+    expect(fake.submitActuals.mock.calls[0]![0].estimateId).toBe("est_recent");
+    expect(readPending(home).entries).toEqual([]); // old swept, recent submitted
+  });
+
+  it("KEEPS an entry with an unparseable created_at, and never mis-pairs onto it", async () => {
+    // Regression for the mis-pair the adversarial review caught: the sweep keeps
+    // an unknown-age (unparseable created_at) entry, so it reaches selection. It
+    // belongs to THIS project (so newestForProject would pick it), yet a FRESH
+    // submit must NOT attach this session's usage to an estimate of unknown
+    // provenance — the fresh-path age guard blocks it. (The earlier version of
+    // this test used a FOREIGN project_id, which masked the bug via a null select.)
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_weird", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: "not-a-date", attempts: 0 },
+      ],
+    });
+    const fake = makeFakeClient();
+    const errs: string[] = [];
+
+    await runAutoActuals({
+      payload: { transcript_path: "/tmp/t.jsonl", reason: "clear" },
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      stderr: { write: (s) => errs.push(s) },
+      clientFactory: () => asClient(fake),
+      readUsage: () => ({ tokensIn: 999999, tokensOut: 888888, trace: [] }),
+    });
+
+    // Unknown age → kept (not swept), and NOT submitted (age guard blocks the
+    // fresh mis-pair). Same guard covers a stale entry that survives a
+    // sweep-write fault.
+    expect(fake.submitActuals).not.toHaveBeenCalled();
+    expect(readPending(home).entries.map((e) => e.estimate_id)).toEqual(["est_weird"]);
+    expect(errs.join("")).not.toContain("dropped");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Store integrity under concurrency (the shared ~/.budgetary/pending.json is
 // written by multiple sessions and both plugins).
 // ---------------------------------------------------------------------------

@@ -93,12 +93,28 @@ export async function load(
   const client = new BudgetaryClient({
     apiKey: config.apiKey,
     baseUrl: config.baseUrl,
+    // No in-process retry: a 429 `Retry-After` (clamped to 60 s) or a 5xx ladder
+    // would pin the panel on "Loading…" for up to ~4 minutes. The visible
+    // Retry/refresh button IS the retry — surface the failure promptly instead.
+    maxRetries: 0,
   });
 
   try {
     // includeOrphans: pending estimates have no actuals yet; show them as rows
     // rather than hiding them (and mislabeling a non-empty ledger "No estimates").
     const page = await client.getLedger({ limit: 50, includeOrphans: true });
+    // Guard the response shape: a malformed page (entries not an array) must
+    // read as an honest "unexpected response", never throw out of the renderer.
+    if (!page || !Array.isArray(page.entries)) {
+      apply(
+        renderError(
+          "Budgetary returned an unexpected response. Please try again.",
+          null,
+          makeNonce(),
+        ),
+      );
+      return;
+    }
     apply(renderDashboard(page.entries, makeNonce()));
   } catch (err) {
     const nonce = makeNonce();

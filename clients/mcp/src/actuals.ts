@@ -124,6 +124,51 @@ function tryWrite(
   }
 }
 
+/**
+ * Stamp the measured `counts` onto a kept (failed-submit) entry so a later
+ * session's retry resubmits THESE counts. Only scalar totals are persisted; the
+ * trace is recorded as a boolean (`has_trace`) and dropped on retry — the totals
+ * are what calibration needs, and re-persisting a large trace would bloat the
+ * shared store. Preserves every other field (attempts is set by the caller).
+ */
+function withPersistedCounts(
+  entry: PendingEntry,
+  counts: ActualCounts,
+): PendingEntry {
+  return {
+    ...entry,
+    tokens_in: counts.tokensIn,
+    tokens_out: counts.tokensOut,
+    success: counts.success,
+    duration_ms: counts.durationMs,
+    has_trace: !!(counts.trace && counts.trace.length > 0),
+  };
+}
+
+/**
+ * The measured counts persisted on a prior FAILED submit, or `null` when the
+ * entry is fresh (never submitted) or its persisted fields are absent/corrupt.
+ * Re-validates every field so a partial/garbage write is ignored (fall back to a
+ * fresh read) rather than submitting a fabricated count — the store keeps v1
+ * files readable precisely because these are checked here, not trusted on read.
+ */
+function persistedCounts(entry: PendingEntry): ActualCounts | null {
+  const { tokens_in, tokens_out, success, duration_ms } = entry;
+  if (
+    typeof tokens_in !== "number" ||
+    !Number.isSafeInteger(tokens_in) ||
+    typeof tokens_out !== "number" ||
+    !Number.isSafeInteger(tokens_out) ||
+    typeof success !== "boolean" ||
+    typeof duration_ms !== "number" ||
+    !Number.isFinite(duration_ms)
+  ) {
+    return null;
+  }
+  // Retry sends totals only — the original trace was intentionally not persisted.
+  return { tokensIn: tokens_in, tokensOut: tokens_out, success, durationMs: duration_ms };
+}
+
 /** The outcome of one {@link submitActuals} call, so callers can report it honestly. */
 export interface SubmitOutcome {
   /** THIS call's POST succeeded and the entry was removed. */
@@ -229,6 +274,10 @@ export async function submitActuals(
       if (isUserFixableRejection(err)) {
         // 401/403: fixing the key/plan lets the SAME submit succeed. Keep the
         // entry (don't count it toward give-up); the user resubmits after fixing.
+        // Persist the measured counts so a later session's retry resubmits THESE
+        // counts once the key/plan is fixed — never a new session's transcript.
+        fresh.entries[idx] = withPersistedCounts(fresh.entries[idx]!, counts);
+        tryWrite(store, fresh, logger);
         return { submitted: false, retryable: false, terminal: false, gaveUp: false, error: err };
       }
       // A terminal 4xx (400/404/409/413/…) will never succeed. DROP it so it
@@ -240,8 +289,11 @@ export async function submitActuals(
       return { submitted: false, retryable: false, terminal: true, gaveUp: false, error: err };
     }
     const current = fresh.entries[idx]!;
+    // Keep + bump attempts, AND persist the measured counts so a later session's
+    // retry resubmits THESE counts (the ones for this estimate's own run) rather
+    // than re-deriving them from whatever session happens to close the entry.
     const updated: PendingEntry = {
-      ...current,
+      ...withPersistedCounts(current, counts),
       attempts: current.attempts + 1,
     };
     if (updated.attempts >= MAX_ATTEMPTS) {
@@ -257,6 +309,38 @@ export async function submitActuals(
     tryWrite(store, fresh, logger);
     return { submitted: false, retryable, terminal: false, gaveUp: false, error: err };
   }
+}
+
+/**
+ * Drop EVERY pending entry older than the TTL (not just the one this session is
+ * about to close), re-reading first so a concurrent append isn't clobbered, and
+ * warn ONCE with the count. Without this, an abandoned project's entry is
+ * immortal — nothing else ever selects it, so it never expires. An unparseable
+ * or FUTURE `created_at` has an unknown age and is deliberately KEPT (discarding
+ * it could silently lose a session's own actual); it is left for a later run.
+ */
+function sweepExpired(
+  store: PendingWriter,
+  now: Date,
+  logger: { warn(message: string): void },
+): void {
+  const fresh = store.read();
+  const before = fresh.entries.length;
+  const kept = fresh.entries.filter((e) => {
+    const created = Date.parse(e.created_at);
+    if (!Number.isFinite(created)) return true; // unknown age → keep
+    const age = now.getTime() - created;
+    if (age < 0) return true; // future timestamp (clock skew) → keep
+    return age <= PENDING_TTL_MS;
+  });
+  const dropped = before - kept.length;
+  if (dropped === 0) return;
+  tryWrite(store, { version: 1, entries: kept }, logger);
+  logger.warn(
+    `Budgetary: dropped ${dropped} pending ${
+      dropped === 1 ? "estimate" : "estimates"
+    } past the 24h retry window.`,
+  );
 }
 
 /** The newest pending entry belonging to `projectId`, or null if none match. */
@@ -311,13 +395,53 @@ function sessionProjectId(args: AutoActualsArgs): string | null {
   return projectIdFromCwd(cwd, args.home);
 }
 
+/** Small clock-skew tolerance for the started_at ↔ created_at comparison. */
+const SESSION_START_SKEW_MS = 1000;
+
 /**
- * Close out THIS session's newest pending estimate from real session usage.
- * The entry is bound to the session by `project_id` (derived from the session's
- * cwd), so an actual is never mis-paired to a different concurrent session's
- * estimate. Submits nothing unless the transcript yields token counts; drops a
- * matched entry older than 24h silently. Routes the submit through
- * {@link submitActuals}.
+ * Whether `entry` was created DURING the ending session, so this session's
+ * transcript may be attributed to it. Uses `payload.started_at` when the host
+ * provides it: an estimate created before the session began belongs to an
+ * EARLIER session and must never receive this session's usage.
+ *
+ * Today's Claude Code SessionEnd payload does NOT carry `started_at` (nor does
+ * Codex's Stop payload), so absent that signal this returns `true` and the
+ * caller falls back to the project binding it already applied — the
+ * persisted-counts RETRY path (part 1) carries the mis-pairing protection in
+ * that case, and this session binding activates automatically for any host that
+ * does send `started_at`. Bias is toward NOT mis-pairing: a genuinely stale
+ * entry is left for the TTL sweep rather than paired with foreign usage.
+ */
+function belongsToThisSession(
+  entry: PendingEntry,
+  payload: SessionEndPayload | null,
+): boolean {
+  const startedAt =
+    payload && typeof payload.started_at === "string"
+      ? Date.parse(payload.started_at)
+      : NaN;
+  if (!Number.isFinite(startedAt)) return true; // no session boundary → fall back
+  const created = Date.parse(entry.created_at);
+  if (!Number.isFinite(created)) return false; // unparseable → not demonstrably ours
+  return created >= startedAt - SESSION_START_SKEW_MS;
+}
+
+/**
+ * Close out a pending estimate at session end. Two paths, both mis-pair-safe:
+ *
+ *  - RETRY: an entry that already carries measured counts from a prior FAILED
+ *    submit (part 1) is resubmitted with THOSE counts — baked in, never
+ *    re-derived from a transcript — so a cross-session retry can't mis-attribute.
+ *  - FRESH: a never-submitted entry derives counts from THIS session's transcript
+ *    and submits them, but only when the entry belongs to this session
+ *    ({@link belongsToThisSession}) — so a later session's usage never pairs with
+ *    an older estimate.
+ *
+ * The entry is selected by `project_id` (this session's cwd hash); the retry
+ * uses its persisted counts, the fresh path is additionally session-bound.
+ * Submits nothing unless real counts are available. Expired entries (all
+ * projects) are swept first with a single warning naming the count. Routes the
+ * submit through {@link submitActuals}.
  */
 export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
   const logger = { warn: (m: string) => args.stderr.write(`${m}\n`) };
@@ -325,6 +449,14 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
     path: pendingFilePath(args.home),
     logger,
   });
+  const now = (args.now ?? (() => new Date()))();
+
+  // Sweep ALL expired entries first — every project's, not just the one this
+  // session would close — so an abandoned entry can't live forever, warning
+  // once with the count. The selected entry below is therefore within the TTL
+  // (or has an unknown/future age the sweep deliberately keeps).
+  sweepExpired(store, now, logger);
+
   const file = store.read();
   if (file.entries.length === 0) return 0;
 
@@ -332,29 +464,54 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
   const entry = newestForProject(file.entries, sessionProjectId(args));
   if (entry === null) return 0;
 
-  const now = (args.now ?? (() => new Date()))();
-  const created = Date.parse(entry.created_at);
-  if (!Number.isFinite(created) || now.getTime() - created > PENDING_TTL_MS) {
-    // Drop just this stale entry (by id, re-reading first); leave the rest.
-    const fresh = store.read();
-    if (removeById(fresh, entry.estimate_id)) tryWrite(store, fresh, logger);
-    return 0;
+  // RETRY vs FRESH. A prior FAILED submit persisted this estimate's OWN measured
+  // counts onto the entry (part 1); resubmit THOSE — baked in, so this
+  // cross-session retry can never mis-pair (it never re-reads a transcript).
+  const retryCounts = persistedCounts(entry);
+  let counts: ActualCounts;
+  if (retryCounts !== null) {
+    counts = retryCounts;
+  } else {
+    // FRESH path: this attaches THIS session's transcript to `entry`, so the
+    // selected entry must be a live, this-session estimate — never a stale one.
+    // Re-guard its age HERE and not only via the sweep: the sweep's write is
+    // best-effort (a store-write fault leaves an expired entry on disk) and it
+    // deliberately KEEPS unknown-age (unparseable created_at) entries, either of
+    // which would otherwise reach this point and mis-pair this session's tokens
+    // onto a foreign/stale estimate. (The retry path above is exempt: it submits
+    // the entry's OWN persisted counts, which cannot mis-pair.)
+    const created = Date.parse(entry.created_at);
+    if (!Number.isFinite(created) || now.getTime() - created > PENDING_TTL_MS) {
+      return 0;
+    }
+    // Bind to the session too, when the host provides a boundary (started_at).
+    if (!belongsToThisSession(entry, args.payload)) return 0;
+    if (args.payload === null) return 0;
+    const transcriptPath =
+      typeof args.payload.transcript_path === "string"
+        ? args.payload.transcript_path
+        : null;
+    if (transcriptPath === null) return 0;
+
+    // Honor the privacy opt-out: when trace detail is suppressed, the redacted
+    // `target` is omitted (the trace keeps tool/tokens/kind and the leak-free
+    // `ok`); the realized total is unaffected either way.
+    const usage = (args.readUsage ?? readTranscriptUsage)(transcriptPath, {
+      target: traceTargetEnabled(args.env),
+    });
+    if (usage === null) return 0; // no real counts → submit nothing
+
+    // Fail-closed: an over-cap or empty trace becomes `undefined`, so the total
+    // still submits with no `trace` rather than failing or shipping invented steps.
+    const trace = capTrace(usage.trace) ?? undefined;
+    counts = {
+      tokensIn: usage.tokensIn,
+      tokensOut: usage.tokensOut,
+      success: isSuccessReason(args.payload.reason),
+      durationMs: inferDurationMs(args.payload, entry, now),
+      ...(trace ? { trace } : {}),
+    };
   }
-
-  if (args.payload === null) return 0;
-  const transcriptPath =
-    typeof args.payload.transcript_path === "string"
-      ? args.payload.transcript_path
-      : null;
-  if (transcriptPath === null) return 0;
-
-  // Honor the privacy opt-out: when trace detail is suppressed, the redacted
-  // `target` is omitted (the trace keeps tool/tokens/kind and the leak-free
-  // `ok`); the realized total is unaffected either way.
-  const usage = (args.readUsage ?? readTranscriptUsage)(transcriptPath, {
-    target: traceTargetEnabled(args.env),
-  });
-  if (usage === null) return 0; // no real counts → submit nothing
 
   const resolved = resolveConfig(args.env, args.home);
   if (resolved === null) return 0; // leave the entry for a later session with a key
@@ -379,21 +536,11 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
     maxRetries: UNATTENDED_MAX_RETRIES,
   });
 
-  // Fail-closed: an over-cap or empty trace becomes `undefined`, so the total
-  // still submits with no `trace` rather than failing or shipping invented steps.
-  const trace = capTrace(usage.trace) ?? undefined;
-
   const outcome = await submitActuals({
     store,
     client,
     entry,
-    counts: {
-      tokensIn: usage.tokensIn,
-      tokensOut: usage.tokensOut,
-      success: isSuccessReason(args.payload.reason),
-      durationMs: inferDurationMs(args.payload, entry, now),
-      ...(trace ? { trace } : {}),
-    },
+    counts,
     logger,
   });
   // A terminal rejection drops the entry inside submitActuals WITHOUT a warning
