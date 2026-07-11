@@ -225,14 +225,20 @@ function parseRetryAfter(header: string | null): number | null {
 
 /**
  * Parse an integer-valued `X-RateLimit-*` header (contract §7), or `null` when
- * absent/blank/non-numeric. Uses `Number(...)` on the trimmed value and rejects
- * anything non-finite, so a garbage or empty header degrades to `null` rather
- * than surfacing `NaN` on the error. Never throws.
+ * absent/blank/non-integer. Accepts ONLY a plain base-10 integer with an
+ * optional sign — matching the Python SDK's stricter `int()`-based parse, so the
+ * same wire header yields the same value across both SDKs. A float / hex /
+ * scientific / underscore-grouped / garbage header degrades to `null` (never a
+ * fractional value on a field documented as an integer count, and never `NaN`).
+ * Never throws.
  */
 function parseIntHeader(header: string | null): number | null {
   if (header === null) return null;
   const trimmed = header.trim();
-  if (trimmed.length === 0) return null;
+  // `Number("1.5")`/`Number("0x10")`/`Number("1e3")` are all finite, so gate on
+  // the integer grammar FIRST — otherwise a non-integer header would surface as
+  // a real number here while Python's `int()` rejects it (a cross-SDK divergence).
+  if (!/^[+-]?\d+$/.test(trimmed)) return null;
   const n = Number(trimmed);
   return Number.isFinite(n) ? n : null;
 }

@@ -106,6 +106,30 @@ def test_429_populates_ratelimit_window_headers(respx_mock, client):
     assert err.reset_seconds == 1717000000
 
 
+def test_429_non_integer_ratelimit_header_degrades_to_none(respx_mock, client):
+    # A contract-violating float/hex/scientific header must NOT surface a bogus
+    # number, and must match the TS SDK (both -> None) so the two never diverge.
+    respx_mock.post("/v1/estimate").mock(
+        return_value=httpx.Response(
+            429,
+            headers={
+                "X-RateLimit-Limit": "1.5",
+                "X-RateLimit-Remaining": "0x10",
+                "X-RateLimit-Reset": "1e3",
+            },
+            json=_error_body("rate_limited", message="too many"),
+        )
+    )
+
+    with pytest.raises(BudgetaryRateLimitError) as excinfo:
+        client.estimate("hi", client_request_id=None)
+
+    err = excinfo.value
+    assert err.limit is None
+    assert err.remaining is None
+    assert err.reset_seconds is None
+
+
 def test_429_without_ratelimit_headers_leaves_window_fields_none(respx_mock, client):
     respx_mock.post("/v1/estimate").mock(
         return_value=httpx.Response(

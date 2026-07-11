@@ -117,6 +117,32 @@ describe("HTTP status to error mapping", () => {
     expect(err.resetSeconds).toBe(1717000000);
   });
 
+  it("429 with a non-integer X-RateLimit header degrades to null (parity with Python int())", async () => {
+    // A contract-violating float/hex/scientific header must NOT surface a
+    // fractional value on an integer field, and must match the Python SDK's
+    // int()-based reject (both → null) so the two SDKs never diverge.
+    handle.use(
+      http.post(`${TEST_BASE_URL}/v1/estimate`, () =>
+        HttpResponse.json(errorBody("rate_limited", "too many"), {
+          status: 429,
+          headers: {
+            "X-RateLimit-Limit": "1.5",
+            "X-RateLimit-Remaining": "0x10",
+            "X-RateLimit-Reset": "1e3",
+          },
+        }),
+      ),
+    );
+
+    const err = (await client()
+      .estimate("test", { clientRequestId: null })
+      .catch((e: unknown) => e)) as BudgetaryRateLimitError;
+
+    expect(err.limit).toBeNull();
+    expect(err.remaining).toBeNull();
+    expect(err.resetSeconds).toBeNull();
+  });
+
   it("429 without X-RateLimit headers leaves the window fields null (never NaN)", async () => {
     handle.use(
       http.post(`${TEST_BASE_URL}/v1/estimate`, () =>

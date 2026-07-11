@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
 from email.utils import parsedate_to_datetime
 from typing import Any, Callable, TypeVar
@@ -88,12 +89,16 @@ def _parse_retry_after(header: str | None) -> float | None:
 
 def _parse_int_header(header: str | None) -> int | None:
     """Parse an integer-valued ``X-RateLimit-*`` header (contract §7), or ``None``
-    when absent/blank/non-integer. Conservative: only a clean integer literal is
-    accepted, so a garbage or float-shaped header degrades to ``None`` rather
-    than surfacing a bogus number on the error. Never raises."""
+    when absent/blank/non-integer. Accepts ONLY a plain base-10 integer with an
+    optional sign, so a garbage / float-shaped / underscore-grouped header
+    degrades to ``None`` rather than surfacing a bogus number — identical grammar
+    to the TS SDK's ``parseIntHeader`` (bare ``int()`` would additionally accept
+    ``"1_000"``, a cross-SDK divergence). Never raises."""
     if header is None:
         return None
     trimmed = header.strip()
+    if not re.fullmatch(r"[+-]?\d+", trimmed):
+        return None
     try:
         return int(trimmed)
     except (TypeError, ValueError):
