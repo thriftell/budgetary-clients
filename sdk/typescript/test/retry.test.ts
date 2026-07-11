@@ -374,6 +374,33 @@ describe("BudgetaryClient — signal aborts an in-flight estimate (R-2 integrati
     expect(err).toBeInstanceOf(BudgetaryNetworkError);
     expect((err as BudgetaryError).code).toBe("abort");
   }, 15_000);
+
+  it("classifies a host abort with a non-Error reason as code 'abort' (not 'network')", async () => {
+    // The MCP host aborts with a STRING reason (CancelledNotification.reason is
+    // an optional string, forwarded as controller.abort(reason)). undici then
+    // rejects the fetch with that raw string — not an Error — so classifying by
+    // the rejection's shape would mislabel a deliberate cancellation 'network'.
+    handle.use(
+      http.post(`${TEST_BASE_URL}/v1/estimate`, async () => {
+        await delay(5000);
+        return HttpResponse.json({ estimate_id: "never", void: true });
+      }),
+    );
+    const client = new BudgetaryClient({
+      apiKey: TEST_API_KEY,
+      baseUrl: TEST_BASE_URL,
+      maxRetries: 5,
+    });
+    const controller = new AbortController();
+    const pending = client
+      .estimate("hi", { clientRequestId: null, signal: controller.signal })
+      .catch((e: unknown) => e);
+    setTimeout(() => controller.abort("host cancelled"), 10);
+    const err = await pending;
+    expect(err).toBeInstanceOf(BudgetaryNetworkError);
+    // Signal-state classification wins over the raw string rejection.
+    expect((err as BudgetaryError).code).toBe("abort");
+  }, 15_000);
 });
 
 describe("BudgetaryClient retry integration", () => {
