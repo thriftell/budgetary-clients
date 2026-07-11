@@ -59,6 +59,25 @@ export interface SessionEndBreadcrumb {
    * Local diagnostics only — never any transcript content or the API key.
    */
   note?: string;
+  /**
+   * Realized token counts the run measured/submitted, so `pending` / `doctor`
+   * can close the loop for the human — "forecast ~M → actual N" — on the default
+   * auto path where the actual is otherwise submitted silently. Present only when
+   * the run determined real counts (a no-entry / no-usage / no-key run omits
+   * them). NEVER model-supplied; NEVER a dollar figure. These are aggregate
+   * totals only — no transcript content.
+   */
+  tokensIn?: number;
+  tokensOut?: number;
+  /**
+   * The p10/p50/p90 FORECAST band the acted-on estimate carried (copied from the
+   * pending entry, which captured it at estimate time). Lets a reader place the
+   * actual within/above/below the band. Present only alongside
+   * {@link tokensIn}/{@link tokensOut} and a banded estimate.
+   */
+  forecastP10?: number;
+  forecastP50?: number;
+  forecastP90?: number;
 }
 
 /**
@@ -125,6 +144,19 @@ export function readBreadcrumb(home?: string): SessionEndBreadcrumb | null {
   }
   if (typeof o.note === "string" && o.note.length > 0) {
     crumb.note = o.note;
+  }
+  // Additive numeric fields: copy each only when it is a finite number, so a
+  // partial/garbage write degrades to "not present" rather than surfacing NaN in
+  // a rendered "forecast → actual" line.
+  for (const k of [
+    "tokensIn",
+    "tokensOut",
+    "forecastP10",
+    "forecastP50",
+    "forecastP90",
+  ] as const) {
+    const v = o[k];
+    if (typeof v === "number" && Number.isFinite(v)) crumb[k] = v;
   }
   return crumb;
 }

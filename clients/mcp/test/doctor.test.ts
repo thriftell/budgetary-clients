@@ -210,4 +210,20 @@ describe("runDoctor — surfaces PR-1 local state", () => {
     const { text } = await doctor({ BUDGETARY_API_KEY: "bg_test_x" } as NodeJS.ProcessEnv, okLedger());
     expect(text).toContain("Last auto: submitted est_led, 14m ago");
   });
+
+  it("closes the loop on the breadcrumb line when it carries counts + band (T-1)", async () => {
+    writeBreadcrumb(home, {
+      startedAt: "2026-05-27T10:00:00Z",
+      durationMs: 3,
+      outcome: "submitted",
+      estimateId: "est_led",
+      tokensIn: 20000,
+      tokensOut: 32000,
+      forecastP10: 12500,
+      forecastP50: 48000,
+      forecastP90: 220000,
+    });
+    const { text } = await doctor({ BUDGETARY_API_KEY: "bg_test_x" } as NodeJS.ProcessEnv, okLedger());
+    expect(text).toContain("actual 52,000 tokens vs forecast ~48,000 (within p10–p90)");
+  });
 });

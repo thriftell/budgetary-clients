@@ -232,6 +232,23 @@ function readConfigBaseUrl(home?: string): string | null {
   return null;
 }
 
+/** The key's public prefix — NEVER the value. `unrecognized` for any other shape. */
+export type KeyPrefix = "bg_live_" | "bg_test_" | "unrecognized";
+
+/**
+ * Classify a resolved key by its documented prefix — NEVER the value. Shared so
+ * `doctor`, the estimate footer, and the startup banner all label free-vs-paid
+ * the same way (free-vs-paid must be visible where spending happens, not only in
+ * `doctor`). `bg_live_` = paid/production; `bg_test_` = free testing tier.
+ */
+export function keyPrefixOf(apiKey: string): KeyPrefix {
+  return apiKey.startsWith("bg_live_")
+    ? "bg_live_"
+    : apiKey.startsWith("bg_test_")
+      ? "bg_test_"
+      : "unrecognized";
+}
+
 /** Non-secret, printable view of how config resolved — for `doctor`. */
 export interface ConfigDiagnostics {
   /** `env` / `config` when a key resolved; `none` / `unreadable` otherwise. */
@@ -239,7 +256,7 @@ export interface ConfigDiagnostics {
   /** The resolved base URL, or `null` when no key resolved. */
   baseUrl: string | null;
   /** The key's public prefix — NEVER the value — or `null` when no key resolved. */
-  keyPrefix: "bg_live_" | "bg_test_" | "unrecognized" | null;
+  keyPrefix: KeyPrefix | null;
   /** Human warnings about a refused or shadowed config `base_url` (may be empty). */
   warnings: string[];
 }
@@ -262,11 +279,7 @@ export function configDiagnostics(
 
   if (status.kind === "ok") {
     const { source, baseUrl, apiKey } = status.config;
-    const keyPrefix = apiKey.startsWith("bg_live_")
-      ? "bg_live_"
-      : apiKey.startsWith("bg_test_")
-        ? "bg_test_"
-        : "unrecognized";
+    const keyPrefix = keyPrefixOf(apiKey);
     // A config base_url that differs from the resolved one was either shadowed
     // by an env key (env source, file never read) or refused (config source,
     // non-HTTPS → prod default). Either surprises the operator; name it.

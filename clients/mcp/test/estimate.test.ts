@@ -183,6 +183,58 @@ describe("runEstimateTool — happy path", () => {
     expect(file.entries[0].estimate_id).toBe("est_01ABC");
     expect(file.entries[0].attempts).toBe(0);
     expect(file.entries[0].query).toBe("fix the flaky test");
+    // T-1: the forecast band is persisted LOCALLY so the loop can close later.
+    expect(file.entries[0].forecast_p10).toBe(12500);
+    expect(file.entries[0].forecast_p50).toBe(48000);
+    expect(file.entries[0].forecast_p90).toBe(220000);
+  });
+
+  it("renders the worst case, validity window, and the key tier where spend happens", async () => {
+    const fake = makeFakeClient(async () => happyEstimate());
+    const result = await runEstimateTool({
+      query: "fix the flaky test",
+      env: { BUDGETARY_API_KEY: "bg_test_dummy" } as NodeJS.ProcessEnv,
+      cwd,
+      home,
+      clientFactory: () => asClient(fake),
+    });
+    expect(result.text).toContain("Worst case (p90): ~220,000 tokens");
+    expect(result.text).toContain("Valid until:");
+    // Free-vs-paid visible at the point of spend (bg_test_ → free).
+    expect(result.text).toContain("Key: bg_test_ (free)");
+    // Never a dollar figure.
+    expect(result.text).not.toContain("$");
+  });
+
+  it("hints when this EXACT task is already forecast + unexpired (a likely double-bill)", async () => {
+    // Pre-seed an unexpired pending entry with the IDENTICAL query for this project.
+    mkdirSync(join(home, ".budgetary"), { recursive: true });
+    writeFileSync(
+      join(home, ".budgetary", "pending.json"),
+      JSON.stringify({
+        version: 1,
+        entries: [
+          {
+            estimate_id: "est_prior",
+            query: "fix the flaky test",
+            project_id: projectIdFromCwd(cwd, home),
+            created_at: new Date(Date.now() - 60_000).toISOString(),
+            attempts: 0,
+          },
+        ],
+      }),
+      "utf8",
+    );
+    const fake = makeFakeClient(async () => happyEstimate());
+    const result = await runEstimateTool({
+      query: "fix the flaky test",
+      env: { BUDGETARY_API_KEY: "bg_test_dummy" } as NodeJS.ProcessEnv,
+      cwd,
+      home,
+      clientFactory: () => asClient(fake),
+    });
+    expect(result.text).toContain("UNEXPIRED estimate for this exact task");
+    expect(result.text).toContain("re-estimating bills again");
   });
 
   it("defaults host to \"mcp\" when BUDGETARY_HOST is unset", async () => {

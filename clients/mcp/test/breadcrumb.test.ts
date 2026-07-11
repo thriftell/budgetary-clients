@@ -38,6 +38,53 @@ describe("breadcrumb round-trip", () => {
     });
   });
 
+  it("round-trips the realized counts + forecast band (the loop-closing fields)", () => {
+    writeBreadcrumb(home, {
+      startedAt: "2026-05-27T10:00:00.000Z",
+      durationMs: 1234,
+      outcome: "submitted",
+      estimateId: "est_abc",
+      tokensIn: 20000,
+      tokensOut: 32000,
+      forecastP10: 12500,
+      forecastP50: 48000,
+      forecastP90: 220000,
+    });
+    expect(readBreadcrumb(home)).toEqual({
+      startedAt: "2026-05-27T10:00:00.000Z",
+      durationMs: 1234,
+      outcome: "submitted",
+      estimateId: "est_abc",
+      tokensIn: 20000,
+      tokensOut: 32000,
+      forecastP10: 12500,
+      forecastP50: 48000,
+      forecastP90: 220000,
+    });
+  });
+
+  it("drops non-finite counts/band fields rather than trusting them", () => {
+    writeFileSync(
+      lastSessionEndPath(home),
+      JSON.stringify({
+        startedAt: "t",
+        outcome: "submitted",
+        durationMs: 1,
+        tokensIn: "nope",
+        tokensOut: 5,
+        forecastP50: null,
+      }),
+      "utf8",
+    );
+    // tokensIn ("nope") and forecastP50 (null) are dropped; tokensOut (5) survives.
+    expect(readBreadcrumb(home)).toEqual({
+      startedAt: "t",
+      outcome: "submitted",
+      durationMs: 1,
+      tokensOut: 5,
+    });
+  });
+
   it("reads back a start-ONLY record as the interrupted-run marker", () => {
     // A start-only record (no durationMs/outcome) is what survives a SIGKILL.
     writeBreadcrumb(home, { startedAt: "2026-05-27T10:00:00.000Z" });

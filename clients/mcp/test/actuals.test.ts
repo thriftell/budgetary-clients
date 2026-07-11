@@ -22,6 +22,7 @@ import {
 import { PendingStore, type PendingEntry, type PendingStoreFile } from "../src/store.js";
 import { projectIdFromCwd } from "../src/tools/estimate.js";
 import { readTranscriptTotals } from "../src/transcript.js";
+import * as transcriptModule from "../src/transcript.js";
 import { readBreadcrumb, writeBreadcrumb } from "../src/breadcrumb.js";
 import { runOnSessionEndCli, TOOLS, TOOL_NAME } from "../src/server.js";
 
@@ -196,6 +197,115 @@ describe("runManualActuals", () => {
     expect(readPending(home).entries).toEqual([]);
     // The confirmation names the estimate id (O-4), not just "Actuals submitted".
     expect(out.join("\n")).toContain("Actuals submitted (est_manual).");
+  });
+
+  it("appends a forecast check when the entry carried a band (T-1)", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        {
+          estimate_id: "est_mband", query: "q", project_id: projectIdFromCwd(cwd, home),
+          created_at: RECENT, attempts: 0,
+          forecast_p10: 100, forecast_p50: 500, forecast_p90: 2000,
+        },
+      ],
+    });
+    const out: string[] = [];
+    await runManualActuals({
+      env: ENV,
+      home,
+      out: (l) => out.push(l),
+      prompt: scriptedPrompt(["300", "180", "y", "9"]),
+      clientFactory: () => asClient(makeFakeClient()),
+    });
+    expect(out.join("\n")).toContain(
+      "Forecast check: actual 480 tokens vs forecast ~500 (within p10–p90)",
+    );
+  });
+
+  it("--estimate-id closes a specific already-billed estimate with NO pending row (B-1)", async () => {
+    // Empty store — the estimate was billed but never stored. --estimate-id must
+    // still submit it (bound to the id alone) for free, no pending row required.
+    writePending(home, { version: 1, entries: [] });
+    const fake = makeFakeClient();
+    const out: string[] = [];
+    const code = await runManualActuals({
+      env: ENV,
+      home,
+      estimateId: "est_short",
+      out: (l) => out.push(l),
+      prompt: scriptedPrompt(["1000", "2000", "y", "500"]),
+      clientFactory: () => asClient(fake),
+    });
+    expect(code).toBe(0);
+    expect(fake.submitActuals).toHaveBeenCalledTimes(1);
+    expect(fake.submitActuals.mock.calls[0]![0].estimateId).toBe("est_short");
+    expect(out.join("\n")).toContain("Reporting actuals for estimate est_short:");
+    expect(out.join("\n")).toContain("Actuals submitted (est_short).");
+  });
+
+  it("--estimate-id on a transport failure tells the user to re-run (not 'still pending')", async () => {
+    writePending(home, { version: 1, entries: [] });
+    const fake = makeFakeClient(async () => {
+      throw new BudgetaryError({ code: "unavailable", message: "down", httpStatus: 503, requestId: null });
+    });
+    const out: string[] = [];
+    const code = await runManualActuals({
+      env: ENV,
+      home,
+      estimateId: "est_short",
+      out: (l) => out.push(l),
+      prompt: scriptedPrompt(["1000", "2000", "y", "500"]),
+      clientFactory: () => asClient(fake),
+    });
+    expect(code).toBe(1);
+    const text = out.join("\n");
+    expect(text).toContain("report-actual --estimate-id est_short");
+    // A by-id submit isn't in the store, so it must NOT claim "still pending".
+    expect(text).not.toContain("still pending");
+  });
+
+  it("--estimate-id on a TERMINAL 4xx says it can't succeed (not a key/plan retry loop)", async () => {
+    // The synthetic by-id entry is never in the store, so submitActuals can't
+    // reach its terminal-drop branch — a 409/404 must still be reported as
+    // terminal, NOT mis-blamed on the key/plan with a futile re-run.
+    writePending(home, { version: 1, entries: [] });
+    const fake = makeFakeClient(async () => {
+      throw new BudgetaryError({ code: "idempotency_conflict", message: "already recorded", httpStatus: 409, requestId: null });
+    });
+    const out: string[] = [];
+    const code = await runManualActuals({
+      env: ENV,
+      home,
+      estimateId: "est_short",
+      out: (l) => out.push(l),
+      prompt: scriptedPrompt(["1000", "2000", "y", "500"]),
+      clientFactory: () => asClient(fake),
+    });
+    expect(code).toBe(1);
+    const text = out.join("\n");
+    expect(text).toContain("It can't succeed, so nothing was recorded.");
+    expect(text).not.toContain("Fix your API key or plan");
+    expect(text).not.toContain("re-run");
+  });
+
+  it("--estimate-id on a user-fixable 403 points at the key/plan + a re-run", async () => {
+    writePending(home, { version: 1, entries: [] });
+    const fake = makeFakeClient(async () => {
+      throw new BudgetaryError({ code: "permission_denied", message: "no plan", httpStatus: 403, requestId: null });
+    });
+    const out: string[] = [];
+    await runManualActuals({
+      env: ENV,
+      home,
+      estimateId: "est_short",
+      out: (l) => out.push(l),
+      prompt: scriptedPrompt(["1000", "2000", "y", "500"]),
+      clientFactory: () => asClient(fake),
+    });
+    const text = out.join("\n");
+    expect(text).toContain("Fix your API key or plan");
+    expect(text).toContain("report-actual --estimate-id est_short");
   });
 
   it("rejects non-integer token counts (after re-prompting) without submitting", async () => {
@@ -591,6 +701,35 @@ describe("runRolloutActuals", () => {
     expect(readPending(home).entries).toEqual([]);
     // The confirmation names the estimate id (O-4).
     expect(out.join("\n")).toContain("Actuals submitted (est_rollout):");
+  });
+
+  it("appends a forecast check when the pending entry carried a band (T-1)", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        {
+          estimate_id: "est_rband", query: "q", project_id: projectIdFromCwd(cwd, home),
+          created_at: RECENT, attempts: 0,
+          forecast_p10: 100000, forecast_p50: 600000, forecast_p90: 900000,
+        },
+      ],
+    });
+    const out: string[] = [];
+    await runRolloutActuals({
+      transcriptPath: "/tmp/rollout.jsonl",
+      success: true,
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      out: (l) => out.push(l),
+      clientFactory: () => asClient(makeFakeClient()),
+      readUsage: () => ({ tokensIn: 629974, tokensOut: 28055, trace: [] }),
+    });
+    // total 658,029 → within the 100k–900k band, forecast midpoint ~600,000.
+    expect(out.join("\n")).toContain(
+      "Forecast check: actual 658,029 tokens vs forecast ~600,000 (within p10–p90)",
+    );
   });
 
   it("records success=false when --failed is passed", async () => {
@@ -1901,6 +2040,75 @@ describe("runAutoActuals — breadcrumb (the only durable instrument)", () => {
     await runAuto({ clientFactory: () => asClient(fake), stderr: { write: () => {} } });
     expect(readBreadcrumb(home)?.outcome).toBe("gave-up");
   });
+
+  it("stamps the realized counts + forecast band so the loop closes for the human (T-1)", async () => {
+    seed("est_loop", { forecast_p10: 12500, forecast_p50: 48000, forecast_p90: 220000 });
+    await runAuto({
+      clientFactory: () => asClient(makeFakeClient()),
+      readUsage: () => ({ tokensIn: 20000, tokensOut: 32000, trace: [] }),
+    });
+    const crumb = readBreadcrumb(home);
+    expect(crumb?.outcome).toBe("submitted");
+    expect(crumb?.tokensIn).toBe(20000);
+    expect(crumb?.tokensOut).toBe(32000);
+    expect(crumb?.forecastP10).toBe(12500);
+    expect(crumb?.forecastP50).toBe(48000);
+    expect(crumb?.forecastP90).toBe(220000);
+  });
+
+  it("stamps the measured counts even when the submit fails (they were really measured)", async () => {
+    seed("est_loop_fail", { forecast_p50: 48000, forecast_p10: 12500, forecast_p90: 220000 });
+    const fake = makeFakeClient(async () => {
+      throw new BudgetaryError({ code: "unavailable", message: "down", httpStatus: 503, requestId: null });
+    });
+    await runAuto({
+      clientFactory: () => asClient(fake),
+      readUsage: () => ({ tokensIn: 20000, tokensOut: 32000, trace: [] }),
+    });
+    const crumb = readBreadcrumb(home);
+    expect(crumb?.outcome).toBe("failed:503");
+    expect(crumb?.tokensIn).toBe(20000);
+    expect(crumb?.forecastP50).toBe(48000);
+  });
+
+  it("omits the counts when the run recorded none (no-usage)", async () => {
+    seed("est_nocounts", { forecast_p50: 48000 });
+    await runAuto({
+      clientFactory: () => asClient(makeFakeClient()),
+      readUsage: () => null,
+    });
+    const crumb = readBreadcrumb(home);
+    expect(crumb?.outcome).toBe("no-usage");
+    expect(crumb?.tokensIn).toBeUndefined();
+    expect(crumb?.tokensOut).toBeUndefined();
+  });
+
+  it("does NOT re-derive the unreadable-reason with BUDGETARY_DEBUG off (L-1 perf gate)", async () => {
+    const spy = vi.spyOn(transcriptModule, "transcriptUnreadableReason");
+    seed("est_gate_off");
+    await runAuto({
+      clientFactory: () => asClient(makeFakeClient()),
+      readUsage: () => null,
+    });
+    expect(readBreadcrumb(home)?.outcome).toBe("no-usage");
+    // The gate must skip the whole-transcript re-read entirely (not just discard it).
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it("DOES name the unreadable-reason under BUDGETARY_DEBUG=1", async () => {
+    const spy = vi
+      .spyOn(transcriptModule, "transcriptUnreadableReason")
+      .mockReturnValue("transcript format changed");
+    seed("est_gate_on");
+    await runAuto({
+      env: { ...ENV, BUDGETARY_DEBUG: "1" },
+      clientFactory: () => asClient(makeFakeClient()),
+      readUsage: () => null,
+    });
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy.mockRestore();
+  });
 });
 
 describe("runAutoActuals — BUDGETARY_DEBUG narration (never the key)", () => {
@@ -2036,6 +2244,59 @@ describe("runPendingList — surfaces the last automatic run", () => {
     const out: string[] = [];
     runPendingList({ env: ENV, home, now: () => NOW, out: (l) => out.push(l) });
     expect(out.join("\n")).not.toContain("Last automatic");
+  });
+
+  it("closes the loop in the header when the breadcrumb carries counts + band (T-1)", () => {
+    writePending(home, { version: 1, entries: [] });
+    writeBreadcrumb(home, {
+      startedAt: RECENT,
+      durationMs: 3,
+      outcome: "submitted",
+      estimateId: "est_loop",
+      tokensIn: 20000,
+      tokensOut: 32000,
+      forecastP10: 12500,
+      forecastP50: 48000,
+      forecastP90: 220000,
+    });
+    const out: string[] = [];
+    runPendingList({ env: ENV, home, now: () => NOW, out: (l) => out.push(l) });
+    const text = out.join("\n");
+    // The human sees "forecast ~48,000 → actual 52,000 (within band)" without ever
+    // opening the VS Code dashboard.
+    expect(text).toContain("actual 52,000 tokens vs forecast ~48,000 (within p10–p90)");
+    expect(text).not.toContain("$");
+  });
+});
+
+describe("runPendingList — per-row forecast / actual (T-1)", () => {
+  it("shows the forecast on an open banded row, and actual-vs-forecast on a measured one", () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        // Open (not yet measured) but banded → shows the forecast alone.
+        {
+          estimate_id: "est_open", query: "q1", project_id: projectIdFromCwd(cwd, home),
+          created_at: RECENT, attempts: 0,
+          forecast_p10: 100, forecast_p50: 500, forecast_p90: 2000,
+        },
+        // Measured (prior failed submit) AND banded → shows actual vs forecast.
+        {
+          estimate_id: "est_meas", query: "q2", project_id: projectIdFromCwd(cwd, home),
+          created_at: RECENT, attempts: 1,
+          tokens_in: 300, tokens_out: 180, success: true, duration_ms: 9,
+          forecast_p10: 100, forecast_p50: 500, forecast_p90: 2000,
+        },
+      ],
+    });
+    const out: string[] = [];
+    runPendingList({ env: ENV, home, cwd, now: () => NOW, out: (l) => out.push(l) });
+    const open = out.find((l) => l.includes("id est_open"))!;
+    expect(open).toContain("forecast ~500 tokens (p10–p90 100–2,000)");
+    const meas = out.find((l) => l.includes("id est_meas"))!;
+    expect(meas).toContain("actual 480 tokens vs forecast ~500 (within p10–p90)");
+    // The measured+banded row upgrades past the bare "measured ✓" marker.
+    expect(meas).not.toContain("measured ✓");
   });
 });
 

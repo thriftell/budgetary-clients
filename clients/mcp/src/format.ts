@@ -1,7 +1,82 @@
 import type { EstimateResponse } from "@budgetary/sdk";
 
+import type { KeyPrefix } from "./config.js";
+
 function commas(n: number): string {
   return n.toLocaleString("en-US");
+}
+
+/**
+ * A one-line "actual N tokens vs forecast ~M (within/above/below p10–p90)"
+ * comparison — the closed forecast→actual loop, in TOKENS ONLY (never a dollar
+ * figure; the contract carries no price). `actualTotal` is tokens_in+tokens_out;
+ * `band` is the estimate's combined-token p10/p50/p90. Returns `null` unless all
+ * three band values are finite, so a missing/partial band degrades to "no
+ * comparison" rather than a garbage line.
+ */
+export function forecastVsActual(
+  actualTotal: number,
+  band: { p10?: number; p50?: number; p90?: number },
+): string | null {
+  const { p10, p50, p90 } = band;
+  if (
+    typeof p10 !== "number" ||
+    !Number.isFinite(p10) ||
+    typeof p50 !== "number" ||
+    !Number.isFinite(p50) ||
+    typeof p90 !== "number" ||
+    !Number.isFinite(p90)
+  ) {
+    return null;
+  }
+  const where =
+    actualTotal > p90
+      ? "above p10–p90"
+      : actualTotal < p10
+        ? "below p10–p90"
+        : "within p10–p90";
+  return `actual ${commas(actualTotal)} tokens vs forecast ~${commas(p50)} (${where})`;
+}
+
+/**
+ * "forecast ~M tokens (p10–p90 A–B)" for a surface that has a forecast band but
+ * no realized actual yet (a fresh pending row). Tokens only. `null` unless all
+ * three band values are finite.
+ */
+export function forecastOnly(band: {
+  p10?: number;
+  p50?: number;
+  p90?: number;
+}): string | null {
+  const { p10, p50, p90 } = band;
+  if (
+    typeof p10 !== "number" ||
+    !Number.isFinite(p10) ||
+    typeof p50 !== "number" ||
+    !Number.isFinite(p50) ||
+    typeof p90 !== "number" ||
+    !Number.isFinite(p90)
+  ) {
+    return null;
+  }
+  return `forecast ~${commas(p50)} tokens (p10–p90 ${commas(p10)}–${commas(p90)})`;
+}
+
+/**
+ * The shared "after N attempts over Ns" ordeal phrase (no leading space, empty
+ * when a single/unknown attempt). Set on the error by the SDK's retry wrapper on
+ * exhaustion; surfaced by both the transport-error and rate-limit renderers so a
+ * ~4-minute backoff reads as the ordeal it was, not a first-attempt blip.
+ */
+function attemptsClause(attempts?: number, totalElapsedMs?: number): string {
+  if (attempts === undefined || attempts <= 1) return "";
+  const over =
+    totalElapsedMs !== undefined && Number.isFinite(totalElapsedMs)
+      ? // Clamp at 0: the SDK's monotonic clock never yields a negative, but this
+        // is a public renderer — never print "over -2s".
+        ` over ${Math.max(0, Math.round(totalElapsedMs / 1000))}s`
+      : "";
+  return `after ${attempts} attempts${over}`;
 }
 
 /**
@@ -102,6 +177,12 @@ export interface RenderEstimateOptions {
   host?: string;
   /** Whether the pending entry was actually stored (default true). */
   stored?: boolean;
+  /**
+   * The resolved key's public prefix (never the value). Surfaced as one footer
+   * word so free-vs-paid is visible WHERE SPENDING HAPPENS — `bg_live_` bills a
+   * paid key, `bg_test_` is free — not only in `doctor`.
+   */
+  keyPrefix?: KeyPrefix | null;
 }
 
 /**
@@ -109,13 +190,24 @@ export interface RenderEstimateOptions {
  * When the pending entry could NOT be stored, say so — never print "stored".
  * Automatic actuals on Claude Code require the plugin's session-end hook (a bare
  * `claude mcp add` wires only the estimate tool), so we don't over-promise.
+ *
+ * The un-stored branch takes the FULL `estimateId`: the estimate was ALREADY
+ * billed, so it must NOT tell the user to "re-estimate" (a fresh UUID = a second
+ * bill). Instead it leads with the free close — `report-actual --estimate-id
+ * <id>`, which needs no pending row — and demotes re-estimating to a last resort.
  */
-function storedFooter(host: string | undefined, stored: boolean): string[] {
+function storedFooter(
+  host: string | undefined,
+  stored: boolean,
+  estimateId: string,
+): string[] {
   if (!stored) {
     return [
       "⚠ Couldn't save this as a pending estimate — the local store under ~/.budgetary",
-      "  is unwritable, so it will NOT be recorded automatically. Fix ~/.budgetary,",
-      "  then re-estimate, or submit actuals manually with `npx @budgetary/mcp report-actual`.",
+      "  is unwritable. This estimate was ALREADY billed, so do NOT re-estimate (that",
+      "  bills again). Record its actuals directly against its id — no pending row needed:",
+      `    npx @budgetary/mcp report-actual --estimate-id ${estimateId}`,
+      "  Fix ~/.budgetary to restore automatic recording; re-estimating is a last resort.",
     ];
   }
   switch (host) {
@@ -173,6 +265,9 @@ export function renderEstimate(
       `Estimated cost: ~${commas(p50)} tokens (range ${commas(p10)}–${commas(p90)}, p10–p90)`,
     );
   }
+  // Name the tail explicitly so "p90" isn't left as jargon: p90 is the planning
+  // worst case (~1 run in 10 lands above it), which the bare range doesn't spell out.
+  lines.push(`Worst case (p90): ~${commas(p90)} tokens`);
   const meaning =
     lowConfidence && !view.leadWithRange
       ? "confident scenario, but low confidence — treat the range as the answer."
@@ -180,12 +275,28 @@ export function renderEstimate(
   lines.push(`Scenario: ${meaning}`);
   lines.push(`Confidence: ${confidenceLabel(estimate.confidence)}`);
   lines.push(`Model: ${estimate.model}`);
+  // "Valid until T" — the estimate goes stale after this (the model may have
+  // moved); re-estimate rather than trusting it past then. Only shown when the
+  // server sent a usable timestamp (older bodies may omit it).
+  if (typeof estimate.expiresAt === "string" && estimate.expiresAt.length > 0) {
+    lines.push(`Valid until: ${estimate.expiresAt}`);
+  }
   // The short estimate id, so a user can correlate this render with its `pending`
   // row and its eventual actuals submission (all show the same short form).
   lines.push(`Estimate id: ${shortEstimateId(estimate.estimateId)}`);
+  // Free-vs-paid, visible where the spend happens (not only in `doctor`).
+  const keyLine = keyTierLine(options.keyPrefix);
+  if (keyLine !== null) lines.push(keyLine);
   lines.push("");
-  lines.push(...storedFooter(options.host, options.stored ?? true));
+  lines.push(...storedFooter(options.host, options.stored ?? true, estimate.estimateId));
   return lines.join("\n");
+}
+
+/** One-word key-tier footer line, or null for an unrecognized/absent prefix. */
+function keyTierLine(prefix: KeyPrefix | null | undefined): string | null {
+  if (prefix === "bg_live_") return "Key: bg_live_ (paid)";
+  if (prefix === "bg_test_") return "Key: bg_test_ (free)";
+  return null;
 }
 
 /** 403: a valid key that is not on an active plan. Distinct from 401. */
@@ -220,16 +331,55 @@ export function renderAuthFailed(
   ].join("\n");
 }
 
-/** 429: rate limited. Includes the retry hint when the server surfaced one. */
+/** Options enriching the 429 render from the SDK's `BudgetaryRateLimitError`. */
+export interface RateLimitRenderOptions {
+  requestId?: string | null;
+  /** `X-RateLimit-Limit` — the tier's request ceiling for the window (§7). */
+  limit?: number | null;
+  /** `X-RateLimit-Remaining` — requests left in the window (§7). */
+  remaining?: number | null;
+  /** `X-RateLimit-Reset` — UNIX epoch SECONDS when the window resets (§7). */
+  resetSeconds?: number | null;
+  /** Retry-ladder ordeal annotation (set on the error on exhaustion). */
+  attempts?: number;
+  totalElapsedMs?: number;
+  /** Injectable clock (ms) for the reset-relative calc; defaults to `Date.now`. */
+  now?: () => number;
+}
+
+/**
+ * 429: rate limited. Beyond the retry hint, surfaces the tier's rate-limit
+ * WINDOW (limit / remaining / reset — from the SDK's parsed `X-RateLimit-*`
+ * headers) so "you've hit your tier limit of N, resets in ~Ns" reads honestly
+ * instead of a bare "rate limited", plus the same attempts/elapsed ordeal
+ * annotation the transport-error renderer carries. Every field is optional and
+ * omitted when absent — never a fabricated number, never a dollar figure.
+ */
 export function renderRateLimited(
   retryAfterSeconds: number | null,
-  requestId?: string | null,
+  opts: RateLimitRenderOptions = {},
 ): string {
-  const tail = requestIdTail(requestId);
-  if (retryAfterSeconds !== null && Number.isFinite(retryAfterSeconds)) {
-    return `Budgetary rate limit reached. Try again in ${retryAfterSeconds} seconds.${tail}`;
+  const bits: string[] = ["Budgetary rate limit reached."];
+  bits.push(
+    retryAfterSeconds !== null && Number.isFinite(retryAfterSeconds)
+      ? `Try again in ${retryAfterSeconds} seconds.`
+      : "Try again in a little while.",
+  );
+  if (typeof opts.limit === "number" && Number.isFinite(opts.limit)) {
+    const rem =
+      typeof opts.remaining === "number" && Number.isFinite(opts.remaining)
+        ? `, ${commas(opts.remaining)} left`
+        : "";
+    bits.push(`Tier limit: ${commas(opts.limit)} requests/window${rem}.`);
   }
-  return `Budgetary rate limit reached. Try again in a little while.${tail}`;
+  if (typeof opts.resetSeconds === "number" && Number.isFinite(opts.resetSeconds)) {
+    const nowMs = (opts.now ?? (() => Date.now()))();
+    const secs = Math.max(0, Math.round(opts.resetSeconds - nowMs / 1000));
+    bits.push(`Window resets in ~${secs}s.`);
+  }
+  const clause = attemptsClause(opts.attempts, opts.totalElapsedMs);
+  if (clause) bits.push(`(${clause}.)`);
+  return `${bits.join(" ")}${requestIdTail(opts.requestId)}`;
 }
 
 /**
@@ -264,15 +414,7 @@ export function renderTransportError(
   totalElapsedMs?: number,
 ): string {
   const tail = requestId ? ` (request_id: ${requestId})` : "";
-  const retryInfo =
-    attempts !== undefined && attempts > 1
-      ? ` after ${attempts} attempts${
-          totalElapsedMs !== undefined && Number.isFinite(totalElapsedMs)
-            ? // Clamp at 0: the SDK's monotonic clock never yields a negative, but
-              // this is a public renderer — never print "over -2s".
-              ` over ${Math.max(0, Math.round(totalElapsedMs / 1000))}s`
-            : ""
-        }`
-      : "";
+  const clause = attemptsClause(attempts, totalElapsedMs);
+  const retryInfo = clause ? ` ${clause}` : "";
   return `Budgetary couldn't be reached: ${message}${tail}${retryInfo}. Please try again.`;
 }
