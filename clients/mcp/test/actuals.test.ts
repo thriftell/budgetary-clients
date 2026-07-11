@@ -22,7 +22,8 @@ import {
 import { PendingStore, type PendingEntry, type PendingStoreFile } from "../src/store.js";
 import { projectIdFromCwd } from "../src/tools/estimate.js";
 import { readTranscriptTotals } from "../src/transcript.js";
-import { TOOLS, TOOL_NAME } from "../src/server.js";
+import { readBreadcrumb, writeBreadcrumb } from "../src/breadcrumb.js";
+import { runOnSessionEndCli, TOOLS, TOOL_NAME } from "../src/server.js";
 
 interface FakeClient {
   estimate: ReturnType<typeof vi.fn>;
@@ -1654,3 +1655,244 @@ describe("non-interactive actuals paths cap SDK retries", () => {
     expect(opts?.maxRetries).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// PR-1: the unattended (session-end hook) path is observable — a durable
+// breadcrumb every run, and BUDGETARY_DEBUG stderr narration of each decision.
+// ---------------------------------------------------------------------------
+
+describe("runAutoActuals — breadcrumb (the only durable instrument)", () => {
+  const PAYLOAD = { transcript_path: "/tmp/transcript.jsonl", reason: "clear" };
+  const STALE = "2026-05-26T08:00:00Z"; // > 24h before NOW (10:14 on the 27th)
+
+  function seed(estimateId: string, extra: Partial<PendingEntry> = {}) {
+    writePending(home, {
+      version: 1,
+      entries: [
+        {
+          estimate_id: estimateId,
+          query: "q",
+          project_id: projectIdFromCwd(cwd, home),
+          created_at: RECENT,
+          attempts: 0,
+          ...extra,
+        },
+      ],
+    });
+  }
+
+  async function runAuto(over: Partial<Parameters<typeof runAutoActuals>[0]> = {}) {
+    return runAutoActuals({
+      payload: PAYLOAD,
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      stderr: { write: () => {} },
+      readUsage: () => ({ tokensIn: 5, tokensOut: 5, trace: [] }),
+      ...over,
+    });
+  }
+
+  it("records 'submitted' with the estimate id on success", async () => {
+    seed("est_ok");
+    await runAuto({ clientFactory: () => asClient(makeFakeClient()) });
+    const crumb = readBreadcrumb(home);
+    expect(crumb?.outcome).toBe("submitted");
+    expect(crumb?.estimateId).toBe("est_ok");
+    expect(typeof crumb?.durationMs).toBe("number");
+    expect(typeof crumb?.startedAt).toBe("string");
+  });
+
+  it("records 'no-entry' when the store is empty", async () => {
+    writePending(home, { version: 1, entries: [] });
+    await runAuto({ clientFactory: () => asClient(makeFakeClient()) });
+    expect(readBreadcrumb(home)?.outcome).toBe("no-entry");
+  });
+
+  it("records 'dropped-ttl' when this session's estimate aged out", async () => {
+    seed("est_stale", { created_at: STALE });
+    await runAuto({ clientFactory: () => asClient(makeFakeClient()) });
+    expect(readBreadcrumb(home)?.outcome).toBe("dropped-ttl");
+    // ...and the entry really was swept.
+    expect(readPending(home).entries).toEqual([]);
+  });
+
+  it("records 'no-usage' when the transcript yields no counts", async () => {
+    seed("est_nousage");
+    await runAuto({
+      clientFactory: () => asClient(makeFakeClient()),
+      readUsage: () => null,
+    });
+    expect(readBreadcrumb(home)?.outcome).toBe("no-usage");
+  });
+
+  it("records 'no-key' when no API key is configured", async () => {
+    seed("est_nokey");
+    await runAuto({ env: {}, clientFactory: () => asClient(makeFakeClient()) });
+    expect(readBreadcrumb(home)?.outcome).toBe("no-key");
+  });
+
+  it("records 'rejected' on a terminal 4xx", async () => {
+    seed("est_rej");
+    const fake = makeFakeClient(async () => {
+      throw new BudgetaryError({ code: "not_found", message: "gone", httpStatus: 404, requestId: "r" });
+    });
+    await runAuto({ clientFactory: () => asClient(fake), stderr: { write: () => {} } });
+    expect(readBreadcrumb(home)?.outcome).toBe("rejected");
+  });
+
+  it("records 'failed:503' on a retryable transport failure (entry kept)", async () => {
+    seed("est_5xx");
+    const fake = makeFakeClient(async () => {
+      throw new BudgetaryError({ code: "unavailable", message: "down", httpStatus: 503, requestId: null });
+    });
+    await runAuto({ clientFactory: () => asClient(fake) });
+    expect(readBreadcrumb(home)?.outcome).toBe("failed:503");
+    expect(readPending(home).entries).toHaveLength(1); // kept for retry
+  });
+
+  it("records 'gave-up' when attempts reach the cap", async () => {
+    seed("est_giveup", { attempts: 4 }); // MAX_ATTEMPTS is 5
+    const fake = makeFakeClient(async () => {
+      throw new BudgetaryError({ code: "unavailable", message: "down", httpStatus: 503, requestId: null });
+    });
+    await runAuto({ clientFactory: () => asClient(fake), stderr: { write: () => {} } });
+    expect(readBreadcrumb(home)?.outcome).toBe("gave-up");
+  });
+});
+
+describe("runAutoActuals — BUDGETARY_DEBUG narration (never the key)", () => {
+  const PAYLOAD = { transcript_path: "/tmp/transcript.jsonl", reason: "clear" };
+  const DEBUG_ENV = { BUDGETARY_API_KEY: "bg_test_secretvalue", BUDGETARY_DEBUG: "1" } as NodeJS.ProcessEnv;
+
+  function seed(id: string) {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: id, query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
+      ],
+    });
+  }
+
+  it("is silent on stderr without the flag", async () => {
+    seed("est_quiet");
+    const errs: string[] = [];
+    await runAutoActuals({
+      payload: PAYLOAD, env: ENV, home, cwd, now: () => NOW,
+      stderr: { write: (s) => errs.push(s) },
+      clientFactory: () => asClient(makeFakeClient()),
+      readUsage: () => ({ tokensIn: 5, tokensOut: 5, trace: [] }),
+    });
+    expect(errs.join("")).toBe("");
+  });
+
+  it("narrates each decision under the flag, naming the reason on a no-op", async () => {
+    seed("est_dbg");
+    const errs: string[] = [];
+    await runAutoActuals({
+      payload: PAYLOAD, env: DEBUG_ENV, home, cwd, now: () => NOW,
+      stderr: { write: (s) => errs.push(s) },
+      clientFactory: () => asClient(makeFakeClient()),
+      readUsage: () => null, // force the no-usage branch to name itself
+    });
+    const text = errs.join("");
+    expect(text).toContain("Budgetary: session-end:");
+    expect(text).toContain("started");
+    expect(text).toContain("matched estimate_id=est_dbg");
+    // Names WHY the transcript was unusable (the real /tmp path does not exist),
+    // rather than a bare "null" — the transcriptUnreadableReason diagnostic.
+    expect(text).toContain("fresh path aborted: transcript file does not exist");
+    expect(text).toContain("finished outcome=no-usage");
+  });
+
+  it("logs the key SOURCE and base URL but NEVER the key value", async () => {
+    seed("est_secret");
+    const errs: string[] = [];
+    await runAutoActuals({
+      payload: PAYLOAD, env: DEBUG_ENV, home, cwd, now: () => NOW,
+      stderr: { write: (s) => errs.push(s) },
+      clientFactory: () => asClient(makeFakeClient()),
+      readUsage: () => ({ tokensIn: 5, tokensOut: 5, trace: [] }),
+    });
+    const text = errs.join("");
+    expect(text).toContain("key source=env");
+    expect(text).not.toContain("bg_test_secretvalue");
+    expect(text).toContain("submit outcome=submitted");
+  });
+});
+
+describe("runAutoActuals — fails closed to exit 0 even when a dependency throws", () => {
+  async function* streamOf(...chunks: string[]): AsyncGenerator<string> {
+    for (const chunk of chunks) yield chunk;
+  }
+
+  it("a throwing client factory still exits 0 (via the CLI backstop) + records 'error'", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        { estimate_id: "est_boom", query: "q", project_id: projectIdFromCwd(cwd, home), created_at: RECENT, attempts: 0 },
+      ],
+    });
+    const errs: string[] = [];
+    const payload = { transcript_path: "/tmp/t.jsonl", reason: "clear", cwd };
+    const code = await runOnSessionEndCli([], {
+      stdin: streamOf(JSON.stringify(payload)),
+      stderr: { write: (s) => errs.push(s) },
+      env: ENV,
+      runAuto: (a) =>
+        runAutoActuals({
+          ...a,
+          home,
+          cwd,
+          now: () => NOW,
+          clientFactory: () => {
+            throw new Error("boom from the store");
+          },
+          readUsage: () => ({ tokensIn: 5, tokensOut: 5, trace: [] }),
+        }),
+    });
+    expect(code).toBe(0);
+    expect(errs.join("")).toContain("unexpected error");
+    expect(readBreadcrumb(home)?.outcome).toBe("error");
+  });
+});
+
+describe("runPendingList — surfaces the last automatic run", () => {
+  it("prints a 'submitted' header from the breadcrumb, even with an empty queue", () => {
+    writePending(home, { version: 1, entries: [] });
+    writeBreadcrumbForTest("2026-05-27T10:00:00Z", "submitted", "est_led");
+    const out: string[] = [];
+    runPendingList({ env: ENV, home, now: () => NOW, out: (l) => out.push(l) });
+    const text = out.join("\n");
+    expect(text).toContain("Last automatic submission: submitted");
+    expect(text).toContain("est_led");
+    expect(text).toContain("loop is closed");
+  });
+
+  it("flags an interrupted (SIGKILLed) run from a start-only breadcrumb", () => {
+    writePending(home, { version: 1, entries: [] });
+    // A start-only record — no outcome/duration — is the SIGKILL marker.
+    mkdirSync(join(home, ".budgetary"), { recursive: true });
+    writeFileSync(
+      join(home, ".budgetary", "last-session-end.json"),
+      JSON.stringify({ startedAt: "2026-05-27T10:00:00Z" }),
+      "utf8",
+    );
+    const out: string[] = [];
+    runPendingList({ env: ENV, home, now: () => NOW, out: (l) => out.push(l) });
+    expect(out.join("\n")).toContain("did not finish (interrupted)");
+  });
+
+  it("prints no header when no automatic run was ever recorded", () => {
+    writePending(home, { version: 1, entries: [] });
+    const out: string[] = [];
+    runPendingList({ env: ENV, home, now: () => NOW, out: (l) => out.push(l) });
+    expect(out.join("\n")).not.toContain("Last automatic");
+  });
+});
+
+// Small helper: seed a completed breadcrumb via the real writer.
+function writeBreadcrumbForTest(startedAt: string, outcome: string, estimateId: string) {
+  writeBreadcrumb(home, { startedAt, durationMs: 3, outcome, estimateId });
+}

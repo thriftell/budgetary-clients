@@ -5,6 +5,12 @@ import {
 } from "@budgetary/sdk";
 
 import {
+  readBreadcrumb,
+  writeBreadcrumb,
+  type SessionEndBreadcrumb,
+} from "./breadcrumb.js";
+import {
+  debugEnabled,
   looksLikeBudgetaryKey,
   noKeyGuidance,
   pendingFilePath,
@@ -17,6 +23,7 @@ import { projectIdFromCwd } from "./tools/estimate.js";
 import {
   capTrace,
   readTranscriptUsage,
+  transcriptUnreadableReason,
   type ReadUsageOptions,
   type TraceStep,
   type TranscriptUsage,
@@ -323,7 +330,7 @@ function sweepExpired(
   store: PendingWriter,
   now: Date,
   logger: { warn(message: string): void },
-): void {
+): number {
   const fresh = store.read();
   const before = fresh.entries.length;
   const kept = fresh.entries.filter((e) => {
@@ -334,13 +341,14 @@ function sweepExpired(
     return age <= PENDING_TTL_MS;
   });
   const dropped = before - kept.length;
-  if (dropped === 0) return;
+  if (dropped === 0) return 0;
   tryWrite(store, { version: 1, entries: kept }, logger);
   logger.warn(
     `Budgetary: dropped ${dropped} pending ${
       dropped === 1 ? "estimate" : "estimates"
     } past the 24h retry window.`,
   );
+  return dropped;
 }
 
 /** The newest pending entry belonging to `projectId`, or null if none match. */
@@ -443,119 +451,264 @@ function belongsToThisSession(
  * projects) are swept first with a single warning naming the count. Routes the
  * submit through {@link submitActuals}.
  */
+/**
+ * A one-line stderr diagnostics sink for the session-end hook, gated by
+ * {@link debugEnabled}. Off by default (the hook is silent on the happy path);
+ * under `BUDGETARY_DEBUG=1` it narrates every decision so a lost actual becomes
+ * traceable. Keeps the `Budgetary:` prefix and NEVER receives the API key —
+ * callers pass the source/base-url/counts, never the value.
+ */
+function sessionEndDebug(
+  env: NodeJS.ProcessEnv,
+  stderr: { write(s: string): void },
+): (message: string) => void {
+  const on = debugEnabled(env);
+  return (message: string): void => {
+    if (on) stderr.write(`Budgetary: session-end: ${message}\n`);
+  };
+}
+
+/** Map a {@link SubmitOutcome} to a breadcrumb outcome string. Never the key. */
+function breadcrumbOutcome(outcome: SubmitOutcome): string {
+  if (outcome.submitted) return "submitted";
+  if (outcome.gaveUp) return "gave-up";
+  if (outcome.terminal) return "rejected";
+  // Kept pending: a retryable transport/5xx/429, or a user-fixable 401/403.
+  const code =
+    outcome.error instanceof BudgetaryError && outcome.error.httpStatus !== null
+      ? String(outcome.error.httpStatus)
+      : "network";
+  return `failed:${code}`;
+}
+
 export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
   const logger = { warn: (m: string) => args.stderr.write(`${m}\n`) };
+  const debug = sessionEndDebug(args.env, args.stderr);
   const store = new PendingStore({
     path: pendingFilePath(args.home),
     logger,
   });
-  const now = (args.now ?? (() => new Date()))();
+  const clock = args.now ?? (() => new Date());
+  const now = clock();
 
-  // Sweep ALL expired entries first — every project's, not just the one this
-  // session would close — so an abandoned entry can't live forever, warning
-  // once with the count. The selected entry below is therefore within the TTL
-  // (or has an unknown/future age the sweep deliberately keeps).
-  sweepExpired(store, now, logger);
+  // Leave a start-ONLY breadcrumb before any work: this `npx` hook has no
+  // debugger and stdout is the JSON-RPC channel, so a persisted record is the
+  // only durable instrument. If the host SIGKILLs this process past its 30 s
+  // timeout, the absent durationMs/outcome is the interrupted-run marker. It is
+  // overwritten with the completed record in the `finally` below.
+  const startedAt = now.toISOString();
+  writeBreadcrumb(args.home, { startedAt });
+  debug(
+    `started (reason=${
+      args.payload && typeof args.payload.reason === "string"
+        ? args.payload.reason
+        : "(none)"
+    })`,
+  );
 
-  const file = store.read();
-  if (file.entries.length === 0) return 0;
+  // Every branch below sets `outcome` (and `estimateId` once one is selected) so
+  // the `finally` records exactly why the run ended — the breadcrumb is honest
+  // whether it submitted, no-op'd, or failed.
+  let outcome = "no-entry";
+  let estimateId: string | undefined;
+  try {
+    // Sweep ALL expired entries first — every project's, not just the one this
+    // session would close — so an abandoned entry can't live forever, warning
+    // once with the count. The selected entry below is therefore within the TTL
+    // (or has an unknown/future age the sweep deliberately keeps).
+    const swept = sweepExpired(store, now, logger);
 
-  // Bind to this session's own estimate; leave other sessions' entries alone.
-  const entry = newestForProject(file.entries, sessionProjectId(args));
-  if (entry === null) return 0;
-
-  // RETRY vs FRESH. A prior FAILED submit persisted this estimate's OWN measured
-  // counts onto the entry (part 1); resubmit THOSE — baked in, so this
-  // cross-session retry can never mis-pair (it never re-reads a transcript).
-  const retryCounts = persistedCounts(entry);
-  let counts: ActualCounts;
-  if (retryCounts !== null) {
-    counts = retryCounts;
-  } else {
-    // FRESH path: this attaches THIS session's transcript to `entry`, so the
-    // selected entry must be a live, this-session estimate — never a stale one.
-    // Re-guard its age HERE and not only via the sweep: the sweep's write is
-    // best-effort (a store-write fault leaves an expired entry on disk) and it
-    // deliberately KEEPS unknown-age (unparseable created_at) entries, either of
-    // which would otherwise reach this point and mis-pair this session's tokens
-    // onto a foreign/stale estimate. (The retry path above is exempt: it submits
-    // the entry's OWN persisted counts, which cannot mis-pair.)
-    const created = Date.parse(entry.created_at);
-    if (!Number.isFinite(created) || now.getTime() - created > PENDING_TTL_MS) {
+    const file = store.read();
+    debug(
+      `pending store has ${file.entries.length} ${
+        file.entries.length === 1 ? "entry" : "entries"
+      }${swept > 0 ? ` (swept ${swept} past the 24h window)` : ""}`,
+    );
+    if (file.entries.length === 0) {
+      // If the queue was drained by the TTL sweep, say so — "dropped-ttl" is more
+      // honest than "no-entry" when this session's estimate aged out.
+      outcome = swept > 0 ? "dropped-ttl" : "no-entry";
+      debug(
+        swept > 0
+          ? "nothing to submit: the pending queue aged out of the 24h window"
+          : "nothing to submit: the pending store is empty",
+      );
       return 0;
     }
-    // Bind to the session too, when the host provides a boundary (started_at).
-    if (!belongsToThisSession(entry, args.payload)) return 0;
-    if (args.payload === null) return 0;
-    const transcriptPath =
-      typeof args.payload.transcript_path === "string"
-        ? args.payload.transcript_path
-        : null;
-    if (transcriptPath === null) return 0;
 
-    // Honor the privacy opt-out: when trace detail is suppressed, the redacted
-    // `target` is omitted (the trace keeps tool/tokens/kind and the leak-free
-    // `ok`); the realized total is unaffected either way.
-    const usage = (args.readUsage ?? readTranscriptUsage)(transcriptPath, {
-      target: traceTargetEnabled(args.env),
+    // Bind to this session's own estimate; leave other sessions' entries alone.
+    const projectId = sessionProjectId(args);
+    const entry = newestForProject(file.entries, projectId);
+    if (entry === null) {
+      outcome = "no-entry";
+      debug(
+        `nothing to submit: no pending entry matches project_id=${
+          projectId ?? "(unknown)"
+        }`,
+      );
+      return 0;
+    }
+    estimateId = entry.estimate_id;
+    debug(
+      `matched estimate_id=${entry.estimate_id} project_id=${entry.project_id} attempts=${entry.attempts}`,
+    );
+
+    // RETRY vs FRESH. A prior FAILED submit persisted this estimate's OWN measured
+    // counts onto the entry (part 1); resubmit THOSE — baked in, so this
+    // cross-session retry can never mis-pair (it never re-reads a transcript).
+    const retryCounts = persistedCounts(entry);
+    let counts: ActualCounts;
+    if (retryCounts !== null) {
+      counts = retryCounts;
+      debug(
+        `retry path: resubmitting persisted counts (in=${retryCounts.tokensIn} out=${retryCounts.tokensOut})`,
+      );
+    } else {
+      // FRESH path: this attaches THIS session's transcript to `entry`, so the
+      // selected entry must be a live, this-session estimate — never a stale one.
+      // Re-guard its age HERE and not only via the sweep: the sweep's write is
+      // best-effort (a store-write fault leaves an expired entry on disk) and it
+      // deliberately KEEPS unknown-age (unparseable created_at) entries, either of
+      // which would otherwise reach this point and mis-pair this session's tokens
+      // onto a foreign/stale estimate. (The retry path above is exempt: it submits
+      // the entry's OWN persisted counts, which cannot mis-pair.)
+      const created = Date.parse(entry.created_at);
+      if (!Number.isFinite(created) || now.getTime() - created > PENDING_TTL_MS) {
+        outcome = "dropped-ttl";
+        debug("fresh path aborted: the matched entry is stale (past the 24h window)");
+        return 0;
+      }
+      // Bind to the session too, when the host provides a boundary (started_at).
+      if (!belongsToThisSession(entry, args.payload)) {
+        outcome = "no-entry";
+        debug(
+          "fresh path aborted: the matched entry predates this session (started_at boundary)",
+        );
+        return 0;
+      }
+      if (args.payload === null) {
+        outcome = "no-usage";
+        debug("fresh path aborted: no session-end payload to read a transcript from");
+        return 0;
+      }
+      const transcriptPath =
+        typeof args.payload.transcript_path === "string"
+          ? args.payload.transcript_path
+          : null;
+      if (transcriptPath === null) {
+        outcome = "no-usage";
+        debug("fresh path aborted: the payload carries no transcript_path");
+        return 0;
+      }
+
+      // Honor the privacy opt-out: when trace detail is suppressed, the redacted
+      // `target` is omitted (the trace keeps tool/tokens/kind and the leak-free
+      // `ok`); the realized total is unaffected either way.
+      const usage = (args.readUsage ?? readTranscriptUsage)(transcriptPath, {
+        target: traceTargetEnabled(args.env),
+      });
+      if (usage === null) {
+        outcome = "no-usage";
+        // Name WHY (structural re-derivation, no content) — a silently-killed
+        // session-end most often dies here on a transcript-format change.
+        debug(
+          `fresh path aborted: ${transcriptUnreadableReason(transcriptPath)}`,
+        );
+        return 0;
+      }
+
+      // Fail-closed: an over-cap or empty trace becomes `undefined`, so the total
+      // still submits with no `trace` rather than failing or shipping invented steps.
+      const trace = capTrace(usage.trace) ?? undefined;
+      counts = {
+        tokensIn: usage.tokensIn,
+        tokensOut: usage.tokensOut,
+        success: isSuccessReason(args.payload.reason),
+        durationMs: inferDurationMs(args.payload, entry, now),
+        ...(trace ? { trace } : {}),
+      };
+      debug(
+        `fresh path: measured in=${usage.tokensIn} out=${usage.tokensOut} trace_steps=${
+          trace ? trace.length : 0
+        }`,
+      );
+    }
+
+    const resolved = resolveConfig(args.env, args.home);
+    if (resolved === null) {
+      outcome = "no-key";
+      debug("no API key configured; leaving the entry for a later run");
+      return 0; // leave the entry for a later session with a key
+    }
+    // Defense-in-depth for the hook path: the key reaches this unattended process
+    // via a shell-interpolated hook command, so reject a value that isn't a
+    // recognizable bg_live_/bg_test_ key rather than sending it. Leave the entry
+    // for a later, correctly-configured run.
+    if (!looksLikeBudgetaryKey(resolved.apiKey)) {
+      outcome = "no-key";
+      args.stderr.write(
+        "Budgetary: the configured API key is not a recognizable bg_live_/bg_test_ key; " +
+          "skipping the automatic actuals submission.\n",
+      );
+      return 0;
+    }
+    // Source + base URL only — the key VALUE is never logged.
+    debug(`key source=${resolved.source} base_url=${resolved.baseUrl}`);
+
+    const factory =
+      args.clientFactory ??
+      ((opts: BudgetaryClientOptions) => new BudgetaryClient(opts));
+    const client = factory({
+      apiKey: resolved.apiKey,
+      baseUrl: resolved.baseUrl,
+      maxRetries: UNATTENDED_MAX_RETRIES,
     });
-    if (usage === null) return 0; // no real counts → submit nothing
 
-    // Fail-closed: an over-cap or empty trace becomes `undefined`, so the total
-    // still submits with no `trace` rather than failing or shipping invented steps.
-    const trace = capTrace(usage.trace) ?? undefined;
-    counts = {
-      tokensIn: usage.tokensIn,
-      tokensOut: usage.tokensOut,
-      success: isSuccessReason(args.payload.reason),
-      durationMs: inferDurationMs(args.payload, entry, now),
-      ...(trace ? { trace } : {}),
-    };
-  }
+    const submitOutcome = await submitActuals({
+      store,
+      client,
+      entry,
+      counts,
+      logger,
+    });
+    outcome = breadcrumbOutcome(submitOutcome);
+    const requestId =
+      submitOutcome.error instanceof BudgetaryError
+        ? submitOutcome.error.requestId
+        : null;
+    debug(`submit outcome=${outcome}${requestId ? ` request_id=${requestId}` : ""}`);
 
-  const resolved = resolveConfig(args.env, args.home);
-  if (resolved === null) return 0; // leave the entry for a later session with a key
-  // Defense-in-depth for the hook path: the key reaches this unattended process
-  // via a shell-interpolated hook command, so reject a value that isn't a
-  // recognizable bg_live_/bg_test_ key rather than sending it. Leave the entry
-  // for a later, correctly-configured run.
-  if (!looksLikeBudgetaryKey(resolved.apiKey)) {
-    args.stderr.write(
-      "Budgetary: the configured API key is not a recognizable bg_live_/bg_test_ key; " +
-        "skipping the automatic actuals submission.\n",
-    );
+    // A terminal rejection drops the entry inside submitActuals WITHOUT a warning
+    // (the give-up branch warns; the manual/rollout paths report their own drops).
+    // This silent hook path must still leave a trace when a measured actual is lost
+    // to a rejection — otherwise it vanishes from the pending queue with no signal
+    // at all (INV-2: fail loud on failure).
+    if (submitOutcome.terminal) {
+      const detail =
+        submitOutcome.error instanceof Error ? submitOutcome.error.message : "";
+      args.stderr.write(
+        `Budgetary: the server rejected actuals for ${entry.estimate_id}` +
+          `${detail ? ` (${detail})` : ""} — it won't succeed on retry and was dropped.\n`,
+      );
+    }
     return 0;
-  }
-
-  const factory =
-    args.clientFactory ??
-    ((opts: BudgetaryClientOptions) => new BudgetaryClient(opts));
-  const client = factory({
-    apiKey: resolved.apiKey,
-    baseUrl: resolved.baseUrl,
-    maxRetries: UNATTENDED_MAX_RETRIES,
-  });
-
-  const outcome = await submitActuals({
-    store,
-    client,
-    entry,
-    counts,
-    logger,
-  });
-  // A terminal rejection drops the entry inside submitActuals WITHOUT a warning
-  // (the give-up branch warns; the manual/rollout paths report their own drops).
-  // This silent hook path must still leave a trace when a measured actual is lost
-  // to a rejection — otherwise it vanishes from the pending queue with no signal
-  // at all (INV-2: fail loud on failure).
-  if (outcome.terminal) {
-    const detail = outcome.error instanceof Error ? outcome.error.message : "";
-    args.stderr.write(
-      `Budgetary: the server rejected actuals for ${entry.estimate_id}` +
-        `${detail ? ` (${detail})` : ""} — it won't succeed on retry and was dropped.\n`,
+  } catch (err) {
+    // The CLI backstop (runOnSessionEndCli) still turns this into an exit-0 fail-
+    // closed line; here we only record an honest breadcrumb before it propagates.
+    outcome = "error";
+    debug(
+      `unexpected error: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    throw err;
+  } finally {
+    const durationMs = Math.max(0, clock().getTime() - now.getTime());
+    writeBreadcrumb(args.home, { startedAt, durationMs, outcome, estimateId });
+    debug(
+      `finished outcome=${outcome}${
+        estimateId ? ` estimate_id=${estimateId}` : ""
+      } durationMs=${durationMs}`,
     );
   }
-  return 0;
 }
 
 function isSuccessReason(reason: unknown): boolean {
@@ -927,6 +1080,27 @@ export interface PendingListArgs {
   out: (line: string) => void;
 }
 
+/** A short, non-sensitive form of an estimate id for a one-line status row. */
+function shortEstimateId(id: string): string {
+  return id.length > 12 ? `${id.slice(0, 12)}…` : id;
+}
+
+/**
+ * One honest line describing the last automatic (session-end hook) run, read
+ * back from the breadcrumb {@link runAutoActuals} leaves. This is how the
+ * otherwise-dark unattended path — where 100% of default calibration flows —
+ * becomes legible: working / degrading / interrupted, at a glance. A start-only
+ * record (no outcome/duration) means the hook was SIGKILLed past its timeout.
+ */
+function formatBreadcrumbHeader(crumb: SessionEndBreadcrumb, now: Date): string {
+  const age = describeAge(crumb.startedAt, now);
+  if (crumb.outcome === undefined || crumb.durationMs === undefined) {
+    return `Last automatic session-end run: started ${age} but did not finish (interrupted).`;
+  }
+  const id = crumb.estimateId ? ` (${shortEstimateId(crumb.estimateId)})` : "";
+  return `Last automatic submission: ${crumb.outcome}${id}, ${age}.`;
+}
+
 /** A short human age like "just now", "3h ago", "2d ago". */
 function describeAge(createdAt: string, now: Date): string {
   const created = Date.parse(createdAt);
@@ -951,12 +1125,19 @@ export function runPendingList(args: PendingListArgs): number {
     logger: { warn: args.out },
   });
   const entries = store.read().entries;
+  const now = (args.now ?? (() => new Date()))();
+
+  // Surface the last automatic (session-end hook) run first — this is the only
+  // place the otherwise-dark unattended path becomes visible, and it explains an
+  // empty queue ("submitted 2h ago") as readily as a full one.
+  const crumb = readBreadcrumb(args.home);
+  if (crumb !== null) args.out(formatBreadcrumbHeader(crumb, now));
+
   if (entries.length === 0) {
     args.out("No pending Budgetary estimates — the loop is closed.");
     return 0;
   }
 
-  const now = (args.now ?? (() => new Date()))();
   const projectId =
     args.cwd !== undefined ? projectIdFromCwd(args.cwd, args.home) : null;
   const sorted = [...entries].sort((a, b) => {

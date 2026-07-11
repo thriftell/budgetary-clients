@@ -218,6 +218,38 @@ function safeTotals(tokensIn: number, tokensOut: number): boolean {
 }
 
 /**
+ * A human reason a transcript yielded no usable counts — for DEBUG diagnostics
+ * ONLY (never a wire value, never surfaced by default). {@link readTranscriptUsage}
+ * returns a bare `null` on missing / non-regular / over-cap / empty / unparseable
+ * input, so the operator chasing a silent session-end has nothing to go on; this
+ * re-derives the SAME cheap structural checks and names which one tripped. It
+ * re-exposes no content — only a category. Crucially, a file that is present,
+ * regular, within the cap, and non-empty yet still parses to nothing reports the
+ * load-bearing case: a Claude Code transcript whose format the parser no longer
+ * recognizes (the failure mode that would otherwise silently kill every future
+ * automatic submission).
+ */
+export function transcriptUnreadableReason(path: string): string {
+  if (!existsSync(path)) return "transcript file does not exist";
+  let st: ReturnType<typeof statSync>;
+  try {
+    st = statSync(path);
+  } catch {
+    return "transcript file could not be stat-ed";
+  }
+  if (!st.isFile()) return "transcript path is not a regular file";
+  if (st.size > MAX_TRANSCRIPT_BYTES) return "transcript file exceeds the size cap";
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch {
+    return "transcript file could not be read";
+  }
+  if (raw.trim().length === 0) return "transcript file is empty";
+  return "no recognizable token usage in the transcript (its format may have changed)";
+}
+
+/**
  * Back-compat thin wrapper: realized token totals only, on the corrected
  * per-turn basis. The auto and manual actuals paths use this when they need
  * just the counts.
