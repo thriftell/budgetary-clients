@@ -125,6 +125,48 @@ describe("renderDashboard", () => {
     expect(html).toContain("refreshFocused: false");
   });
 
+  it("renders a cost summary strip: actual vs forecast in TOKENS, with the median ratio", () => {
+    // Two paired entries: predicted p50 = 500 each; actuals total 480 each.
+    const html = renderDashboard([entry("est_1"), entry("est_2")], NONCE);
+    expect(html).toContain("b-cost-summary");
+    expect(html).toContain("2 estimates loaded");
+    // actual total 960, forecast total 1,000; median ratio 480/500 = 0.96×.
+    expect(html).toContain("960 tokens actual vs ~1,000 forecast");
+    expect(html).toContain("median 0.96× actual/forecast");
+    // Tokens only — never a dollar figure.
+    expect(html).not.toContain("$");
+  });
+
+  it("cost summary counts pending + voids and says 'none with actuals yet' when unpaired", () => {
+    const html = renderDashboard(
+      [
+        { ...entry("est_paired") }, // has an actual
+        { ...entry("est_pending"), actual: null }, // awaiting actuals
+        voidEntry("est_void"), // out-of-domain, no prediction/actual
+      ],
+      NONCE,
+    );
+    expect(html).toContain("1 pending");
+    expect(html).toContain("1 void");
+
+    // All-unpaired page → honest "none with actuals yet", no median.
+    const unpaired = renderDashboard(
+      [{ ...entry("e1"), actual: null }, { ...entry("e2"), actual: null }],
+      NONCE,
+    );
+    expect(unpaired).toContain("none with actuals yet");
+    expect(unpaired).not.toContain("median");
+    expect(unpaired).toContain("2 pending");
+  });
+
+  it("cost summary is windowed-honest when older pages exist (never implies the whole ledger)", () => {
+    const html = renderDashboard([entry("e1"), entry("e2")], NONCE, {
+      nextCursor: "cur_x",
+    });
+    const strip = html.slice(html.indexOf("b-cost-summary"));
+    expect(strip).toContain("most recent; older history not loaded");
+  });
+
   it("renders a 'Load older' control + window qualifier when nextCursor is non-null", () => {
     const html = renderDashboard([entry("e1"), entry("e2")], NONCE, {
       nextCursor: "cur_abc",

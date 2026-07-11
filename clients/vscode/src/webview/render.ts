@@ -1,6 +1,6 @@
 import type { LedgerEntry } from "@budgetary/sdk";
 
-import { escapeHtml } from "../format";
+import { escapeHtml, formatTokens } from "../format";
 import { CHART_SUMMARY_ID, renderCalibrationChart } from "./chart";
 import { renderRecentTable } from "./table";
 import { LEGEND_STYLES, legendSwatchSvg } from "./scenario";
@@ -38,6 +38,11 @@ const STYLES = `
     margin: 0 0 16px;
     color: var(--vscode-descriptionForeground);
     font-size: 12px;
+  }
+  p.b-cost-summary {
+    margin: 0 0 12px;
+    color: var(--vscode-foreground);
+    font-size: 13px;
   }
   button.b-refresh {
     background: var(--vscode-button-background);
@@ -243,6 +248,82 @@ function voidRateNote(entries: readonly LedgerEntry[]): string {
   return `<p class="b-stat">${voids} of the last ${entries.length} estimates ${wasWere} (no prediction — Budgetary declined to estimate).</p>`;
 }
 
+/** Median of a NUMERICALLY-SORTED, non-empty array (mean of the two middles when even). */
+function median(sorted: readonly number[]): number {
+  const n = sorted.length;
+  const mid = Math.floor(n / 2);
+  return n % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+}
+
+/**
+ * A one-line cost summary computed CLIENT-SIDE from the already-loaded page —
+ * "N estimates loaded: actual total X vs forecast ~Y (median Z× actual/forecast);
+ * K pending, V voids". Tokens only, NEVER a dollar figure (the ledger carries no
+ * price). Answers "what am I spending?", which the per-estimate table/chart don't.
+ * Honest about the window: when older pages exist it says so (dim-8's copy), so
+ * the totals are never read as the whole ledger. Empty when nothing is loaded.
+ */
+function renderCostSummary(
+  entries: readonly LedgerEntry[],
+  opts: { hasMore: boolean },
+): string {
+  if (entries.length === 0) return "";
+
+  // Paired = has a realized actual. Voids (out_of_domain) never get one and have
+  // no prediction; pending = awaiting actuals but NOT a void.
+  const paired = entries.filter((e) => e.actual !== null);
+  const voids = entries.filter((e) => e.scenario === "out_of_domain").length;
+  const pending = entries.filter(
+    (e) => e.actual === null && e.scenario !== "out_of_domain",
+  ).length;
+
+  const window = opts.hasMore ? " (most recent; older history not loaded)" : "";
+  const noun = entries.length === 1 ? "estimate" : "estimates";
+  // Distinct non-null projects in view — an honest per-project dimension without
+  // dumping the opaque project hashes.
+  const projects = new Set(
+    entries
+      .map((e) => e.projectId)
+      .filter((p): p is string => typeof p === "string" && p.length > 0),
+  ).size;
+  const across = projects > 1 ? ` across ${projects} projects` : "";
+  const loaded = `${entries.length} ${noun} loaded${across}${window}`;
+
+  let cost: string;
+  if (paired.length === 0) {
+    cost = "none with actuals yet";
+  } else {
+    const actualTotal = paired.reduce((s, e) => s + (e.actual?.total ?? 0), 0);
+    const forecastTotal = paired.reduce((s, e) => s + (e.predicted?.p50 ?? 0), 0);
+    // Per-estimate actual/forecast ratios, then the MEDIAN — robust to a couple
+    // of outliers in a way a ratio-of-sums is not. Skip any with a non-positive
+    // forecast (no usable denominator) rather than dividing by zero.
+    const ratios = paired
+      .map((e) =>
+        e.predicted && e.predicted.p50 > 0 ? e.actual!.total / e.predicted.p50 : null,
+      )
+      .filter((r): r is number => r !== null && Number.isFinite(r))
+      .sort((a, b) => a - b);
+    const medianClause =
+      ratios.length > 0
+        ? ` (median ${median(ratios).toFixed(2)}× actual/forecast)`
+        : "";
+    const pairedNoun = paired.length === 1 ? "estimate" : "estimates";
+    cost = `${paired.length} ${pairedNoun} with actuals: ${formatTokens(
+      actualTotal,
+    )} tokens actual vs ~${formatTokens(forecastTotal)} forecast${medianClause}`;
+  }
+
+  const tail: string[] = [];
+  if (pending > 0) tail.push(`${pending} pending`);
+  if (voids > 0) tail.push(`${voids} ${voids === 1 ? "void" : "voids"}`);
+  const tailClause = tail.length > 0 ? `; ${tail.join(", ")}` : "";
+
+  return `<p class="b-stat b-cost-summary">${escapeHtml(
+    `${loaded} — ${cost}${tailClause}.`,
+  )}</p>`;
+}
+
 export function renderDashboard(
   entries: readonly LedgerEntry[],
   nonce: string,
@@ -265,6 +346,7 @@ export function renderDashboard(
     </div>
     <button class="b-refresh" id="refresh" type="button">⟳ Refresh</button>
   </header>
+  ${renderCostSummary(entries, { hasMore })}
   ${voidRateNote(entries)}
   <section class="b-chart" aria-labelledby="b-chart-h">
     <h2 id="b-chart-h">${chartHeading}</h2>

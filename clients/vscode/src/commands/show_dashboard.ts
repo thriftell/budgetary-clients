@@ -32,6 +32,11 @@ let loadGeneration = 0;
 // so the webview can't retain it.
 let accumulated: LedgerEntry[] = [];
 let cursor: string | null = null;
+// Whether the DASHBOARD (not the loading / configure / error view) is what the
+// panel currently shows. Gates the view-state re-render below so a hide during
+// the first load, or while an error/configure panel is up, isn't clobbered with
+// a (possibly empty) dashboard. Reset when the panel is disposed.
+let dashboardVisible = false;
 
 function makeNonce(): string {
   return randomBytes(16).toString("base64").replace(/[+/=]/g, "");
@@ -57,6 +62,7 @@ function dedupAppend(
 function resetPagination(): void {
   accumulated = [];
   cursor = null;
+  dashboardVisible = false;
 }
 
 export function showDashboard(_context: vscode.ExtensionContext): void {
@@ -72,7 +78,12 @@ export function showDashboard(_context: vscode.ExtensionContext): void {
     vscode.ViewColumn.Active,
     {
       enableScripts: true,
-      retainContextWhenHidden: true,
+      // Deliberately NO `retainContextWhenHidden`: the extension already holds all
+      // pagination state (`accumulated` + `cursor`) and every render rewrites the
+      // whole document, so retaining a 5–30 MB webview for the whole session only
+      // bought scroll restore — which the webview's own getState/setState already
+      // handles. Instead we re-render from the held state when the panel returns to
+      // view (see onDidChangeViewState below), for a fraction of the memory.
       // The CSP nailed in our HTML already blocks remote resources; we don't
       // need to enable localResourceRoots because we don't serve any.
       localResourceRoots: [],
@@ -82,6 +93,19 @@ export function showDashboard(_context: vscode.ExtensionContext): void {
   panel.onDidDispose(() => {
     panel = undefined;
     resetPagination();
+  });
+
+  // Without retainContextWhenHidden the webview is torn down while hidden. When it
+  // returns to view, re-render the dashboard from the pagination state the
+  // extension holds — no server round-trip (a fresh nonce guarantees VS Code
+  // reloads the document). Guarded on `dashboardVisible` so a hide during the
+  // first load, or while the configure/error panel is up, isn't overwritten.
+  panel.onDidChangeViewState((e) => {
+    if (e.webviewPanel.visible && panel === e.webviewPanel && dashboardVisible) {
+      e.webviewPanel.webview.html = renderDashboard(accumulated, makeNonce(), {
+        nextCursor: cursor,
+      });
+    }
   });
 
   panel.webview.onDidReceiveMessage((msg) => {
@@ -111,8 +135,15 @@ export async function load(
   // can't throw (VS Code throws when you set `.html` on a disposed webview).
   const generation = ++loadGeneration;
   const isCurrent = (): boolean => generation === loadGeneration && panel === p;
-  const apply = (html: string): void => {
-    if (isCurrent()) p.webview.html = html;
+  // `isDashboard` records whether the applied view is the dashboard (vs a
+  // loading / configure / error interstitial), so the view-state re-render only
+  // fires for the dashboard. Set inside the isCurrent guard so a stale load can't
+  // flip the flag after a newer render won.
+  const apply = (html: string, isDashboard = false): void => {
+    if (isCurrent()) {
+      dashboardVisible = isDashboard;
+      p.webview.html = html;
+    }
   };
 
   const status = resolveConfigStatus();
@@ -177,7 +208,7 @@ export async function load(
       ? dedupAppend(accumulated, page.entries)
       : page.entries.slice();
     cursor = nextCursor;
-    apply(renderDashboard(accumulated, makeNonce(), { nextCursor: cursor }));
+    apply(renderDashboard(accumulated, makeNonce(), { nextCursor: cursor }), true);
   } catch (err) {
     const nonce = makeNonce();
     if (err instanceof BudgetaryAuthError) {
