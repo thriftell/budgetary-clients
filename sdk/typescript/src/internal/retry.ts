@@ -1,5 +1,6 @@
 import {
   BudgetaryError,
+  BudgetaryNetworkError,
   BudgetaryRateLimitError,
   BudgetaryServerError,
 } from "../errors.js";
@@ -30,14 +31,74 @@ export interface RetryOptions {
   now?: () => number;
   /** Observe each retry (attempt just failed, backoff about to sleep). Never throws the run. */
   onRetry?: (info: RetryInfo) => void;
+  /**
+   * Caller cancellation. When it aborts, the retry ladder stops immediately —
+   * a backoff sleep in progress is cut short and no further attempt is made — so
+   * a host-abandoned request sheds load instead of finishing its full ~5 min
+   * ladder against a struggling engine. (The per-attempt request is aborted
+   * separately, via the combined signal the HTTP layer passes to `fetch`.)
+   */
+  signal?: AbortSignal;
+}
+
+/** The typed error thrown when a retry backoff is cut short by an abort. */
+function abortError(): BudgetaryNetworkError {
+  return new BudgetaryNetworkError({
+    code: "abort",
+    message: "request was aborted",
+  });
+}
+
+/**
+ * Race an INJECTED `sleep` against the abort so an abandoned request doesn't sit
+ * out the full backoff. (The default sleep is itself abort-aware; this exists for
+ * a caller-supplied `sleep` that has no signal channel.) Detaches its listener so
+ * a resolved sleep leaks nothing.
+ */
+async function abortableSleep(
+  sleep: (ms: number) => Promise<void>,
+  ms: number,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  if (signal === undefined) return sleep(ms);
+  if (signal.aborted) throw abortError();
+  let onAbort!: () => void;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(abortError());
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    await Promise.race([sleep(ms), aborted]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
 }
 
 const DEFAULT_INITIAL_DELAY_MS = 1000;
 const DEFAULT_FACTOR = 2;
 const DEFAULT_MAX_DELAY_MS = 60_000;
 
-function defaultSleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Default backoff sleep. Abort-aware: an abort rejects promptly AND clears the
+ * timer, so an abandoned request leaves no lingering `setTimeout` firing up to
+ * `maxDelay` later.
+ */
+function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortError());
+      return;
+    }
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(abortError());
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 /** Monotonic default clock (ms). `performance.now` is monotonic; `Date.now` is not. */
@@ -60,14 +121,20 @@ export async function withRetry<T>(
   const initialDelay = options.initialDelayMs ?? DEFAULT_INITIAL_DELAY_MS;
   const factor = options.factor ?? DEFAULT_FACTOR;
   const maxDelay = options.maxDelayMs ?? DEFAULT_MAX_DELAY_MS;
-  const sleep = options.sleep ?? defaultSleep;
+  // An injected sleep (tests) has no signal channel, so it is raced against the
+  // abort; the default sleep is itself abort-aware and clears its own timer.
+  const injectedSleep = options.sleep;
   const random = options.random ?? Math.random;
   const now = options.now ?? defaultNow;
   const onRetry = options.onRetry;
+  const signal = options.signal;
 
   const startedAt = now();
   let attempt = 0;
   while (true) {
+    // A caller that abandoned the request before this attempt starts: don't
+    // fire another request at a struggling engine.
+    if (signal?.aborted) throw abortError();
     try {
       return await fn();
     } catch (err) {
@@ -82,20 +149,21 @@ export async function withRetry<T>(
         throw err;
       }
       const computed = Math.min(initialDelay * factor ** attempt, maxDelay);
-      let delay = random() * computed;
+      const jitter = random() * computed;
+      let delay = jitter;
       if (
         err instanceof BudgetaryRateLimitError &&
         err.retryAfterSeconds !== null &&
         err.retryAfterSeconds !== undefined
       ) {
-        // Respect the server's Retry-After as a floor, but never sleep past
-        // `maxDelay`: an oversized or hostile header must not hang the client
-        // for minutes. `computed` is already <= maxDelay, so the outer min only
-        // ever clamps the Retry-After value.
-        delay = Math.min(
-          Math.max(err.retryAfterSeconds * 1000, computed),
-          maxDelay,
-        );
+        // Respect the server's Retry-After as a FLOOR, then ADD jitter on top —
+        // never a deterministic `max(retryAfter, computed)`. A correlated fleet
+        // all seeing the same `Retry-After: 1` at a fixed-window boundary would
+        // otherwise re-synchronize into one 1 s bucket and thundering-herd the
+        // engine the instant the window opens; the additive jitter spreads them
+        // across [retryAfter, retryAfter+computed). Still clamped to `maxDelay`
+        // so an oversized/hostile header can't hang the client for minutes.
+        delay = Math.min(err.retryAfterSeconds * 1000 + jitter, maxDelay);
       }
       if (onRetry !== undefined) {
         const httpStatus = err instanceof BudgetaryError ? err.httpStatus : null;
@@ -107,7 +175,13 @@ export async function withRetry<T>(
           // ignore observer faults
         }
       }
-      await sleep(delay);
+      // Signal-aware backoff: an abort mid-sleep rejects here and stops the
+      // ladder, rather than sitting out the full delay and then retrying.
+      if (injectedSleep !== undefined) {
+        await abortableSleep(injectedSleep, delay, signal);
+      } else {
+        await defaultSleep(delay, signal);
+      }
       attempt += 1;
     }
   }

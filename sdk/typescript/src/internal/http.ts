@@ -26,6 +26,11 @@ export interface HttpRequest {
   body?: unknown;
   query?: Record<string, string | number | boolean | undefined | null>;
   timeoutMs?: number;
+  /**
+   * Optional caller cancellation, combined with the per-attempt timeout so a
+   * host-abandoned request aborts the in-flight fetch AND stops the retry ladder.
+   */
+  signal?: AbortSignal;
 }
 
 const NETWORK_ERROR_MESSAGE = "network error while contacting Budgetary API";
@@ -295,6 +300,8 @@ export class HttpClient {
     const result = await withRetry(() => this.attempt(req), {
       maxRetries: this.config.maxRetries,
       onRetry: this.config.onRetry,
+      // Stop the retry ladder (and cut a backoff sleep short) when the caller aborts.
+      signal: req.signal,
     });
     return result as T;
   }
@@ -320,7 +327,15 @@ export class HttpClient {
     }
 
     const timeoutMs = req.timeoutMs ?? this.config.timeoutMs;
-    const signal = AbortSignal.timeout(timeoutMs);
+    // Combine the per-attempt timeout with the caller's cancellation: whichever
+    // fires first aborts the fetch. `AbortSignal.any` propagates the winning
+    // signal's reason, so a timeout still surfaces as a TimeoutError (→ "timeout")
+    // and a host abort as an AbortError (→ "abort") in mapNetworkError.
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
+    const signal =
+      req.signal !== undefined
+        ? AbortSignal.any([timeoutSignal, req.signal])
+        : timeoutSignal;
 
     let response: Response;
     try {

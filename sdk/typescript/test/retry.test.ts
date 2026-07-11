@@ -1,8 +1,9 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { http, HttpResponse } from "msw";
+import { delay, http, HttpResponse } from "msw";
 import {
   BudgetaryClient,
   BudgetaryError,
+  BudgetaryNetworkError,
   BudgetaryRateLimitError,
   BudgetaryServerError,
   BudgetaryValidationError,
@@ -256,6 +257,123 @@ describe("withRetry — attempts / totalElapsedMs / onRetry (O-6)", () => {
     );
     expect(res).toBe("ok"); // the request still completed
   });
+});
+
+describe("withRetry — de-sync jitter above the Retry-After floor (R-1)", () => {
+  // Compute the single 429 backoff for a given injected random.
+  async function backoffFor(rand: number): Promise<number> {
+    const sleeps: number[] = [];
+    let n = 0;
+    await withRetry(
+      async () => {
+        n += 1;
+        if (n === 1) {
+          throw new BudgetaryRateLimitError({
+            code: "rate_limited",
+            message: "slow down",
+            httpStatus: 429,
+            requestId: null,
+            retryAfterSeconds: 1, // the SAME header a correlated fleet all sees
+          });
+        }
+        return "ok";
+      },
+      { maxRetries: 2, sleep: async (ms) => { sleeps.push(ms); }, random: () => rand },
+    );
+    return sleeps[0]!;
+  }
+
+  it("spreads a correlated fleet's backoff instead of collapsing it into one bucket", async () => {
+    // computed at attempt 0 = 1000, floor = retryAfter*1000 = 1000.
+    const a = await backoffFor(0.2); // 1000 + 0.2*1000
+    const b = await backoffFor(0.8); // 1000 + 0.8*1000
+    // Never earlier than the server asked (the floor holds) …
+    expect(a).toBeGreaterThanOrEqual(1000);
+    expect(b).toBeGreaterThanOrEqual(1000);
+    // … but jittered ON TOP, so two clients de-sync rather than fire together.
+    expect(a).toBe(1200);
+    expect(b).toBe(1800);
+    expect(a).not.toBe(b);
+  });
+});
+
+describe("withRetry — honors caller cancellation (R-2)", () => {
+  it("does not even attempt when the signal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    let attempts = 0;
+    const err = await withRetry(
+      async () => {
+        attempts += 1;
+        return "ok";
+      },
+      { maxRetries: 3, sleep: async () => {}, signal: controller.signal },
+    ).catch((e: unknown) => e);
+    expect(attempts).toBe(0);
+    expect(err).toBeInstanceOf(BudgetaryNetworkError);
+    expect((err as BudgetaryError).code).toBe("abort");
+  });
+
+  it("stops the ladder mid-backoff on abort (no further attempt, no full sleep)", async () => {
+    const controller = new AbortController();
+    let attempts = 0;
+    let started!: () => void;
+    const sleepBegan = new Promise<void>((r) => (started = r));
+    const p = withRetry(
+      async () => {
+        attempts += 1;
+        throw new BudgetaryServerError({
+          code: "internal_error",
+          message: "boom",
+          httpStatus: 500,
+          requestId: null,
+        });
+      },
+      {
+        maxRetries: 5,
+        random: () => 1,
+        signal: controller.signal,
+        // Never resolves on its own — only the abort ends the backoff.
+        sleep: () =>
+          new Promise<void>(() => {
+            started();
+          }),
+      },
+    );
+    const settled = p.then(() => "resolved").catch((e: unknown) => e);
+    await sleepBegan; // attempt 1 has failed and the backoff sleep is in progress
+    controller.abort();
+    const result = await settled;
+    // The abort cut the sleep short and stopped the ladder — only one attempt ran.
+    expect(attempts).toBe(1);
+    expect(result).toBeInstanceOf(BudgetaryNetworkError);
+    expect((result as BudgetaryError).code).toBe("abort");
+  });
+});
+
+describe("BudgetaryClient — signal aborts an in-flight estimate (R-2 integration)", () => {
+  it("rejects promptly with an abort when the caller aborts the request", async () => {
+    handle.use(
+      http.post(`${TEST_BASE_URL}/v1/estimate`, async () => {
+        await delay(5000); // still 'in flight' when we abort
+        return HttpResponse.json({ estimate_id: "never", void: true });
+      }),
+    );
+    const client = new BudgetaryClient({
+      apiKey: TEST_API_KEY,
+      baseUrl: TEST_BASE_URL,
+      maxRetries: 5,
+    });
+    const controller = new AbortController();
+    const pending = client
+      .estimate("hi", { clientRequestId: null, signal: controller.signal })
+      .catch((e: unknown) => e);
+    // Abort mid-flight (before the 5 s handler or the 10 s timeout could fire).
+    setTimeout(() => controller.abort(), 10);
+    const err = await pending;
+    expect(err).toBeInstanceOf(BudgetaryNetworkError);
+    expect((err as BudgetaryError).code).toBe("abort");
+  }, 15_000);
 });
 
 describe("BudgetaryClient retry integration", () => {
