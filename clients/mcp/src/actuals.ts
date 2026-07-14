@@ -10,12 +10,14 @@ import {
   type SessionEndBreadcrumb,
 } from "./breadcrumb.js";
 import {
+  DEFAULT_SOURCE,
   debugEnabled,
   looksLikeBudgetaryKey,
   noKeyGuidance,
   pendingFilePath,
   resolveConfig,
   resolveConfigStatus,
+  sanitizeSource,
   traceTargetEnabled,
 } from "./config.js";
 import { forecastOnly, forecastVsActual, shortEstimateId } from "./format.js";
@@ -217,6 +219,26 @@ function persistedCounts(entry: PendingEntry): ActualCounts | null {
   return { tokensIn: tokens_in, tokensOut: tokens_out, success, durationMs: duration_ms };
 }
 
+/**
+ * The provenance tag to send for `entry`, as `actuals.metadata.source`.
+ *
+ * The entry's own stamped value ALWAYS wins; an entry that carries none (written
+ * by a client older than this field, or the manual path's synthetic by-id entry)
+ * falls back to the {@link DEFAULT_SOURCE} CONSTANT.
+ *
+ * It deliberately does NOT consult `process.env` — not even as a last resort.
+ * This function runs in the submit process, which for a queued retry is a
+ * DIFFERENT, LATER session than the run being reported: reading the environment
+ * here would stamp that session's tag onto another run's actual (a silent
+ * mislabel), and it would buy nothing — an entry with no tag is by definition not
+ * one a tagged run produced. Re-validated rather than trusted, so a corrupt or
+ * hand-edited `source` on disk degrades to the default instead of reaching the
+ * wire (`metadata` is 2 KB-capped as a `413`).
+ */
+function entrySource(entry: PendingEntry): string {
+  return sanitizeSource(entry.source) ?? DEFAULT_SOURCE;
+}
+
 /** The outcome of one {@link submitActuals} call, so callers can report it honestly. */
 export interface SubmitOutcome {
   /** THIS call's POST succeeded and the entry was removed. */
@@ -302,6 +324,10 @@ export async function submitActuals(
       ...(counts.trace && counts.trace.length > 0
         ? { trace: counts.trace }
         : {}),
+      // Provenance: read from the ENTRY (stamped at estimate time), never from
+      // this process's environment — see entrySource. A constant, declared tag;
+      // never model-supplied, and never anything the caller measured.
+      metadata: { source: entrySource(entry) },
     });
     // The POST won. Removing the entry is best-effort: if the write faults we
     // must NOT reclassify a committed submit as retryable — return submitted
@@ -940,11 +966,28 @@ export async function runManualActuals(args: ManualActualsArgs): Promise<number>
   const byId = typeof args.estimateId === "string" && args.estimateId.length > 0;
   let entry: PendingEntry;
   if (byId) {
-    // Close a specific billed estimate whose local pending row was never written.
-    // The submit binds to the id ALONE (submitActuals locates any real store row
-    // by estimate_id, never by these placeholder fields), so no pending row is
-    // required. No query/band is known, so no forecast comparison is shown.
-    entry = {
+    // Close a specific billed estimate by id. This path exists for an estimate
+    // whose local pending row was never written (the `stored: false` footer prints
+    // exactly this command), so a row is NOT required — the submit binds to the id
+    // alone.
+    //
+    // But a row often DOES exist: nothing stops a user (or a harness driver, which
+    // must use --estimate-id to close the RIGHT estimate when several sessions
+    // share one cwd) from naming an id that is sitting in the store. So prefer the
+    // REAL row whenever one matches, and fall back to a synthetic placeholder only
+    // when none does.
+    //
+    // This is load-bearing for provenance, not a nicety. The real row carries the
+    // run's `source`, and submitActuals reads the tag from the ENTRY it is handed.
+    // Handing it a source-less placeholder while a tagged row sat on disk would
+    // POST the default AND then remove that row (success → removeById) — silently
+    // destroying the only copy of the tag, for a run that genuinely declared one.
+    // (Reading the row is still never reading the environment: the tag comes from
+    // the entry, exactly as on every other submit path.) It also recovers the
+    // forecast band, so the by-id close can print the same "Forecast check" line.
+    const existing =
+      store.read().entries.find((e) => e.estimate_id === args.estimateId) ?? null;
+    entry = existing ?? {
       estimate_id: args.estimateId as string,
       query: "",
       project_id: "",
@@ -1012,8 +1055,9 @@ export async function runManualActuals(args: ManualActualsArgs): Promise<number>
     args.out(
       `Actuals submitted (${shortEstimateId(entry.estimate_id)}). Thanks — this calibrates future estimates.`,
     );
-    // Close the loop when the pending entry carried a forecast band (never on the
-    // by-id path — a synthetic entry has none).
+    // Close the loop when the entry carried a forecast band. On the by-id path
+    // that happens exactly when a real row was found (a synthetic placeholder has
+    // no band); when none was, this is silently skipped.
     const cmp = forecastVsActual(tokensIn + tokensOut, {
       p10: entry.forecast_p10,
       p50: entry.forecast_p50,
@@ -1044,10 +1088,12 @@ export async function runManualActuals(args: ManualActualsArgs): Promise<number>
     byId &&
     !isUserFixableRejection(outcome.error)
   ) {
-    // By-id path only: the synthetic entry is never in the store, so submitActuals
-    // can't reach its terminal-drop branch — a terminal 4xx (400/404/409/…) lands
-    // here, not in the `terminal` branch above. Classify by the error itself so it
-    // isn't mis-blamed on the key/plan or advised a futile re-run.
+    // By-id path with NO matching store row: the synthetic placeholder isn't in the
+    // store, so submitActuals can't reach its terminal-drop branch — a terminal 4xx
+    // (400/404/409/…) lands here, not in the `terminal` branch above. Classify by
+    // the error itself so it isn't mis-blamed on the key/plan or advised a futile
+    // re-run. (When a real row WAS found, submitActuals drops it and reports
+    // `terminal` above, which is the honest message for that case.)
     args.out(
       `Budgetary rejected this submission${detail ? `: ${detail}` : ""}. It can't ` +
         "succeed, so nothing was recorded.",

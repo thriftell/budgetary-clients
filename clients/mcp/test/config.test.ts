@@ -1,13 +1,16 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
   configDiagnostics,
+  DEFAULT_SOURCE,
   debugEnabled,
   looksLikeBudgetaryKey,
   resolveLanguage,
+  resolveSource,
+  sanitizeSource,
   traceTargetEnabled,
 } from "../src/config.js";
 
@@ -83,6 +86,122 @@ describe("looksLikeBudgetaryKey — hook-path key-shape guard", () => {
     ]) {
       expect(looksLikeBudgetaryKey(k)).toBe(false);
     }
+  });
+});
+
+describe("resolveSource — declared provenance tag, fail-open to the default", () => {
+  const src = (v?: string): NodeJS.ProcessEnv =>
+    (v === undefined ? {} : { BUDGETARY_SOURCE: v }) as NodeJS.ProcessEnv;
+
+  it("defaults to mcp_client when unset", () => {
+    expect(resolveSource(src())).toBe(DEFAULT_SOURCE);
+    expect(DEFAULT_SOURCE).toBe("mcp_client");
+  });
+
+  it("reads and trims BUDGETARY_SOURCE from the environment", () => {
+    expect(resolveSource(src("  swe-bench  "))).toBe("swe-bench");
+  });
+
+  it("forwards an OPAQUE tag — it validates shape, never meaning", () => {
+    // The client knows no lane vocabulary: any well-formed tag passes through
+    // untouched, so a new server-side lane needs no client release. There is
+    // deliberately no allowlist here to extend.
+    for (const tag of ["swe-bench", "a", "some.future_lane-v2", "x".repeat(64)]) {
+      expect(resolveSource(src(tag))).toBe(tag);
+    }
+  });
+
+  it("fails open to the default for every malformed value (never throws, never truncates)", () => {
+    // `metadata` is 2 KB-capped server-side (a published 413), so an unbounded or
+    // junk value must resolve to the default rather than reach the wire and turn
+    // a real contribution into a rejected request. Note it DEFAULTS — it does not
+    // truncate a too-long value into a plausible-looking tag.
+    for (const bad of [
+      "",
+      "   ",
+      "x".repeat(65), // one over the bound
+      "x".repeat(5000),
+      "swe bench", // space
+      "swe/bench", // slash
+      "swe{bench}",
+      "swe\nbench",
+      'swe"bench',
+      "swe;bench",
+      "émoji-ünicode",
+    ]) {
+      expect(resolveSource(src(bad))).toBe(DEFAULT_SOURCE);
+    }
+  });
+
+  it("IGNORES a `source` in ~/.budgetary/config.json — the deliberate divergence from resolveLanguage", () => {
+    // This is the whole reason resolveSource takes no `home`: a config file is
+    // machine-wide and PERMANENT. Set a tag there for one benchmark run, forget
+    // it, and every ordinary session on that machine is thereafter stamped with a
+    // provenance that is a lie — undetectably, because the rows look well-formed.
+    // An env var's lifetime is the process the harness launched; that is the
+    // correct scope for a run-level tag. If someone ever adds a file fallback
+    // "for symmetry with language", this test is what stops them.
+    const home = mkdtempSync(join(tmpdir(), "budgetary-src-"));
+    try {
+      mkdirSync(join(home, ".budgetary"), { recursive: true });
+      writeFileSync(
+        join(home, ".budgetary", "config.json"),
+        JSON.stringify({ api_key: "bg_test_dummy", source: "swe-bench" }),
+        "utf8",
+      );
+      // With the env unset, the file's tag has no effect whatsoever.
+      expect(resolveSource(src())).toBe(DEFAULT_SOURCE);
+      // And it is unreachable BY CONSTRUCTION: unlike resolveLanguage, resolveSource
+      // takes no `home` and never opens the config file. This is the assertion that
+      // fails if someone later adds a file fallback "for symmetry with language".
+      expect(resolveSource.toString()).not.toContain("configFilePath");
+      expect(resolveSource.toString()).not.toContain("readFileSync");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("narrates a SET-but-rejected tag under BUDGETARY_DEBUG — without echoing the value", () => {
+    // A typo'd tag in a harness would otherwise default SILENTLY and mislabel the
+    // whole batch with no signal anywhere. This is the operator's only warning.
+    const written: string[] = [];
+    const spy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation((s: unknown) => (written.push(String(s)), true));
+    try {
+      expect(
+        resolveSource({
+          BUDGETARY_SOURCE: "swe bench; cat /etc/passwd",
+          BUDGETARY_DEBUG: "1",
+        } as NodeJS.ProcessEnv),
+      ).toBe(DEFAULT_SOURCE);
+      const out = written.join("");
+      expect(out).toContain("ignoring BUDGETARY_SOURCE");
+      // The SHAPE, never the value — it may be long, or hold something the
+      // operator didn't mean to print into a log.
+      expect(out).not.toContain("swe bench");
+      expect(out).not.toContain("/etc/passwd");
+
+      // Silent when the variable is simply absent (the ordinary case).
+      written.length = 0;
+      expect(resolveSource({ BUDGETARY_DEBUG: "1" } as NodeJS.ProcessEnv)).toBe(DEFAULT_SOURCE);
+      expect(written.join("")).toBe("");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("sanitizeSource re-validates a value off disk (a corrupt entry never reaches the wire)", () => {
+    // The same rule the store's read-time re-check uses, so a hand-edited or
+    // half-written `source` is held to exactly the bound an env value is.
+    expect(sanitizeSource("swe-bench")).toBe("swe-bench");
+    expect(sanitizeSource("  swe-bench ")).toBe("swe-bench");
+    expect(sanitizeSource(undefined)).toBeNull();
+    expect(sanitizeSource(123)).toBeNull();
+    expect(sanitizeSource({})).toBeNull();
+    expect(sanitizeSource("")).toBeNull();
+    expect(sanitizeSource("x".repeat(65))).toBeNull();
+    expect(sanitizeSource("not a tag")).toBeNull();
   });
 });
 

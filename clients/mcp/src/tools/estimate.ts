@@ -17,6 +17,7 @@ import {
   pendingFilePath,
   resolveConfigStatus,
   resolveLanguage,
+  resolveSource,
 } from "../config.js";
 import {
   renderAuthFailed,
@@ -168,6 +169,14 @@ export async function runEstimateTool(
               forecast_p90: response.distribution.p90,
             }
           : {}),
+        // The declared provenance tag for THIS run, resolved from the environment
+        // — the ONE place in the client that ever reads it. Stamping it on the
+        // entry (rather than resolving it in the submit path) is what makes a
+        // cross-session retry send the tag of the run that actually happened: the
+        // submit is a later, separate process whose environment is unrelated.
+        // Fail-open: an absent/invalid value is already the default here, so no
+        // malformed tag can reach the store.
+        source: resolveSource(args.env),
       };
       // Pass the tool's clock so the append-time TTL sweep is consistent with
       // the created_at just stamped above.
