@@ -414,7 +414,7 @@ Unauthenticated service-mode signal. Lets clients render the service model (shar
 | `terms_url` | string \| null | URL of the terms of service, or `null` if not configured. |
 | `donate_url` | string \| null | Optional voluntary-donation link (third-party, link-out only). `null` unless configured; `null` is the expected default. |
 
-All fields except `mode`/`price` are server-config-driven and may be `null`. Clients must treat a `null` `donate_url` as "no donate affordance". See [shareware.md](shareware.md) for the model and the donation policy.
+All fields except `mode`/`price` are server-config-driven and may be `null`. Clients must treat a `null` `donate_url` as "no donate affordance" — it is unset today, and clients therefore render none. See [shareware.md](shareware.md) for the service model.
 
 ## 5. Scenario labels (v1)
 
