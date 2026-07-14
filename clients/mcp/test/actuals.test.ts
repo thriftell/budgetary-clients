@@ -20,7 +20,7 @@ import {
   type PendingWriter,
 } from "../src/actuals.js";
 import { PendingStore, type PendingEntry, type PendingStoreFile } from "../src/store.js";
-import { projectIdFromCwd } from "../src/tools/estimate.js";
+import { projectIdFromCwd, runEstimateTool } from "../src/tools/estimate.js";
 import { readTranscriptTotals } from "../src/transcript.js";
 import * as transcriptModule from "../src/transcript.js";
 import { readBreadcrumb, writeBreadcrumb } from "../src/breadcrumb.js";
@@ -125,13 +125,26 @@ describe("non-fabrication guard", () => {
       // serialized schema for the word: the human description legitimately reads
       // "natural-language description of the coding task".)
       expect(props).not.toContain("language");
+      // `source` is the same class of signal: a provenance tag DECLARED in the
+      // environment (BUDGETARY_SOURCE) and resolved once, at estimate time. A
+      // model that could name its own provenance could label a run as anything;
+      // it must never become a tool argument either.
+      expect(props).not.toContain("source");
     }
     // And there is no tool that writes actuals at all.
     expect(TOOLS.map((t) => t.name)).not.toContain("actual");
     expect(TOOLS.map((t) => t.name)).not.toContain("report-actual");
   });
 
-  it("submitActuals only sends the counts its caller supplied", async () => {
+  // This test's job is to stop a MODEL-FABRICATED field from reaching the wire:
+  // every measured value must come from the caller, never from anything the model
+  // could influence. The provenance tag added in 0024b is deliberately NOT such a
+  // field, and the assertions below say why rather than simply allowing it: it is
+  // a constant, environment-DECLARED tag, resolved once at estimate time and read
+  // back off the pending ENTRY — there is no code path by which a model can set,
+  // reach, or alter it. So the guard is: counts come from the caller, `source`
+  // comes from the entry, and NOTHING else is on the request.
+  it("submitActuals sends only the caller's counts + the entry's declared source (never a model-supplied field)", async () => {
     writePending(home, {
       version: 1,
       entries: [
@@ -160,6 +173,18 @@ describe("non-fabrication guard", () => {
     expect(sent.tokensOut).toBe(200);
     expect(sent.success).toBe(true);
     expect(sent.durationMs).toBe(5);
+    // The declared tag — from the entry (here: absent → the default constant).
+    expect(sent.metadata).toEqual({ source: "mcp_client" });
+    // And nothing else. A new field on this request must be a deliberate change
+    // to this list, not something that slipped in.
+    expect(Object.keys(sent).sort()).toEqual([
+      "durationMs",
+      "estimateId",
+      "metadata",
+      "success",
+      "tokensIn",
+      "tokensOut",
+    ]);
   });
 });
 
@@ -2304,3 +2329,314 @@ describe("runPendingList — per-row forecast / actual (T-1)", () => {
 function writeBreadcrumbForTest(startedAt: string, outcome: string, estimateId: string) {
   writeBreadcrumb(home, { startedAt, durationMs: 3, outcome, estimateId });
 }
+
+// ---------------------------------------------------------------------------
+// Provenance (`metadata.source`)
+//
+// The tag is a property of the RUN, not of the process that reports it. The
+// actuals path is cross-session AND cross-process: the estimate happens in the
+// MCP server process, the submit in a separate SessionEnd hook, and a FAILED
+// submit is queued and retried by some LATER session under whatever environment
+// that session happens to have. So the tag is resolved ONCE (at estimate time),
+// persisted on the entry, and re-read from the entry at submit — the submit path
+// never reads `process.env`. These tests pin that, since both failure modes are
+// silent: a dropped tag (the run contributes nothing) and, worse, an inherited
+// one (a foreign run is mislabeled).
+// ---------------------------------------------------------------------------
+
+describe("provenance: metadata.source", () => {
+  const PAYLOAD = { transcript_path: "/tmp/transcript.jsonl", reason: "clear" };
+  const USAGE = { tokensIn: 1000, tokensOut: 2000, trace: [] };
+
+  /** Run the REAL estimate tool under `env`, creating a real pending entry. */
+  async function estimateUnder(env: NodeJS.ProcessEnv, estimateId = "est_run") {
+    const fake = makeFakeClient();
+    fake.estimate = vi.fn(
+      async (): Promise<EstimateResponse> => ({
+        estimateId,
+        scenario: "confident",
+        void: false,
+        distribution: { p10: 100, p50: 500, p90: 2000, unit: "tokens" },
+        confidence: 0.7,
+        model: "m",
+        expiresAt: "",
+      }),
+    );
+    const result = await runEstimateTool({
+      query: "fix the failing parser test",
+      env: { ...ENV, ...env },
+      cwd,
+      home,
+      now: () => NOW,
+      clientFactory: () => asClient(fake),
+    });
+    expect(result.isError).toBe(false);
+    return result;
+  }
+
+  /** A submit that fails transiently (network) — the entry is kept and queued. */
+  const networkFailure = async (): Promise<never> => {
+    throw new BudgetaryError({
+      code: "network_error",
+      message: "connection reset",
+      httpStatus: null,
+      requestId: null,
+    });
+  };
+
+  /** Run the REAL session-end path under `env`; returns the fake client. */
+  async function sessionEndUnder(
+    env: NodeJS.ProcessEnv,
+    submitImpl?: () => Promise<ActualsResponse>,
+  ) {
+    const fake = makeFakeClient(submitImpl);
+    await runAutoActuals({
+      payload: PAYLOAD,
+      env: { ...ENV, ...env },
+      home,
+      cwd,
+      now: () => NOW,
+      stderr: { write: () => {} },
+      clientFactory: () => asClient(fake),
+      readUsage: () => USAGE,
+    });
+    return fake;
+  }
+
+  // === THE POINT OF THE WHOLE ITEM ===
+  it("a queued retry re-sends the RUN's tag, from a later session with NO env var", async () => {
+    // 1. A benchmark run: the estimate is made with the tag declared.
+    await estimateUnder({ BUDGETARY_SOURCE: "swe-bench" });
+    expect(readPending(home).entries[0]!.source).toBe("swe-bench");
+
+    // 2. Its submit hits a network blip and is queued (entry kept, attempts+1).
+    const failing = await sessionEndUnder(
+      { BUDGETARY_SOURCE: "swe-bench" },
+      networkFailure,
+    );
+    expect(failing.submitActuals).toHaveBeenCalledTimes(1);
+    const kept = readPending(home).entries;
+    expect(kept).toHaveLength(1);
+    expect(kept[0]!.attempts).toBe(1);
+    // withPersistedCounts spreads `...entry` — assert that it PRESERVED the tag
+    // rather than assuming it (the whole retry hinges on this field surviving).
+    expect(kept[0]!.source).toBe("swe-bench");
+    expect(kept[0]!.tokens_in).toBe(1000);
+
+    // 3. NEXT WEEK: an ordinary session — no BUDGETARY_SOURCE anywhere — retries it.
+    const retry = await sessionEndUnder({});
+    const sent = retry.submitActuals.mock.calls[0]![0];
+    // It must still be the BENCHMARK's tag. If this read the environment it would
+    // silently default to "mcp_client", and the run would contribute nothing.
+    expect(sent.metadata).toEqual({ source: "swe-bench" });
+    expect(sent.estimateId).toBe("est_run");
+    expect(readPending(home).entries).toEqual([]);
+  });
+
+  it("a queued entry retried INSIDE a tagged session keeps its OWN tag (no mislabel)", async () => {
+    // The inverse, and the more damaging direction: an ORDINARY run's queued
+    // entry must not inherit the tag of whatever session happens to retry it. If
+    // it did, an ordinary run would enter the corpus under benchmark provenance —
+    // and a held-out benchmark task landing in the corpus it is evaluated against
+    // makes every accuracy number from that split circular.
+    await estimateUnder({}); // no tag: an ordinary session
+    await sessionEndUnder({}, networkFailure);
+    expect(readPending(home).entries[0]!.source).toBe("mcp_client");
+
+    // A benchmark session later drains the queue.
+    const retry = await sessionEndUnder({ BUDGETARY_SOURCE: "swe-bench" });
+    const sent = retry.submitActuals.mock.calls[0]![0];
+    expect(sent.metadata).toEqual({ source: "mcp_client" });
+  });
+
+  it("sends the default when no env var is set at all", async () => {
+    await estimateUnder({});
+    const fake = await sessionEndUnder({});
+    expect(fake.submitActuals.mock.calls[0]![0].metadata).toEqual({
+      source: "mcp_client",
+    });
+  });
+
+  it("sends the declared tag on the ordinary (first-try) submit", async () => {
+    await estimateUnder({ BUDGETARY_SOURCE: "swe-bench" });
+    const fake = await sessionEndUnder({ BUDGETARY_SOURCE: "swe-bench" });
+    expect(fake.submitActuals.mock.calls[0]![0].metadata).toEqual({
+      source: "swe-bench",
+    });
+  });
+
+  it("forwards an OPAQUE tag — the client knows no lane vocabulary", async () => {
+    // A tag the client has never heard of must pass through untouched: the server
+    // owns the vocabulary, so a new lane needs no client release. (Shape only is
+    // validated — never meaning.)
+    await estimateUnder({ BUDGETARY_SOURCE: "some.future-lane_v2" });
+    const fake = await sessionEndUnder({});
+    expect(fake.submitActuals.mock.calls[0]![0].metadata).toEqual({
+      source: "some.future-lane_v2",
+    });
+  });
+
+  // --- Backward compatibility -----------------------------------------------
+
+  it("an entry from a pre-0024b client (no `source`) submits the default, never undefined", async () => {
+    // Hand-written v1 entry, exactly as an older client would have left it — and
+    // note it is a RETRY (it carries persisted counts), the path most likely to be
+    // holding an old entry when this ships.
+    writePending(home, {
+      version: 1,
+      entries: [
+        {
+          estimate_id: "est_old",
+          query: "q",
+          project_id: projectIdFromCwd(cwd, home),
+          created_at: RECENT,
+          attempts: 1,
+          tokens_in: 5, tokens_out: 6, success: true, duration_ms: 7,
+        },
+      ],
+    });
+    const fake = await sessionEndUnder({ BUDGETARY_SOURCE: "swe-bench" });
+    const sent = fake.submitActuals.mock.calls[0]![0];
+    // The DEFAULT CONSTANT — not the environment. Falling back to the env here
+    // would reintroduce the mislabel through the back door.
+    expect(sent.metadata).toEqual({ source: "mcp_client" });
+    expect(sent.metadata.source).not.toBeUndefined();
+  });
+
+  it("a corrupt/hand-edited `source` on disk degrades to the default (never reaches the wire)", async () => {
+    writePending(home, {
+      version: 1,
+      entries: [
+        {
+          estimate_id: "est_corrupt",
+          query: "q",
+          project_id: projectIdFromCwd(cwd, home),
+          created_at: RECENT,
+          attempts: 1,
+          tokens_in: 5, tokens_out: 6, success: true, duration_ms: 7,
+          // Not something our writer can produce; a partial write or a hand-edit.
+          source: "not a valid tag {}",
+        } as PendingEntry,
+      ],
+    });
+    const fake = await sessionEndUnder({});
+    expect(fake.submitActuals.mock.calls[0]![0].metadata).toEqual({
+      source: "mcp_client",
+    });
+  });
+
+  // --- Fail-open validation --------------------------------------------------
+  // A bad env value must never fail a submit, and must never be written to the
+  // store. `metadata` is 2 KB-capped server-side (a published 413), so an
+  // unbounded value would let a typo turn a real contribution into a rejection.
+
+  const JUNK: Array<[string, string]> = [
+    ["empty", ""],
+    ["blank", "   "],
+    ["500 chars", "x".repeat(500)],
+    ["65 chars (one over the bound)", "x".repeat(65)],
+    ["a space", "swe bench"],
+    ["a brace", "swe{bench}"],
+    ["a newline", "swe-bench\nrm -rf /"],
+    ["a quote", 'swe"bench'],
+  ];
+
+  for (const [label, value] of JUNK) {
+    it(`BUDGETARY_SOURCE with ${label} → default sent, submit still succeeds, junk never stored`, async () => {
+      await estimateUnder({ BUDGETARY_SOURCE: value });
+
+      // Never written to the store...
+      const stored = readPending(home).entries[0]!;
+      expect(stored.source).toBe("mcp_client");
+      const trimmed = value.trim();
+      if (trimmed.length > 0) {
+        // The junk itself is nowhere in the file — not under `source`, not anywhere.
+        const raw = readFileSync(join(home, ".budgetary", "pending.json"), "utf8");
+        expect(raw).not.toContain(trimmed);
+      }
+
+      // ...and the submit still succeeds, carrying the default.
+      const fake = await sessionEndUnder({ BUDGETARY_SOURCE: value });
+      expect(fake.submitActuals).toHaveBeenCalledTimes(1);
+      expect(fake.submitActuals.mock.calls[0]![0].metadata).toEqual({
+        source: "mcp_client",
+      });
+      expect(readPending(home).entries).toEqual([]); // submitted + removed
+    });
+  }
+
+  it("a valid tag is trimmed of surrounding whitespace", async () => {
+    await estimateUnder({ BUDGETARY_SOURCE: "  swe-bench  " });
+    expect(readPending(home).entries[0]!.source).toBe("swe-bench");
+  });
+
+  // --- The other submit paths ------------------------------------------------
+
+  it("the rollout path sends the entry's tag too", async () => {
+    await estimateUnder({ BUDGETARY_SOURCE: "swe-bench" });
+    const fake = makeFakeClient();
+    const code = await runRolloutActuals({
+      transcriptPath: "/tmp/rollout.jsonl",
+      success: true,
+      env: ENV, // no tag in THIS process
+      home,
+      cwd,
+      now: () => NOW,
+      out: () => {},
+      clientFactory: () => asClient(fake),
+      readUsage: () => USAGE,
+    });
+    expect(code).toBe(0);
+    expect(fake.submitActuals.mock.calls[0]![0].metadata).toEqual({
+      source: "swe-bench",
+    });
+  });
+
+  it("the manual --estimate-id path sends the ENTRY's tag when a real row exists", async () => {
+    // A harness driver must use --estimate-id to close the RIGHT estimate when
+    // several sessions share one cwd. If this path ignored the row sitting in the
+    // store, it would POST the default AND then remove that row on success —
+    // destroying the only copy of a tag the run genuinely declared. The tag comes
+    // from the ENTRY here, exactly as on every other submit path.
+    await estimateUnder({ BUDGETARY_SOURCE: "swe-bench" }, "est_byid");
+    expect(readPending(home).entries[0]!.source).toBe("swe-bench");
+
+    const fake = makeFakeClient();
+    const out: string[] = [];
+    const code = await runManualActuals({
+      env: ENV, // no tag in THIS process — it must come off the entry
+      home,
+      estimateId: "est_byid",
+      out: (l) => out.push(l),
+      prompt: scriptedPrompt(["10", "20", "y", "30"]),
+      clientFactory: () => asClient(fake),
+    });
+    expect(code).toBe(0);
+    expect(fake.submitActuals.mock.calls[0]![0].metadata).toEqual({
+      source: "swe-bench",
+    });
+    // Finding the real row also recovers its forecast band, for free.
+    expect(out.join("\n")).toContain("Forecast check:");
+    expect(readPending(home).entries).toEqual([]);
+  });
+
+  it("the manual --estimate-id path sends the default when NO row exists (never the env)", async () => {
+    // The path's original purpose: a billed estimate whose local row was never
+    // written. There is no entry, so there is no tag — and it must take the default
+    // CONSTANT, not the ambient environment, even inside a tagged shell.
+    writePending(home, { version: 1, entries: [] });
+    const fake = makeFakeClient();
+    const code = await runManualActuals({
+      env: { ...ENV, BUDGETARY_SOURCE: "swe-bench" },
+      home,
+      estimateId: "est_nowhere",
+      out: () => {},
+      prompt: scriptedPrompt(["10", "20", "y", "30"]),
+      clientFactory: () => asClient(fake),
+    });
+    expect(code).toBe(0);
+    expect(fake.submitActuals.mock.calls[0]![0].metadata).toEqual({
+      source: "mcp_client",
+    });
+  });
+});

@@ -44,6 +44,24 @@ export interface PendingEntry {
   forecast_p10?: number;
   forecast_p50?: number;
   forecast_p90?: number;
+  // --- Additive (v1-compatible) PROVENANCE tag captured at ESTIMATE time, from
+  //     the environment (`BUDGETARY_SOURCE`) — never from the model. Sent as
+  //     `actuals.metadata.source` when the entry is closed out.
+  //
+  //     It is persisted HERE, on the entry, for the same reason the measured
+  //     counts above are: the submit is a SEPARATE, LATER process, and a failed
+  //     submit is retried by whatever session comes next, under whatever
+  //     environment that session happens to have. Resolving the tag on the submit
+  //     path would therefore either DROP this run's tag (the retrying session has
+  //     no variable set) or INHERIT a foreign one (the retrying session is itself
+  //     a tagged run) — a silent mislabel. The tag belongs to the RUN, so it
+  //     travels with the run's entry.
+  //
+  //     Absent on an entry written before this field existed; the reader falls
+  //     back to the DEFAULT constant (never to the environment). Re-validated at
+  //     read time like every optional field above (a partial/corrupt write is
+  //     ignored, not trusted), so it needs no bump to the file `version`.
+  source?: string;
 }
 
 export interface PendingStoreFile {

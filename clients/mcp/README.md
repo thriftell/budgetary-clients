@@ -122,6 +122,27 @@ It's a free-form display name — `TypeScript`, `Python`, `Go`, and so on — th
 
 A plain stdio MCP server only sees the messages your host sends it, not which file you have open, so this declared value (one per host/session) is the signal it can rely on. Hosts that expose no language at all just record the estimate without one.
 
+## Optional: `BUDGETARY_SOURCE` — an operator's label for a batch of runs
+
+**Ordinary users have nothing to set here, and nothing changes if you don't.** This exists for operators who drive this client from an automated harness (a benchmark, a load test, a scripted evaluation) and want those runs labelled so they can tell them apart from real ones afterwards.
+
+Set it **in the environment of the process you launch for that batch**, so its lifetime is the batch:
+
+```bash
+BUDGETARY_SOURCE=my-harness-run <the command your harness runs>
+```
+
+> **Do not put this one in your MCP host config.** Unlike `BUDGETARY_HOST` and `BUDGETARY_LANGUAGE`, this label should *not* go in `claude mcp add --env`, `~/.claude.json`, `.mcp.json`, or `~/.budgetary/config.json`. Those are **machine-wide and permanent**: a label you set there for one batch silently outlives it, and every ordinary session on that machine is labelled with it afterwards — undetectably, because the rows still look perfectly normal. `~/.budgetary/config.json` is not even read for this variable, on purpose. A label that describes *a run* should not outlive the run.
+
+Each actuals submission carries this label. It defaults to `mcp_client`. It is an **opaque string** — the client attaches no meaning to it, validates only its shape (up to 64 characters of `A–Z a–z 0–9 . _ -`), and ignores anything malformed, falling back to the default rather than failing your submission. (Run with `BUDGETARY_DEBUG=1` to have it say so on stderr when it rejects a label; otherwise a typo is silent.)
+
+Two things it is deliberately **not**:
+
+- **It does not change how your data is treated.** It is a label, not a setting. Setting it (or not) grants nothing, unlocks nothing, and alters nothing about what is recorded or how it is used.
+- **It is not a per-task field, and the model never sets it.** Like `BUDGETARY_HOST` and `BUDGETARY_LANGUAGE`, it is **declared** in the environment. There is intentionally no `source` argument on the `estimate` tool.
+
+The label is resolved once, when the estimate is made, and stored on that estimate's pending entry — so if a submission has to be retried later (from a different session, with a different environment), it still reports the label of the run that actually happened.
+
 ## Actuals — automatic where possible, manual otherwise, never fabricated
 
 A pre-flight estimate is only half the loop; calibration needs the **realized** token counts after the run. How those are recorded depends on what the host exposes:
@@ -161,6 +182,7 @@ Only these things leave your machine, and only to `https://api.budgetary.tools`:
 - The **task description** you pass to `estimate`.
 - If you set it, the **language tag** you declared (e.g. `TypeScript`) — a benign label, the same kind of thing as the host name. Never sent unless you opt in via `BUDGETARY_LANGUAGE` or the config `language` field.
 - After a run, the **token counts** (`tokens_in`, `tokens_out`), a `success` flag, and a duration.
+- A constant **client label** — `mcp_client` unless an operator overrode it with `BUDGETARY_SOURCE` (see above). It says which client sent the row and nothing else: it is a fixed string, derived from no part of you, your machine, or your task.
 - On Claude Code, a **behavior trace**: per step, the host tool name (e.g. `Read`, `Bash`), its token count, a **redacted descriptor** of what it acted on, and whether it succeeded. The descriptor exposes a program name *in the clear only when it is a common, non-sensitive tool* (e.g. `pytest`, `npm run`) — a pasted credential or a private script name is never shown, only its **salted digest**; everything after the program (paths, arguments, the rest of the command) always lives inside the digest, or a bare path digest for a file tool. Custom/internal tool names (e.g. an org's private MCP tool) are reported generically as `mcp:other`, never verbatim. **No file contents, absolute paths, command arguments, or output ever leave the machine** — only an allowlisted program name and an opaque key. Set `BUDGETARY_TRACE_TARGET=off` to drop the descriptor entirely (the trace falls back to tool names + token counts); any value other than an explicit `1`/`true`/`on`/`yes` is treated as off.
 
 Nothing else is transmitted. Both the descriptor's digest and the `project_id` attached to each estimate are **salted, non-reversible** hashes (HMAC-SHA256): the descriptor digest with a fresh per-submission salt, and `project_id` with a machine-local install salt persisted at `~/.budgetary/install-salt`. The salts never leave the machine, so the server gets a stable key it cannot reverse back to a command or path. The pending store lives at `~/.budgetary/pending.json`, shared byte-for-byte with the first-party Claude Code and Codex clients, so configuring once covers every host.

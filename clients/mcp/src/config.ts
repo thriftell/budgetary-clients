@@ -185,6 +185,96 @@ export function resolveLanguage(
 }
 
 /**
+ * The provenance tag sent as `actuals.metadata.source` when a pending entry
+ * carries none (an entry written by an older client, or the synthetic by-id
+ * entry the manual path builds). Purely DIAGNOSTIC: it names the shipped client
+ * and grants nothing. The server decides what a row is worth from the
+ * authenticated org, never from this string — so the default must never be
+ * load-bearing, and changing it can never change an outcome.
+ */
+export const DEFAULT_SOURCE = "mcp_client";
+
+/**
+ * Max stored/sent length of a source tag. Not cosmetic: `metadata` has a
+ * published 2 KB cap the server enforces as a `413`, so an unbounded env value
+ * would let a typo (a pasted file, a stray heredoc) turn a real contribution
+ * into a rejected request.
+ */
+const MAX_SOURCE_LEN = 64;
+
+/** Conservative tag charset — no whitespace, quotes, braces, or newlines. */
+const SOURCE_PATTERN = /^[A-Za-z0-9._-]+$/;
+
+/**
+ * A well-formed source tag (trimmed), or `null` when the value is absent, empty,
+ * over-long, or contains anything outside {@link SOURCE_PATTERN}.
+ *
+ * The single validation rule, shared by the env resolution here and the pending
+ * store's read-time re-check in `actuals.ts` — so a hand-edited or half-written
+ * `source` on disk is held to exactly the same bound as one from the
+ * environment, and neither can put junk on the wire.
+ *
+ * It deliberately validates SHAPE ONLY. The client does not know, and must never
+ * encode, the meaningful tag values: it forwards an opaque string and the server
+ * decides what it means (so a new one needs no client release).
+ */
+export function sanitizeSource(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || trimmed.length > MAX_SOURCE_LEN) return null;
+  if (!SOURCE_PATTERN.test(trimmed)) return null;
+  return trimmed;
+}
+
+/**
+ * Resolve the declared provenance tag for THIS run from `BUDGETARY_SOURCE`,
+ * falling back to {@link DEFAULT_SOURCE}. Same posture as
+ * {@link resolveLanguage}: a host/operator signal declared in the environment,
+ * never inferred from the task and never a model-writable tool argument.
+ *
+ * **Environment ONLY — deliberately NO `~/.budgetary/config.json` fallback**,
+ * which is the one place this diverges from {@link resolveLanguage}. A config
+ * file is machine-wide and permanent: set a tag there for one benchmark run,
+ * forget it, and every ordinary session on that machine is thereafter stamped
+ * with a provenance that is a lie — and undetectably so, because the rows look
+ * perfectly well-formed. An env var's lifetime is the process that set it, which
+ * is exactly the scope a run-level tag should have.
+ *
+ * **Fail-open.** An absent, empty, over-long, or malformed value resolves to the
+ * default: a bad tag must never fail a submit, and must never be persisted. The
+ * rejection is narrated under `BUDGETARY_DEBUG` (never echoing the value itself
+ * — it may be long or hold something the operator didn't mean to print).
+ *
+ * Called from exactly ONE place — pending-entry creation, at ESTIMATE time. The
+ * tag is a property of the RUN, not of the process that happens to report it: a
+ * failed submit is retried by a LATER session under a DIFFERENT environment, so
+ * resolving it on the submit path would silently default (dropping the run's
+ * real tag) or silently inherit a foreign one (mislabeling it). Resolve once,
+ * persist on the entry, and let the retry send the entry's value.
+ */
+export function resolveSource(env: NodeJS.ProcessEnv = process.env): string {
+  const raw = env.BUDGETARY_SOURCE;
+  // Absent — the ordinary case for every user. Silent by design.
+  if (typeof raw !== "string") return DEFAULT_SOURCE;
+
+  const valid = sanitizeSource(raw);
+  if (valid !== null) return valid;
+
+  // SET but unusable (blank, over-long, or malformed). Narrate it under debug:
+  // an operator who typo'd the tag in a harness would otherwise get the default
+  // SILENTLY, and the whole batch would be labelled wrong with no signal
+  // anywhere. Reports the SHAPE only — never the value, which may be long or
+  // hold something that wasn't meant to be printed.
+  if (debugEnabled(env)) {
+    process.stderr.write(
+      `Budgetary: ignoring BUDGETARY_SOURCE (${raw.trim().length} chars; a tag must be ` +
+        `1–${MAX_SOURCE_LEN} chars of A–Z a–z 0–9 . _ -). Using "${DEFAULT_SOURCE}".\n`,
+    );
+  }
+  return DEFAULT_SOURCE;
+}
+
+/**
  * Whether the auto path may attach the redacted `target` descriptor to trace
  * steps. Defaults to ON — `target` is a redacted descriptor (program name +
  * salted, non-reversible digest, or a bare path digest) that carries no raw

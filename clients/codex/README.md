@@ -124,7 +124,7 @@ Only these values cross the network, and only to `https://api.budgetary.tools`:
 
 - The task description you pass to the `estimate` skill.
 - A SHA-256 prefix of your working-directory absolute path (groups estimates by project; reveals nothing about the path).
-- If you submit actuals manually: `tokens_in`, `tokens_out`, `duration_ms`, and a `success` flag.
+- If you submit actuals manually: `tokens_in`, `tokens_out`, `duration_ms`, a `success` flag, and a constant **client label** (the fixed string `mcp_client`, saying which client sent the row — derived from no part of you, your machine, or your task; operators running an automated harness can override it with `BUDGETARY_SOURCE`, which is a label only and changes nothing about how the data is treated).
 
 Nothing else leaves the machine. The API key is never logged.
 
