@@ -127,7 +127,9 @@ The full hierarchy:
 
 ## Idempotency
 
-`estimate()` accepts an optional `clientRequestId` that is forwarded to the server as `client_request_id`. The API treats identical replays within 24 hours as the same call, returning the original response without rebilling. The SDK auto-generates a fresh UUID v4 on every call by default so retries are safe out of the box.
+`estimate()` accepts an optional `clientRequestId` that is forwarded to the server as `client_request_id`. It is a **correlation id only**: the server accepts it but **currently ignores it — it does not provide idempotent replay.** A retry with the same `client_request_id` produces a **new** `estimate_id`, recomputes, and is **billed as a separate estimate**. Do **not** rely on it for dedup.
+
+`POST /v1/actuals` *is* idempotent on `estimate_id`, and is safe to retry on network failure. See §8 of the [API contract](../../docs/api-contract.md).
 
 ```ts
 // default — SDK generates a UUID
