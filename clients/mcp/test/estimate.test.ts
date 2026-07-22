@@ -308,10 +308,73 @@ describe("runEstimateTool — malformed 2xx never throws out of the tool (P-C1)"
   });
 });
 
-describe("runEstimateTool — void", () => {
-  it("renders the void message and does NOT write a pending entry", async () => {
+describe("runEstimateTool — void (0024c: out-of-domain still ingests)", () => {
+  it("renders the void message AND writes a pending entry (no forecast band) so the actual can pair", async () => {
     const fake = makeFakeClient(async () => voidEstimate());
 
+    const result = await runEstimateTool({
+      query: "???",
+      // A declared provenance tag — an out-of-domain seed/contributor query.
+      env: {
+        BUDGETARY_API_KEY: "bg_test_dummy",
+        BUDGETARY_SOURCE: "swe-bench",
+      } as NodeJS.ProcessEnv,
+      cwd,
+      home,
+      clientFactory: () => asClient(fake),
+      now: () => new Date("2026-05-27T10:14:00Z"),
+    });
+
+    // The void's user-facing message is UNCHANGED — confidence still shapes what
+    // the user sees ("cannot confidently estimate … proceed at your own judgment").
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain("cannot confidently estimate");
+
+    // But the outcome is now RECORDABLE: a pending entry is written, keyed on the
+    // void estimate's id, so `on-session-end` can pair the real actual to it. This
+    // is the whole point of 0024c — blank-region actuals are the ones that broaden
+    // coverage, and the shipped client used to drop exactly them.
+    const file = JSON.parse(
+      readFileSync(join(home, ".budgetary", "pending.json"), "utf8"),
+    );
+    expect(file.entries).toHaveLength(1);
+    const entry = file.entries[0];
+    expect(entry.estimate_id).toBe("est_void");
+    expect(entry.query).toBe("???");
+    expect(entry.attempts).toBe(0);
+    // The provenance tag (0024b) rides on the entry, so the paired actual carries
+    // `source` even for a query the engine could not forecast.
+    expect(entry.source).toBe("swe-bench");
+    // A void has NO forecast (distribution was null), so the band fields are absent
+    // — the entry pairs on the id alone, not on a prediction we never made.
+    expect(entry.forecast_p10).toBeUndefined();
+    expect(entry.forecast_p50).toBeUndefined();
+    expect(entry.forecast_p90).toBeUndefined();
+  });
+
+  it("leaves the void's user-facing text UNCHANGED — no pending-hygiene nudge (spec §3)", async () => {
+    // The project already has an unexpired pending estimate, so a CONFIDENT run
+    // here would append the "earlier estimates await actuals" nudge. A void must
+    // not: confidence shapes the message, recordability is orthogonal. Its text
+    // stays exactly the two void lines — it just silently gains a pending entry.
+    mkdirSync(join(home, ".budgetary"), { recursive: true });
+    writeFileSync(
+      join(home, ".budgetary", "pending.json"),
+      JSON.stringify({
+        version: 1,
+        entries: [
+          {
+            estimate_id: "est_prior",
+            query: "a different earlier task",
+            project_id: projectIdFromCwd(cwd, home),
+            created_at: new Date(Date.now() - 60_000).toISOString(),
+            attempts: 0,
+          },
+        ],
+      }),
+      "utf8",
+    );
+    const fake = makeFakeClient(async () => voidEstimate());
     const result = await runEstimateTool({
       query: "???",
       env: { BUDGETARY_API_KEY: "bg_test_dummy" } as NodeJS.ProcessEnv,
@@ -319,12 +382,18 @@ describe("runEstimateTool — void", () => {
       home,
       clientFactory: () => asClient(fake),
     });
-
-    expect(result.isError).toBe(false);
     expect(result.text).toContain("cannot confidently estimate");
-    expect(() =>
+    expect(result.text).not.toContain("await actuals");
+    // The void entry is still recorded, alongside the prior one.
+    const file = JSON.parse(
       readFileSync(join(home, ".budgetary", "pending.json"), "utf8"),
-    ).toThrow();
+    );
+    expect(file.entries).toHaveLength(2);
+    expect(
+      file.entries.some(
+        (e: { estimate_id: string }) => e.estimate_id === "est_void",
+      ),
+    ).toBe(true);
   });
 });
 

@@ -377,23 +377,26 @@ describe("PendingStore — cross-process concurrency (no lost appends)", () => {
   function findEsbuild(): string {
     const here = dirname(fileURLToPath(import.meta.url));
     const repoRoot = join(here, "..", "..", "..");
-    const candidates = [
-      join(repoRoot, "node_modules", ".pnpm", "node_modules", ".bin", "esbuild"),
-      join(here, "..", "node_modules", ".bin", "esbuild"),
-      join(repoRoot, "node_modules", ".bin", "esbuild"),
-    ];
-    for (const c of candidates) {
-      if (existsSync(c)) return c;
-    }
-    // Fallback: glob the pnpm virtual store for any esbuild@* bin.
+    // Prefer native binaries directly from the pnpm virtual store.
+    // The hoisted pnpm shim at .pnpm/node_modules/.bin/esbuild runs
+    // `exec node <bin/esbuild>`, but esbuild ships a native ELF in
+    // bin/esbuild (not a JS file), so node fails to parse it.
     const pnpm = join(repoRoot, "node_modules", ".pnpm");
     if (existsSync(pnpm)) {
-      for (const name of readdirSync(pnpm)) {
+      for (const name of readdirSync(pnpm).sort().reverse()) {
         if (name.startsWith("esbuild@")) {
           const bin = join(pnpm, name, "node_modules", "esbuild", "bin", "esbuild");
           if (existsSync(bin)) return bin;
         }
       }
+    }
+    // Fallback for non-pnpm environments (npm/yarn use proper executable shims).
+    const candidates = [
+      join(here, "..", "node_modules", ".bin", "esbuild"),
+      join(repoRoot, "node_modules", ".bin", "esbuild"),
+    ];
+    for (const c of candidates) {
+      if (existsSync(c)) return c;
     }
     throw new Error("could not locate an esbuild binary to bundle the child fixture");
   }

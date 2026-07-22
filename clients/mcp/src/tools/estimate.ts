@@ -78,9 +78,11 @@ export function projectIdFromCwd(cwd: string, home?: string): string {
 
 /**
  * The only model-invokable behavior. Resolves config, calls the estimate
- * endpoint, renders the result, and appends a pending entry on a non-void
- * estimate. Never throws — every gated/error state is returned as text so the
- * MCP host can show it inline.
+ * endpoint, renders the result, and appends a pending entry whenever the
+ * response carries an estimate_id — VOID OR NOT (0024c). An out-of-domain query
+ * voids (no forecast), but the outcome is still recordable, and those are exactly
+ * the blank-region actuals the corpus needs to broaden coverage. Never throws —
+ * every gated/error state is returned as text so the MCP host can show it inline.
  */
 export async function runEstimateTool(
   args: EstimateToolArgs,
@@ -147,7 +149,16 @@ export async function runEstimateTool(
     // — i.e. this estimate likely just re-billed a task already forecast. Surfaced
     // so the user can reuse the earlier one next time instead of paying twice.
     let dup = false;
-    if (!response.void) {
+    // 0024c: write a pending entry whenever the server returned an estimate_id —
+    // void or not. The server persists the Estimate row and returns its id even on
+    // a void (out-of-domain), so the id is pairable; gating this on `!void` (the old
+    // behavior) silently DROPPED the out-of-domain outcomes — precisely the
+    // blank-region actuals the corpus can't broaden coverage without. Prediction
+    // confidence and outcome capture are orthogonal: we want the real actual most
+    // exactly when we could not forecast it. `estimateId` is SDK-validated to be a
+    // non-empty string on every response, so this is always true in practice; the
+    // guard documents the invariant and skips a useless entry if it ever isn't.
+    if (response.estimateId) {
       const store = new PendingStore({
         path: pendingFilePath(args.home),
         logger: { warn: (m) => process.stderr.write(`${m}\n`) },
@@ -160,8 +171,9 @@ export async function runEstimateTool(
         attempts: 0,
         // Persist the forecast band (LOCAL only — the response already carried it)
         // so `pending`/`doctor`/the submit lines can later close the loop against
-        // the realized actual. `distribution` is non-null on a non-void estimate;
-        // the guard is belt-and-suspenders.
+        // the realized actual. `distribution` is null on a VOID estimate, so the
+        // spread then omits the band entirely — exactly right: a void has no
+        // forecast, only a pairable estimate_id and the real actual still to come.
         ...(response.distribution
           ? {
               forecast_p10: response.distribution.p10,
@@ -208,12 +220,15 @@ export async function runEstimateTool(
     // Nudge, best-effort (never fatal). Lead with the more specific duplicate
     // warning when this exact task is already forecast and unexpired — that's a
     // likely double-bill; otherwise the generic "earlier estimates await actuals".
-    if (stored && dup) {
+    // NOT on a void (0024c): a void silently gains a pending entry, but its
+    // user-facing text stays byte-for-byte what it was — confidence shapes the
+    // message, recordability is orthogonal (spec §3).
+    if (!response.void && stored && dup) {
       text +=
         "\n\n(You already have an UNEXPIRED estimate for this exact task in this " +
         "project — re-estimating bills again. Reuse it, or close it with " +
         "`npx @budgetary/mcp report-actual`.)";
-    } else if (stored && others > 0) {
+    } else if (!response.void && stored && others > 0) {
       text +=
         `\n\n(${others} earlier ${others === 1 ? "estimate" : "estimates"} for ` +
         "this project still await actuals — run `npx @budgetary/mcp pending`.)";
