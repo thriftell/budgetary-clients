@@ -1,5 +1,12 @@
 # @budgetary/mcp
 
+## 0.6.1
+
+### Patch Changes
+
+- Updated dependencies [6c49bb9]
+  - @budgetary/sdk@0.7.1
+
 ## 0.6.0
 
 ### Minor Changes
