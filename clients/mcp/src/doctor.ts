@@ -11,6 +11,11 @@ import {
 import { breadcrumbForecastVsActual, describeAge } from "./actuals.js";
 import { readBreadcrumb, type SessionEndBreadcrumb } from "./breadcrumb.js";
 import { configDiagnostics, pendingFilePath, resolveConfig } from "./config.js";
+import {
+  claudeCodePresent,
+  contributionStatus,
+  sessionEndHookLines,
+} from "./contribution.js";
 import { PendingStore } from "./store.js";
 import { SERVER_VERSION } from "./version.js";
 
@@ -75,6 +80,76 @@ function printLocalState(args: DoctorArgs, now: Date): void {
       ? `Last auto: ${describeBreadcrumb(crumb, now)}`
       : "Last auto: (no automatic session-end run recorded yet)",
   );
+  printContribution(args);
+}
+
+/**
+ * Whether completed runs on this machine have an automatic way to be submitted —
+ * the one state `doctor` could not previously report, and the one a bare
+ * `claude mcp add` silently gets wrong. `claude mcp add` wires the estimate tool
+ * alone; the SessionEnd hook ships with the plugin. Without it a user estimates
+ * indefinitely and never contributes a single realized run, with nothing anywhere
+ * saying so.
+ *
+ * ★ The negative branch is an OBSERVATION AND AN OFFER, never a verdict. The
+ * detection behind it is positive-only and cannot prove absence (see
+ * {@link contributionStatus}), so this says "nothing has been recorded here" —
+ * which is exactly what we know — and then offers both fixes. It deliberately
+ * mirrors the shape of the no-key branch above: state what is missing, say what
+ * it costs, give the command.
+ *
+ * Printed in EVERY branch, including no-key: whether the hook is wired is a
+ * property of the install, independent of whether a key resolves or the API is
+ * reachable, and it is precisely the user with an unfinished setup who most needs
+ * to see it.
+ */
+function printContribution(args: DoctorArgs): void {
+  const { out } = args;
+  const status = contributionStatus(args.env, args.home);
+  if (status.kind === "auto") {
+    out(
+      // Each branch cites its own evidence. `declared` is a statement the
+      // launching manifest made, not one we verified — say so rather than
+      // asserting the hook is wired.
+      status.via === "declared"
+        ? "Actuals:   automatic — the launching manifest declares a session-end hook."
+        : "Actuals:   automatic — a session-end run has been recorded here (see 'Last auto' above).",
+    );
+    return;
+  }
+  out("Actuals:   no automatic session-end submission has been recorded on this machine.");
+  // The signal is retrospective — a breadcrumb exists only AFTER a session-end
+  // run — so a correctly wired hook reads as "nothing recorded" until it first
+  // fires. Say that here, or a user who just pasted the hook below (or who is
+  // running the plugin and has not ended a session yet) reads this as "my edit
+  // did not take" and undoes the very fix this block exists to deliver.
+  out("           If you run the Budgetary plugin, or just wired the hook, that is expected");
+  out("           until your next session ends — it appears above under 'Last auto:'.");
+  // Conditional, and deliberately so. `report-actual` and `on-session-end
+  // --transcript` submit real actuals but write no breadcrumb, so this block
+  // never retracts for someone using them. An unconditional "completed runs are
+  // never submitted" would therefore be permanently FALSE for every manual host
+  // — telling a Cursor user who submits by hand every day that they contribute
+  // nothing. State the conditional instead; it is true for everyone.
+  out("           Otherwise nothing submits for you automatically, and a completed run");
+  out("           cannot improve future estimates unless it is submitted — by hook or by hand.");
+  // `doctor` runs in the user's shell and cannot know the host (see
+  // `claudeCodePresent`), so the Claude-Code-only recipe is shown only where
+  // Claude Code is actually installed.
+  if (claudeCodePresent(args.home)) {
+    out("           On Claude Code you can wire it once — add this to ~/.claude/settings.json");
+    out("           (nothing writes it for you):");
+    for (const line of sessionEndHookLines("             ")) out(line);
+    out("           The hook reads your key from ~/.budgetary/config.json, keeping it out of");
+    out("           the process list. The Budgetary plugin ships this hook already.");
+  }
+  out("           To submit a finished session by hand instead — counts measured from the");
+  out("           transcript, never typed — run from the directory you estimated in:");
+  out("             npx @budgetary/mcp on-session-end --transcript <session transcript>");
+  out("             Claude Code: ~/.claude/projects/<project>/<session-id>.jsonl");
+  out("             Codex:       ~/.codex/sessions/rollout-<ts>-<uuid>.jsonl");
+  out("           On a host that writes no transcript (Cursor, Copilot, and others), record");
+  out("           the counts yourself: npx @budgetary/mcp report-actual");
 }
 
 /**
