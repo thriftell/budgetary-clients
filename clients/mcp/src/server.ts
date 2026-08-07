@@ -19,6 +19,7 @@ import {
 } from "./actuals.js";
 import { configDiagnostics } from "./config.js";
 import { runDoctor } from "./doctor.js";
+import { TOOL_USE_ID_META } from "./session.js";
 import { runEstimateTool } from "./tools/estimate.js";
 import { SERVER_VERSION } from "./version.js";
 
@@ -112,12 +113,21 @@ export async function handleCallTool(
   const query = typeof a.query === "string" ? a.query : "";
   const model = typeof a.model === "string" ? a.model : undefined;
 
+  // The HOST's id for this call, carried in the request's `_meta`. It is not an
+  // argument — the model cannot see it, set it, or influence it — and it is what
+  // later lets a finished session's run be matched to its own transcript. Absent
+  // on hosts that don't send it, which simply means that run is not reconcilable.
+  const meta = request.params._meta as Record<string, unknown> | undefined;
+  const rawToolUseId = meta?.[TOOL_USE_ID_META];
+  const toolUseId = typeof rawToolUseId === "string" ? rawToolUseId : undefined;
+
   const result = await (deps.runEstimate ?? runEstimateTool)({
     query,
     model,
     env: deps.env ?? process.env,
     cwd: (deps.cwd ?? (() => process.cwd()))(),
     signal: deps.signal,
+    toolUseId,
   });
   return {
     content: [{ type: "text", text: result.text }],

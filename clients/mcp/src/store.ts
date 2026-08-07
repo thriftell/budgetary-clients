@@ -62,6 +62,33 @@ export interface PendingEntry {
   //     read time like every optional field above (a partial/corrupt write is
   //     ignored, not trusted), so it needs no bump to the file `version`.
   source?: string;
+  // --- Additive (v1-compatible) SESSION BINDING captured at ESTIMATE time, from
+  //     the host's environment and its own per-call request metadata — never from
+  //     the model, and never sent on the wire. All four are LOCAL-only. Together
+  //     they are what lets a LATER estimate close this run out on a host with no
+  //     session-end hook: they say which transcript is THIS run's, and whether
+  //     the session that produced it has finished.
+  //
+  //     Stamped HERE, on the entry, for the same reason `source` is: the closing
+  //     estimate runs in a different, later session, and re-resolving any of this
+  //     from that session's environment would bind this run to that session's
+  //     transcript — the mis-pairing the measured counts above already warn about.
+  //
+  //     ALL FOUR OR NONE. A partial binding cannot be used safely (see
+  //     `session.ts`), so a reader that finds one missing treats the entry as
+  //     unbindable and leaves it alone. Absent on a non-Claude-Code host and on
+  //     every entry written before these fields existed; those rows are not
+  //     errors, just rows this path cannot serve. Re-validated at read time like
+  //     every optional field above (a partial/corrupt write is ignored, not
+  //     trusted), so they need no bump to the file `version`.
+  /** The session the serving MCP server was SPAWNED in — a HINT, stale after a `/clear`. */
+  session_id?: string;
+  /** The host's id for the estimate call itself — the PROOF of which transcript is ours. */
+  tool_use_id?: string;
+  /** Absolute path of this project's Claude Code transcript directory. */
+  transcript_dir?: string;
+  /** The MCP server process that served the estimate; its death means the session ended. */
+  owner_pid?: number;
 }
 
 export interface PendingStoreFile {

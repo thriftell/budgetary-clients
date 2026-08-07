@@ -202,7 +202,7 @@ function withPersistedCounts(
  * fresh read) rather than submitting a fabricated count — the store keeps v1
  * files readable precisely because these are checked here, not trusted on read.
  */
-function persistedCounts(entry: PendingEntry): ActualCounts | null {
+export function persistedCounts(entry: PendingEntry): ActualCounts | null {
   const { tokens_in, tokens_out, success, duration_ms } = entry;
   if (
     typeof tokens_in !== "number" ||
