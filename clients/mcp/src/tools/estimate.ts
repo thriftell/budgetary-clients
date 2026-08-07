@@ -20,6 +20,12 @@ import {
   resolveSource,
 } from "../config.js";
 import {
+  claimOneTimeNotice,
+  contributionStatus,
+  HOOKLESS_NOTICE,
+  hooklessNoticeLines,
+} from "../contribution.js";
+import {
   renderAuthFailed,
   renderEstimate,
   renderPermissionDenied,
@@ -232,6 +238,32 @@ export async function runEstimateTool(
       text +=
         `\n\n(${others} earlier ${others === 1 ? "estimate" : "estimates"} for ` +
         "this project still await actuals — run `npx @budgetary/mcp pending`.)";
+    }
+
+    // ONCE per install: tell a hook-less Claude Code user that this install has
+    // no automatic way to submit a completed run. Until now that was silent —
+    // `claude mcp add` wires the estimate tool alone, so the user could estimate
+    // forever, never contribute, and never be told. A gap nobody mentions is one
+    // the user can neither fix nor notice.
+    //
+    // Narrow on purpose, so the WORKING PATH sees nothing new:
+    //   - `claude-code` only — it is the only host with a session-end hook to be
+    //     missing. Every other host is manual BY DESIGN and its footer already
+    //     says so; adding this there would be noise, not news.
+    //   - suppressed by ANY positive sign of an automatic path (see
+    //     `contributionStatus`), so an install that can contribute is untouched.
+    //   - not on a VOID: a void's user-facing text stays byte-for-byte what it
+    //     was (the 0024c rule). The notice simply waits for the next estimate,
+    //     and `doctor` states it unconditionally in the meantime.
+    //   - `claimOneTimeNotice` last, and only if everything else already matched,
+    //     so the marker is never burned on a run that would not have shown it.
+    if (
+      !response.void &&
+      host === "claude-code" &&
+      contributionStatus(args.env, args.home).kind === "manual-only" &&
+      claimOneTimeNotice(HOOKLESS_NOTICE, args.home)
+    ) {
+      text += `\n\n${hooklessNoticeLines().join("\n")}`;
     }
     return { text, isError: false };
   } catch (err) {

@@ -5,6 +5,7 @@
       "args": ["-y", "@budgetary/mcp@0.7.0"],
       "env": {
         "BUDGETARY_HOST": "claude-code",
+        "BUDGETARY_SESSION_END": "hook",
         "BUDGETARY_API_KEY": "${user_config.api_key}"
       }
     }

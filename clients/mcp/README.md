@@ -17,7 +17,34 @@ claude mcp add budgetary \
   -- npx -y @budgetary/mcp
 ```
 
-> **Automatic actuals need the plugin, not just this command.** `claude mcp add` wires the **estimate tool** only. The session-end hook that submits real actuals is wired by the bundled [Claude Code plugin](../claude-code/README.md) (via its manifest), so with a bare `claude mcp add` you get estimates but record actuals **manually** (`npx @budgetary/mcp report-actual`), the same as any other host. Install the plugin for the automatic loop.
+> **Automatic actuals need the plugin, not just this command.** `claude mcp add` wires the **estimate tool** only. The session-end hook that submits real actuals is wired by the bundled [Claude Code plugin](../claude-code/README.md) (via its manifest), so with a bare `claude mcp add` you get estimates but record actuals **manually**, the same as any other host. Install the plugin for the automatic loop — or add the hook yourself (below).
+>
+> You do not have to have read this to find out: `npx @budgetary/mcp doctor` reports whether an automatic session-end submission has ever **run** on this machine, and prints the exact hook to add if none has. On an install tagged `BUDGETARY_HOST=claude-code` (as the command above does), the server also says so once, on its first estimate. Neither ever writes to your Claude Code configuration — nothing in this package reads or edits it.
+
+To wire the hook without the plugin, add this to `~/.claude/settings.json` yourself:
+
+```json
+{
+  "hooks": {
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx -y @budgetary/mcp on-session-end",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Put your key in `~/.budgetary/config.json` (see [API key setup](#api-key-setup)) rather than interpolating it into the command, so it stays out of the process list.
+
+The hook proves itself on use: after your next session ends, `npx @budgetary/mcp doctor` shows that run under `Last auto:`. Until then `doctor` still reports that no automatic submission has been recorded — that is expected, not a sign the edit failed. Nothing in this package reads your Claude Code configuration, so it cannot confirm the hook any earlier.
 
 ### Cursor — `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global)
 
@@ -147,7 +174,14 @@ The label is resolved once, when the estimate is made, and stored on that estima
 
 A pre-flight estimate is only half the loop; calibration needs the **realized** token counts after the run. How those are recorded depends on what the host exposes:
 
-- **Claude Code (with the plugin) — automatic.** This host writes a real session transcript. The plugin's session-end hook reads the true `tokens_in + tokens_out` (cache-read tokens **excluded**) and submits them — together with a short **behavior trace**: which tools the run used (`Read`, `Edit`, `Bash`, …), roughly how many tokens each, and two raw measurements per step — *which command it ran* (a **redacted** descriptor: a common program name such as `pytest` or `go test`, plus a **salted, non-reversible** digest of the rest — never a raw path, argument, or command) and *whether it succeeded*. The trace is measured from the transcript, never model-supplied, and any field that can't be read reliably is simply omitted; the total still submits. No human action needed. (A bare `claude mcp add` **without** the plugin has no session-end hook, so it is manual like the hosts below.)
+- **Claude Code (with the plugin) — automatic.** This host writes a real session transcript. The plugin's session-end hook reads the true `tokens_in + tokens_out` (cache-read tokens **excluded**) and submits them — together with a short **behavior trace**: which tools the run used (`Read`, `Edit`, `Bash`, …), roughly how many tokens each, and two raw measurements per step — *which command it ran* (a **redacted** descriptor: a common program name such as `pytest` or `go test`, plus a **salted, non-reversible** digest of the rest — never a raw path, argument, or command) and *whether it succeeded*. The trace is measured from the transcript, never model-supplied, and any field that can't be read reliably is simply omitted; the total still submits. No human action needed.
+- **Claude Code (bare `claude mcp add`, no plugin) — manual, from the transcript.** Without the plugin there is no session-end hook, so nothing submits for you — but Claude Code writes the same real transcript either way, so you never have to *type* counts. After a session ends, submit its measured totals (and the same behavior trace) with:
+
+  ```bash
+  npx @budgetary/mcp on-session-end --transcript ~/.claude/projects/<project>/<session-id>.jsonl
+  ```
+
+  Run it from the directory you estimated in, and name a **finished** session — a transcript still being written is incomplete, and the first submission for an estimate is the one that counts. Add `--failed` if the task didn't complete. Better still, wire the hook [above](#claude-code) and stop doing this by hand.
 - **Codex — manual, from the rollout.** Codex ships no session-end hook, but it writes a rollout transcript. After a session, submit its real counts:
 
   ```bash
