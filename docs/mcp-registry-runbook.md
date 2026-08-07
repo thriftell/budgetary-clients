@@ -30,6 +30,22 @@ manual follow-up:
 - A changeset that republishes the same server as **`@budgetary/mcp@0.1.1`** so a
   published tarball actually contains `mcpName` (the live `0.1.0` predates it).
 
+## What is actually served right now
+
+Checked 2026-08-08 against the live registry and npm — **re-check rather than
+trust this paragraph**, with the two commands in
+[Re-publish procedure](#re-publish-procedure-a-version-or-metadata-change):
+
+- The registry serves **`0.1.1`**, `publishedAt` = `updatedAt` = **2026-06-12**.
+  It has not been republished since the first publish.
+- npm has moved on several releases since. **The listing is the initial publish**,
+  so a one-click registry install today installs the package version named in
+  that document, not the current one.
+
+This is what "inert until republished" looks like in practice: every `server.json`
+change merged since then is in the repo and reaches nobody. Treat step 5's
+read-back as the definition of done — not the merge, and not `publish` exiting 0.
+
 ## Namespace + auth (decided)
 
 - **Namespace: `io.github.thriftell/budgetary`** — GitHub-org-authenticated. The
@@ -127,16 +143,69 @@ curl "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.thr
 
 Then confirm an MCP client can **discover + add** it and that **both** install
 paths are visible — the npm stdio package (`@budgetary/mcp`, with the
-`BUDGETARY_API_KEY` input) and the remote endpoint
+`BUDGETARY_API_KEY` and `BUDGETARY_HOST` inputs) and the remote endpoint
 (`https://api.budgetary.tools/mcp`).
+
+> **On the remote entry.** It declares a URL and nothing else. The endpoint
+> answers `initialize` and `tools/list` unauthenticated, but `tools/call`
+> requires `Authorization: Bearer bg_…` and returns `authentication_failed`
+> without one — and the entry declares no `headers` input, so a client that
+> configures the remote strictly from this manifest has nowhere to put the key.
+> Verify by hand what a manifest-driven client would end up sending:
+>
+> ```bash
+> curl -s -X POST https://api.budgetary.tools/mcp \
+>   -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+>   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+> ```
 
 ---
 
 ## Updating the listing later
 
-- **New server version / metadata change:** bump `@budgetary/mcp` via a changeset
-  (npm publishes the new version with `mcpName`), update `server.json`'s
-  `version` and `packages[0].version` to match, then repeat steps 4–7.
+> ⚠ **A `server.json` change is INERT until this runbook is re-run by hand.**
+> Merging the PR does nothing to the listing. Nothing in CI republishes it (see
+> [Automation decision](#automation-decision)), so a manifest edit that is never
+> followed by steps 4–7 reaches no user at all. Check the live listing (below)
+> before assuming a manifest change is in effect.
+
+### Re-publish procedure (a version or metadata change)
+
+1. **Land the change** in `clients/mcp/server.json` on `main`, with a changeset
+   so the package version moves.
+2. **Merge the "Version Packages" PR.** `changeset version` runs
+   `scripts/sync-mcp-pin.mjs`, which rewrites `server.json`'s two `version`
+   fields for you — there is nothing to edit by hand. `release.yml` then
+   publishes the new `@budgetary/mcp` to npm.
+3. **Gate — the version `server.json` names must EXIST on npm.** The registry
+   fetches that exact tarball to re-verify `mcpName`, so publishing ahead of npm
+   fails the ownership check:
+
+   ```bash
+   node -p "require('./clients/mcp/server.json').packages[0].version"   # what the listing will claim
+   npm view @budgetary/mcp version                                      # what npm actually has
+   npm view @budgetary/mcp mcpName                                      # -> io.github.thriftell/budgetary
+   ```
+
+   These must agree before you go on. (A `changeset version` bump that lands
+   while another changeset is still pending moves `package.json` without
+   publishing — the version is then real in the repo and absent from npm until
+   the next release actually ships.)
+4. **Steps 4–7 above**, by hand, by whoever owns the `thriftell` GitHub org —
+   `mcp-publisher validate` → `login github` (device flow) → `publish`. There is
+   no CI path and no stored credential; this is a human at a terminal.
+5. **Verify the listing actually changed** — not that the command exited 0:
+
+   ```bash
+   curl -s "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.thriftell/budgetary" \
+     | python3 -m json.tool
+   ```
+
+   Read back, from the response body: the served `version`, the served
+   `packages[0].version`, and the **names in `packages[0].environmentVariables`**
+   — a metadata-only change is invisible in the version alone. `_meta` carries
+   `publishedAt` / `updatedAt`; if `updatedAt` has not moved, nothing landed.
+
 - **Lifecycle:** `mcp-publisher status --status <active|deprecated|deleted> io.github.thriftell/budgetary [version]`.
 
 ---
