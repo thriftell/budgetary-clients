@@ -34,6 +34,11 @@ import {
   renderTransportError,
 } from "../format.js";
 import {
+  resolveSessionBinding,
+  selectReconcilable,
+  SESSION_ID_ENV,
+} from "../session.js";
+import {
   isEntryExpired,
   MAX_QUERY_LEN,
   PendingStore,
@@ -58,6 +63,14 @@ export interface EstimateToolArgs {
    * request stops retrying. Threaded from the MCP request `extra.signal`.
    */
   signal?: AbortSignal;
+  /**
+   * The host's id for THIS tool call, threaded from the MCP request's
+   * `params._meta["claudecode/toolUseId"]`. Host-supplied, never model-supplied.
+   * Stamped on the pending entry so a LATER estimate can prove which session's
+   * transcript this run belongs to. Absent on any host that does not send it —
+   * the run is then simply not reconcilable.
+   */
+  toolUseId?: string;
 }
 
 export interface EstimateToolResult {
@@ -126,6 +139,16 @@ export async function runEstimateTool(
     ((opts: BudgetaryClientOptions) => new BudgetaryClient(opts));
   const client = factory({ apiKey: resolved.apiKey, baseUrl: resolved.baseUrl });
 
+  // Resolved BEFORE the network call so the binding describes the session that
+  // actually made this estimate. Cheap: two env reads and at most two `statSync`
+  // calls, no file read and no parse.
+  const binding = resolveSessionBinding({
+    env: args.env,
+    cwd: args.cwd,
+    toolUseId: args.toolUseId,
+    home: args.home,
+  });
+
   let response: EstimateResponse;
   try {
     response = await client.estimate(query, {
@@ -155,6 +178,12 @@ export async function runEstimateTool(
     // — i.e. this estimate likely just re-billed a task already forecast. Surfaced
     // so the user can reuse the earlier one next time instead of paying twice.
     let dup = false;
+    // 0024e: the ONE earlier run this estimate may close out, or null. Selected
+    // from the snapshot the append already returned — no second file read — and
+    // deliberately cheap enough to sit on the interactive path: array filtering
+    // plus one liveness check per candidate. Nothing is opened, parsed or posted
+    // here; that happens after the response is on its way (see below).
+    let candidate: PendingEntry | null = null;
     // 0024c: write a pending entry whenever the server returned an estimate_id —
     // void or not. The server persists the Estimate row and returns its id even on
     // a void (out-of-domain), so the id is pairable; gating this on `!void` (the old
@@ -195,6 +224,21 @@ export async function runEstimateTool(
         // Fail-open: an absent/invalid value is already the default here, so no
         // malformed tag can reach the store.
         source: resolveSource(args.env),
+        // 0024e: the session binding for THIS run — which transcript measures it
+        // and which process is writing it. Resolved from the host environment and
+        // the host's own request metadata; the model supplies none of it, and
+        // none of it is ever sent on the wire. All four or none: a partial
+        // binding cannot be used safely, so `resolveSessionBinding` returns null
+        // and the spread contributes nothing (the entry is then exactly what a
+        // pre-0024e client would have written).
+        ...(binding
+          ? {
+              session_id: binding.sessionId,
+              tool_use_id: binding.toolUseId,
+              transcript_dir: binding.transcriptDir,
+              owner_pid: binding.ownerPid,
+            }
+          : {}),
       };
       // Pass the tool's clock so the append-time TTL sweep is consistent with
       // the created_at just stamped above.
@@ -215,6 +259,15 @@ export async function runEstimateTool(
             e.query === storedQuery &&
             !isEntryExpired(e, nowMs),
         );
+        candidate = selectReconcilable({
+          entries: result.entries,
+          excludeEstimateId: response.estimateId,
+          projectId,
+          ...(typeof args.env[SESSION_ID_ENV] === "string"
+            ? { currentSessionId: args.env[SESSION_ID_ENV] }
+            : {}),
+          nowMs,
+        });
       }
     }
 
@@ -265,6 +318,43 @@ export async function runEstimateTool(
     ) {
       text += `\n\n${hooklessNoticeLines().join("\n")}`;
     }
+
+    // 0024e: close out ONE finished session's estimate, measured from that
+    // session's own transcript. Scheduled, never awaited, and never before the
+    // response: `setImmediate` runs on a later turn of the event loop, so the
+    // MCP SDK has already serialized and written this result by the time any of
+    // it executes. The stdio server stays alive while stdin is open, so the work
+    // has a live event loop to finish on.
+    //
+    // The estimate is untouched by all of it. Nothing here can delay the
+    // response (it has already been handed over), nothing can change its text
+    // (`text` is already built), and nothing can fail it — the module is loaded
+    // dynamically so even an import failure lands in the same terminal `.catch`.
+    // That catch is a backstop only; `reconcileEntry` is fail-closed throughout.
+    // A rejection escaping here would kill the MCP server for the rest of the
+    // session under Node's default `--unhandled-rejections=throw`.
+    if (candidate !== null) {
+      const target = candidate;
+      setImmediate(() => {
+        void import("../reconcile.js")
+          .then((m) =>
+            m.reconcileEntry({
+              entry: target,
+              apiKey: resolved.apiKey,
+              baseUrl: resolved.baseUrl,
+              env: args.env,
+              ...(args.home !== undefined ? { home: args.home } : {}),
+              ...(args.now !== undefined ? { now: args.now } : {}),
+              ...(args.clientFactory !== undefined
+                ? { clientFactory: args.clientFactory }
+                : {}),
+              logger: { warn: (m2: string) => process.stderr.write(`${m2}\n`) },
+            }),
+          )
+          .catch(() => {});
+      });
+    }
+
     return { text, isError: false };
   } catch (err) {
     return {
