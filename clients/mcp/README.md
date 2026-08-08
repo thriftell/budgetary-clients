@@ -106,6 +106,14 @@ BUDGETARY_API_KEY = "bg_test_..."
 BUDGETARY_HOST = "codex"
 ```
 
+### From the MCP registry (one click)
+
+This server is listed in the [MCP registry](https://registry.modelcontextprotocol.io) as `io.github.thriftell/budgetary`. A host that installs from the listing prompts you for the fields the listing declares — `BUDGETARY_API_KEY`, which is required, and `BUDGETARY_HOST`, which is optional.
+
+**Set `BUDGETARY_HOST` anyway.** It is what tags your estimates with the host they came from, and on `claude-code` it is what lets the server tell you, once, when nothing here is submitting your finished runs. Left blank, the host is recorded as `mcp` and that notice never appears — the same as any hand-written config that omits it. If the listing your client reads is an older one that offers no such field, add it to that server's entry in your host's own MCP config, exactly as in the sections above.
+
+> **The listing also offers a remote endpoint, `https://api.budgetary.tools/mcp`. It estimates only.** There is no local process on that path — no pending store, no session-end hook, no transcript to read — so nothing there can measure what a run actually cost, and the endpoint deliberately has no tool that would accept a count, because it would have to be told one rather than measure it. An estimate made through it is never closed out by an actual, by any route. Install the npm package above if you want your runs to count.
+
 ## API key setup
 
 The server resolves the key in this order:
