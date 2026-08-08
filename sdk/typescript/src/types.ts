@@ -159,9 +159,162 @@ export interface ActualsRequest {
   metadata?: ActualsMetadata;
 }
 
+/**
+ * One behavior phase of a completed run's measured spend: the exact tokens it
+ * accounts for and the `[0, 1]` share of the measured total they represent.
+ */
+export interface PhaseSlice {
+  tokens: number;
+  share: number;
+}
+
+/**
+ * The measured breakdown of a completed run's realized spend into plain-language
+ * behavior phases (contract §4.3, additive).
+ *
+ * **Measurement, not prediction.** The per-phase `tokens` are exact over the
+ * tokens the forwarded {@link ActualsRequest.trace} reported, and the five shares
+ * sum to `1.0` (within floating-point tolerance) when {@link totalTokens} is
+ * greater than 0. Nothing here is a forecast, and nothing here is derived by a
+ * client: the server owns every phase label, and an SDK caller renders these
+ * numbers as received or renders nothing.
+ *
+ * Wire keys arrive `snake_case` and are camelCased by the transport
+ * (`total_tokens` → `totalTokens`, `scheme_version` → `schemeVersion`). **Values
+ * are never transformed.**
+ */
+export interface Phases {
+  exploration: PhaseSlice;
+  generation: PhaseSlice;
+  testing: PhaseSlice;
+  retries: PhaseSlice;
+  other: PhaseSlice;
+  /** The measured tokens this breakdown covers — the sum of the five phases. */
+  totalTokens: number;
+  /**
+   * Identifies the classifier that produced the breakdown. It **may change** — do
+   * not assume bit-for-bit reproducibility across versions, and never branch on
+   * it to infer a capability.
+   */
+  schemeVersion: string;
+}
+
+/**
+ * Known {@link Assessment.verdict} values (contract §4.3) — where a run's
+ * realized total landed against **its own** predicted interval:
+ *
+ * - `normal` — inside the predicted `[p10, p90]` interval.
+ * - `efficient` — below `p10` (cheaper than predicted).
+ * - `elevated` — somewhat above `p90`.
+ * - `anomalous` — far above `p90`.
+ * - `insufficient_data` — the estimate gave no firm basis to judge this task
+ *   against.
+ *
+ * `insufficient_data` is a **first-class, honest answer**, not an error and not a
+ * partial verdict: it is the question "was that normal for a task like this?"
+ * answered truthfully. Render it plainly, never as a failure and never with an
+ * apology — and note that the measured {@link Phases} beside it is exact and
+ * needs no comparison data at all.
+ *
+ * The server may add labels at any time (contract §3). An unrecognized value is
+ * rendered **as received**, or as silence — never folded into a known verdict and
+ * never given a client-invented label. There is deliberately no
+ * `normalizeVerdict()` counterpart to {@link normalizeScenario}: an unknown
+ * scenario has a safe cautious floor (`"uncertain"`), an unknown verdict has
+ * none, and the SDK classifies nothing.
+ */
+export type AssessmentVerdict =
+  | "normal"
+  | "efficient"
+  | "elevated"
+  | "anomalous"
+  | "insufficient_data";
+
+/**
+ * Known {@link Efficiency.label} values (contract §4.3) — a display bucket over
+ * the composition of the measured spend. `insufficient_trace` is reported when
+ * the forwarded trace was too thin to characterize; it is an honest answer, not a
+ * confident bucket, and never a value to hide.
+ *
+ * Server-owned and open-ended, exactly like {@link AssessmentVerdict}: an
+ * unrecognized label is printed as received or dropped, never re-bucketed.
+ */
+export type EfficiencyLabel =
+  | "lean"
+  | "retry_heavy"
+  | "exploration_heavy"
+  | "insufficient_trace";
+
+/**
+ * A descriptive read of **where** the measured spend went, derived purely from
+ * the {@link Phases} breakdown (contract §4.3, additive).
+ *
+ * **This is composition, not productivity.** `burnShare` says how much of the
+ * bill was churn — *never* whether the work was worth it. A `retry_heavy` task
+ * may have shipped the right fix, and a `lean` one may have produced nothing
+ * useful. Do not present it as value, ROI, or a quality score.
+ */
+export interface Efficiency {
+  /**
+   * The `0.0`–`1.0` fraction of measured spend in non-productive phases
+   * (`retries` plus unclassified `other`). Wire key `burn_share`.
+   */
+  burnShare: number;
+  label: EfficiencyLabel | (string & {});
+}
+
+/**
+ * The plain-language read of a completed run, as carried on the `POST /v1/actuals`
+ * 202 (contract §4.2). Exactly four keys — `verdict`, `note`, `efficiency` and
+ * `schemeVersion`.
+ *
+ * ⚠ **Subset by design.** The two comparison blocks (`conversion`,
+ * `resolution` — see {@link LedgerAssessment}) are computed only on
+ * `GET /v1/ledger`, so they are **absent** here rather than `null`. Their absence
+ * on this shape means *"not computed on this endpoint"* — it is **never** a value,
+ * and never to be read as `insufficient_data`. A {@link LedgerAssessment} is
+ * assignable to this type; the reverse is not.
+ */
+export interface Assessment {
+  verdict: AssessmentVerdict | (string & {});
+  /**
+   * An optional plain sentence-fragment attached to an abnormal verdict (e.g.
+   * `"retry-heavy"`), or `null` when there is none. **Do not parse it** — read
+   * {@link verdict}, which is the machine-readable field.
+   */
+  note: string | null;
+  /**
+   * Composition of the measured spend. `null` when no trace was forwarded with
+   * the actuals — it can never be inferred without measured steps, so `null`
+   * renders as silence, never as a computed guess.
+   */
+  efficiency: Efficiency | null;
+  /**
+   * Identifies the assessment version and **may change**. Never branch on it.
+   */
+  schemeVersion: string;
+}
+
 export interface ActualsResponse {
   received: boolean;
   ledgerEntryId: string;
+  /**
+   * The measured phase breakdown for the run just submitted, when the deployment
+   * computes one (additive, contract §4.2).
+   *
+   * Two absent states, and they mean different things: **`undefined`** — the
+   * field was not on the response at all (an older deployment); **`null`** — the
+   * server answered and has no breakdown to give (no trace was forwarded). Render
+   * both as silence or an em-dash. Never substitute a computed value for either.
+   */
+  phases?: Phases | null;
+  /**
+   * The plain-language read of the run just submitted, when the deployment
+   * computes one (additive, contract §4.2). `undefined`/`null` exactly as for
+   * {@link phases} — and see {@link Assessment} for why `conversion` and
+   * `resolution` are absent on this endpoint rather than `null`.
+   */
+  assessment?: Assessment | null;
 }
 
 export interface LedgerQuery {
@@ -187,6 +340,92 @@ export interface LedgerPredicted {
   p90: number;
 }
 
+/** Known {@link LedgerConversion.verdict} values (contract §4.3). */
+export type ConversionVerdict =
+  | "lean"
+  | "normal"
+  | "wasteful"
+  | "insufficient_data";
+
+/**
+ * A cost-per-accepted-unit read: did the spend convert into output that **stuck**,
+ * measured against comparable tasks (contract §4.3, additive). Served on
+ * `GET /v1/ledger` only — see {@link Assessment}.
+ *
+ * **Read {@link verdict}, never the components as a score**, and never collapse
+ * them into a single number. This is efficiency, not productivity: it measures
+ * conversion of spend into *surviving* output, not whether that output was worth
+ * it. `insufficient_data` is the honest answer when there is no basis to compare
+ * against — not an error, and not a partial result.
+ */
+export interface LedgerConversion {
+  /** Measured count of discrete changes produced; `null` when none were sent. */
+  producedChanges: number | null;
+  /** Of {@link producedChanges}, how many survived; `null` when none were sent. */
+  acceptedChanges: number | null;
+  /** Realized tokens per surviving change; `null` when nothing was accepted. */
+  costPerAccepted: number | null;
+  /**
+   * This task's rank in the comparable-task distribution (`0.0` cheapest per
+   * accepted change … `1.0` most expensive); `null` when there is no basis to
+   * rank against. The distribution itself is never returned.
+   */
+  percentileVsPeers: number | null;
+  verdict: ConversionVerdict | (string & {});
+}
+
+/** Known {@link LedgerResolution.verdict} values (contract §4.3). */
+export type ResolutionVerdict = "low" | "elevated" | "insufficient_data";
+
+/**
+ * A structural-hallucination read: for tasks like this one, how often does code
+ * run but reference a symbol that **does not exist** (contract §4.3, additive).
+ * Served on `GET /v1/ledger` only — see {@link Assessment}.
+ *
+ * **Structural, not semantic:** it catches symbols that do not exist, *not* a real
+ * API used with the wrong behavior, and *not* any logic error — so `low` means a
+ * low structural-hallucination rate, **never** "correct". It is **regional, not a
+ * per-output flag**: never read it as "this diff hallucinated, review it".
+ * **Read {@link verdict}, never the components as a score.**
+ */
+export interface LedgerResolution {
+  /** Measured count of distinct external symbols referenced; `null` when none were sent. */
+  externalSymbols: number | null;
+  /** Of {@link externalSymbols}, how many did not resolve; `null` when none were sent. */
+  unresolvedSymbols: number | null;
+  /**
+   * This task's own `unresolved / external`; `null` when there was no external
+   * surface to reference. A noisy per-task number, **not** a verdict on the output.
+   */
+  unresolvedRate: number | null;
+  /**
+   * The pooled symbol-level rate across comparable tasks; `null` when there is no
+   * basis to pool. It is a symbol-level rate, **not** the fraction of tasks that
+   * hallucinated. The distribution behind it is never returned.
+   */
+  regionRate: number | null;
+  verdict: ResolutionVerdict | (string & {});
+}
+
+/**
+ * The fuller assessment shape served on `GET /v1/ledger`: the four keys of
+ * {@link Assessment} plus the two comparison blocks the ledger route
+ * computes. A value of this type is assignable to {@link Assessment}.
+ */
+export interface LedgerAssessment extends Assessment {
+  /**
+   * Cost-per-accepted read. `null` when the server has none to give; `undefined`
+   * when the field was not on the response at all. Both render as silence.
+   */
+  conversion?: LedgerConversion | null;
+  /**
+   * Structural-hallucination read. `null` when the server has none to give;
+   * `undefined` when the field was not on the response at all. Both render as
+   * silence.
+   */
+  resolution?: LedgerResolution | null;
+}
+
 export interface LedgerEntry {
   estimateId: string;
   createdAt: string;
@@ -198,6 +437,19 @@ export interface LedgerEntry {
   scenario: Scenario | (string & {});
   predicted: LedgerPredicted;
   actual: LedgerActual | null;
+  /**
+   * The measured phase breakdown for this entry (additive, contract §4.3).
+   * `null` when no trace was forwarded with the actuals; `undefined` when the
+   * field was not on the response at all. Render either as silence or an
+   * em-dash — never a computed guess.
+   */
+  phases?: Phases | null;
+  /**
+   * The plain-language read of this entry (additive, contract §4.3). `null` on an
+   * entry with no actual yet; `undefined` when the field was not on the response
+   * at all. Render either as silence.
+   */
+  assessment?: LedgerAssessment | null;
 }
 
 export interface LedgerPage {
