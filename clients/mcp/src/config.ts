@@ -50,6 +50,16 @@ export function pendingFilePath(home?: string): string {
   return join(budgetaryDir(home), "pending.json");
 }
 
+/**
+ * The measured-summary buffer (0026c). A SEPARATE file from the pending store on
+ * purpose: that store's loader rebuilds its file as `{ version: 1, entries }`
+ * and silently drops every unrecognised top-level key, so a summary parked there
+ * would disappear on the next write-back. See `measured.ts`.
+ */
+export function measuredFilePath(home?: string): string {
+  return join(budgetaryDir(home), "measured.json");
+}
+
 export function installSaltPath(home?: string): string {
   return join(budgetaryDir(home), "install-salt");
 }

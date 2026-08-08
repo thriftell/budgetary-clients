@@ -13,6 +13,7 @@ import {
   DEFAULT_SOURCE,
   debugEnabled,
   looksLikeBudgetaryKey,
+  measuredFilePath,
   noKeyGuidance,
   pendingFilePath,
   resolveConfig,
@@ -20,7 +21,18 @@ import {
   sanitizeSource,
   traceTargetEnabled,
 } from "./config.js";
-import { forecastOnly, forecastVsActual, shortEstimateId } from "./format.js";
+import {
+  forecastOnly,
+  forecastVsActual,
+  measuredLines,
+  shortEstimateId,
+} from "./format.js";
+import {
+  MeasuredStore,
+  summaryFromActualsResponse,
+  type MeasuredSummary,
+  type MeasuredWriter,
+} from "./measured.js";
 import {
   isEntryExpired,
   PendingStore,
@@ -136,6 +148,13 @@ export interface SubmitActualsArgs {
   /** Caller-supplied realized counts. Never derived from a model. */
   counts: ActualCounts;
   logger?: { warn(message: string): void };
+  /**
+   * Where to buffer the measured summary the server returns on the 202 (0026c).
+   * Injected exactly like {@link store}, and omitted by a caller that has no
+   * business writing to `~/.budgetary` — a submit with no writer captures
+   * nothing and is otherwise unchanged. Every production path wires one.
+   */
+  measured?: MeasuredWriter;
 }
 
 /** Drop the entry with this `estimate_id` from `file`; returns whether it was present. */
@@ -260,6 +279,14 @@ export interface SubmitOutcome {
   gaveUp: boolean;
   /** The error that prevented submission, for honest reporting. Never carries the key. */
   error?: unknown;
+  /**
+   * The measured summary the server returned on THIS submit's 202 (0026c), when
+   * it returned one. Present only on a successful submit, and only against a
+   * deployment that computes it — an older one sends no `assessment`, this stays
+   * `undefined`, and every surface downstream falls silent. A foreground caller
+   * prints it immediately; the buffered copy is what a later `estimate` shows.
+   */
+  summary?: MeasuredSummary;
 }
 
 /**
@@ -314,7 +341,12 @@ export async function submitActuals(
   const logger = args.logger ?? { warn: () => {} };
 
   try {
-    await client.submitActuals({
+    // 0026c: the 202 body is no longer discarded. Beyond the acknowledgement it
+    // carries the server's measured read of the run just submitted — the phase
+    // breakdown and the verdict — paired with THIS estimate_id, which is the only
+    // place that pairing is exact (`GET /v1/ledger` orders by estimate_id DESC
+    // and has no estimate_id filter, so a reconciled older run is never row 0).
+    const response = await client.submitActuals({
       estimateId: entry.estimate_id,
       tokensIn: counts.tokensIn,
       tokensOut: counts.tokensOut,
@@ -337,7 +369,21 @@ export async function submitActuals(
       const removed = removeById(file, entry.estimate_id);
       return { value: removed, changed: removed };
     });
-    return { submitted: true, retryable: false, terminal: false, gaveUp: false };
+    // Capture the summary, if this deployment sent one. FAIL CLOSED TO SILENCE
+    // and no version check: a body without an `assessment` yields null here,
+    // nothing is buffered, and nothing is ever rendered. Buffering is
+    // best-effort — `record` never throws, and a summary that could not be
+    // written is simply not shown later. The submit itself is already committed
+    // and its outcome must not change because a display buffer misbehaved.
+    const summary = summaryFromActualsResponse(response, entry);
+    if (summary !== null) args.measured?.record(summary);
+    return {
+      submitted: true,
+      retryable: false,
+      terminal: false,
+      gaveUp: false,
+      ...(summary !== null ? { summary } : {}),
+    };
   } catch (err) {
     const retryable = isRetryableSubmitError(err);
     // Re-read + mutate under the lock, and compute the outcome from the fresh
@@ -402,6 +448,30 @@ export async function submitActuals(
     }
     return outcome;
   }
+}
+
+/**
+ * Print the server's measured summary beneath a FOREGROUND submit's confirmation
+ * line, indented two spaces like every other detail line on those commands.
+ *
+ * Returns whether anything was printed — which is exactly the question "did the
+ * server answer for this submit?", and therefore the gate on the client-computed
+ * `Forecast check:` line. Two sources for one claim is the failure mode here: the
+ * server's `verdict` and the local band comparison both answer "was that in
+ * range", so where the server answered, the client's derivation stands down.
+ *
+ * Never used by the session-end hook: its stdout does not reach a human.
+ */
+function writeMeasured(
+  out: (line: string) => void,
+  outcome: SubmitOutcome,
+): boolean {
+  const summary = outcome.summary;
+  if (summary === undefined) return false;
+  for (const line of measuredLines(summary, { recordedEarlier: false })) {
+    out(`  ${line}`);
+  }
+  return true;
 }
 
 /**
@@ -602,6 +672,16 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
   });
   const clock = args.now ?? (() => new Date());
   const now = clock();
+  // 0026c: the hook CAPTURES the server's summary and says nothing. A SessionEnd
+  // hook's stdout never reaches the user (at exit 0 it goes to the debug log;
+  // the hook cannot block, so the exit-2 stderr path is unavailable to it), so
+  // printing here would be shouting into a closed room. The buffered record is
+  // shown by the next `estimate` call, which every host renders.
+  const measured = new MeasuredStore({
+    path: measuredFilePath(args.home),
+    logger,
+    now: clock,
+  });
 
   // Leave a start-ONLY breadcrumb before any work: this `npx` hook has no
   // debugger and stdout is the JSON-RPC channel, so a persisted record is the
@@ -828,6 +908,7 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
       entry,
       counts,
       logger,
+      measured,
     });
     outcome = breadcrumbOutcome(submitOutcome);
     const requestId =
@@ -1049,21 +1130,34 @@ export async function runManualActuals(args: ManualActualsArgs): Promise<number>
     entry,
     counts: { tokensIn, tokensOut, success, durationMs },
     logger: { warn: args.out },
+    measured: new MeasuredStore({
+      path: measuredFilePath(args.home),
+      logger: { warn: args.out },
+    }),
   });
 
   if (outcome.submitted) {
     args.out(
       `Actuals submitted (${shortEstimateId(entry.estimate_id)}). Thanks — this calibrates future estimates.`,
     );
-    // Close the loop when the entry carried a forecast band. On the by-id path
-    // that happens exactly when a real row was found (a synthetic placeholder has
-    // no band); when none was, this is silently skipped.
-    const cmp = forecastVsActual(tokensIn + tokensOut, {
-      p10: entry.forecast_p10,
-      p50: entry.forecast_p50,
-      p90: entry.forecast_p90,
-    });
-    if (cmp !== null) args.out(`  Forecast check: ${cmp}.`);
+    // This stdout IS the user's own terminal (unlike the session-end hook's), so
+    // the summary is shown here immediately rather than waiting for an estimate.
+    if (!writeMeasured(args.out, outcome)) {
+      // Only when the server returned no verdict: `forecastVsActual` is a
+      // SECOND, client-side derivation of the same claim, computed from the
+      // locally stored band with no coverage gate behind it. Where the server
+      // answered, its field wins and this line is dropped for that submit; where
+      // it did not (an older deployment), the local line is all there is.
+      // Closes the loop when the entry carried a forecast band — on the by-id
+      // path exactly when a real row was found (a synthetic placeholder has no
+      // band); when none was, this is silently skipped.
+      const cmp = forecastVsActual(tokensIn + tokensOut, {
+        p10: entry.forecast_p10,
+        p50: entry.forecast_p50,
+        p90: entry.forecast_p90,
+      });
+      if (cmp !== null) args.out(`  Forecast check: ${cmp}.`);
+    }
     return 0;
   }
   if (outcome.gaveUp) {
@@ -1277,6 +1371,11 @@ export async function runRolloutActuals(
       ...(trace ? { trace } : {}),
     },
     logger: { warn: args.out },
+    measured: new MeasuredStore({
+      path: measuredFilePath(args.home),
+      logger: { warn: args.out },
+      now: args.now ?? (() => new Date()),
+    }),
   });
 
   if (outcome.submitted) {
@@ -1286,13 +1385,18 @@ export async function runRolloutActuals(
         `recorded as ${args.success ? "successful" : "failed"}. ` +
         "Thanks — this calibrates future estimates.",
     );
-    // Close the loop when the pending entry carried a forecast band.
-    const cmp = forecastVsActual(usage.tokensIn + usage.tokensOut, {
-      p10: entry.forecast_p10,
-      p50: entry.forecast_p50,
-      p90: entry.forecast_p90,
-    });
-    if (cmp !== null) args.out(`  Forecast check: ${cmp}.`);
+    // A hand-run command in the user's own terminal: show what the server
+    // measured right here. Its verdict displaces the client-side band comparison
+    // below — one claim, one source (see writeMeasured).
+    if (!writeMeasured(args.out, outcome)) {
+      // Close the loop when the pending entry carried a forecast band.
+      const cmp = forecastVsActual(usage.tokensIn + usage.tokensOut, {
+        p10: entry.forecast_p10,
+        p50: entry.forecast_p50,
+        p90: entry.forecast_p90,
+      });
+      if (cmp !== null) args.out(`  Forecast check: ${cmp}.`);
+    }
     if (args.success) {
       args.out("(Re-run with `--failed` if the task didn't actually complete.)");
     }

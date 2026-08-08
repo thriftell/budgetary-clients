@@ -213,6 +213,15 @@ npx @budgetary/mcp pending
 
 > **The model never supplies token counts.** The only model-invokable tool is `estimate`. Actuals are submitted only from (a) the session-end hook reading a real transcript, or (b) the human-entered `report-actual` command. A fabricated actual would poison calibration, so there is deliberately no tool a model can call to write counts.
 
+### What you get back for a recorded run
+
+Recording a run returns a **measured breakdown** of where its tokens went — `exploration`, `generation`, `testing`, `retries`, `other`, each with its share of the measured total — and the API's answer to *"was that normal for a task like this?"*. Both are computed and reported by the API and printed exactly as received; where it reports none, nothing is printed rather than a guess. The breakdown is a measurement of that run's own counts, so it is exact and needs nothing to compare it against; the verdict may honestly be `insufficient_data`, which is that question answered truthfully — not an error.
+
+Where it appears depends on how the run was submitted:
+
+- **`report-actual` / `on-session-end --transcript`** — printed in your terminal, directly below the submit confirmation.
+- **The session-end hook** — a hook's output never reaches you (the host sends it to a debug log), so the summary is buffered locally and shown **beneath your next `estimate`**, stamped with the id of the run it measures. Shown once, never repeated.
+
 ## Dashboard
 
 For the predicted-vs-actual calibration dashboard, install **Budgetary** (`budgetary.budgetary-vscode`) from [Open VSX](https://open-vsx.org) — it runs in Cursor and other VS Code forks unchanged. This server does not re-implement it.
@@ -227,7 +236,7 @@ Only these things leave your machine, and only to `https://api.budgetary.tools`:
 - A constant **client label** — `mcp_client` unless an operator overrode it with `BUDGETARY_SOURCE` (see above). It says which client sent the row and nothing else: it is a fixed string, derived from no part of you, your machine, or your task.
 - On Claude Code, a **behavior trace**: per step, the host tool name (e.g. `Read`, `Bash`), its token count, a **redacted descriptor** of what it acted on, and whether it succeeded. The descriptor exposes a program name *in the clear only when it is a common, non-sensitive tool* (e.g. `pytest`, `npm run`) — a pasted credential or a private script name is never shown, only its **salted digest**; everything after the program (paths, arguments, the rest of the command) always lives inside the digest, or a bare path digest for a file tool. Custom/internal tool names (e.g. an org's private MCP tool) are reported generically as `mcp:other`, never verbatim. **No file contents, absolute paths, command arguments, or output ever leave the machine** — only an allowlisted program name and an opaque key. Set `BUDGETARY_TRACE_TARGET=off` to drop the descriptor entirely (the trace falls back to tool names + token counts); any value other than an explicit `1`/`true`/`on`/`yes` is treated as off.
 
-Nothing else is transmitted. Both the descriptor's digest and the `project_id` attached to each estimate are **salted, non-reversible** hashes (HMAC-SHA256): the descriptor digest with a fresh per-submission salt, and `project_id` with a machine-local install salt persisted at `~/.budgetary/install-salt`. The salts never leave the machine, so the server gets a stable key it cannot reverse back to a command or path. The pending store lives at `~/.budgetary/pending.json`, shared byte-for-byte with the first-party Claude Code and Codex clients, so configuring once covers every host.
+Nothing else is transmitted. Both the descriptor's digest and the `project_id` attached to each estimate are **salted, non-reversible** hashes (HMAC-SHA256): the descriptor digest with a fresh per-submission salt, and `project_id` with a machine-local install salt persisted at `~/.budgetary/install-salt`. The salts never leave the machine, so the server gets a stable key it cannot reverse back to a command or path. The pending store lives at `~/.budgetary/pending.json`, shared byte-for-byte with the first-party Claude Code and Codex clients, so configuring once covers every host. The measured summary the API returns for a submitted run is buffered locally at `~/.budgetary/measured.json` until an `estimate` shows it — at most a handful of recent records, dropped after a week; it is a copy of a response you already received, and nothing in it is ever sent anywhere.
 
 ## Reference
 

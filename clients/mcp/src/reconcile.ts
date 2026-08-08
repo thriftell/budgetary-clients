@@ -10,7 +10,8 @@ import {
   type TranscriptUsage,
 } from "./transcript.js";
 import { persistedCounts, submitActuals, type ActualCounts } from "./actuals.js";
-import { pendingFilePath } from "./config.js";
+import { measuredFilePath, pendingFilePath } from "./config.js";
+import { MeasuredStore } from "./measured.js";
 import {
   entryBinding,
   findProvenTranscript,
@@ -118,6 +119,15 @@ export async function reconcileEntry(
     path: pendingFilePath(args.home),
     logger,
   });
+  // 0026c: this runs AFTER the estimate response was handed to the host, so the
+  // summary it captures cannot reach the call that triggered it — by design (the
+  // estimate path is interactive and is never delayed or failed by reconcile).
+  // It is buffered here and rendered beneath the NEXT estimate.
+  const measured = new MeasuredStore({
+    path: measuredFilePath(args.home),
+    logger,
+    now: args.now ?? (() => new Date()),
+  });
   const factory =
     args.clientFactory ??
     ((opts: BudgetaryClientOptions) => new BudgetaryClient(opts));
@@ -200,14 +210,15 @@ export async function reconcileEntry(
 
   return finish(await trySubmit(counts));
 
-  async function trySubmit(measured: ActualCounts): Promise<boolean> {
+  async function trySubmit(measuredCounts: ActualCounts): Promise<boolean> {
     try {
       const outcome = await submitActuals({
         store,
         client,
         entry: args.entry,
-        counts: measured,
+        counts: measuredCounts,
         logger,
+        measured,
       });
       return outcome.submitted;
     } catch {

@@ -13,6 +13,7 @@ import {
 import {
   installSalt,
   keyPrefixOf,
+  measuredFilePath,
   noKeyGuidance,
   pendingFilePath,
   resolveConfigStatus,
@@ -26,6 +27,7 @@ import {
   hooklessNoticeLines,
 } from "../contribution.js";
 import {
+  measuredLines,
   renderAuthFailed,
   renderEstimate,
   renderPermissionDenied,
@@ -33,6 +35,7 @@ import {
   renderRequestRejected,
   renderTransportError,
 } from "../format.js";
+import { MeasuredStore } from "../measured.js";
 import {
   resolveSessionBinding,
   selectReconcilable,
@@ -291,6 +294,36 @@ export async function runEstimateTool(
       text +=
         `\n\n(${others} earlier ${others === 1 ? "estimate" : "estimates"} for ` +
         "this project still await actuals — run `npx @budgetary/mcp pending`.)";
+    }
+
+    // 0026c: show the measurement of a run whose actuals were submitted earlier.
+    //
+    // This is the only moment in the product where the measured breakdown can
+    // reach a person. The process that receives it cannot show it — a session-end
+    // hook's stdout never reaches the user, and the in-process reconcile is
+    // scheduled AFTER this response is handed over precisely so it can never
+    // delay or fail an interactive call. So the submitting process captures and
+    // stays silent, and the next estimate — this one — renders what it captured.
+    // The lag is one estimate with a hook installed, two without; that is the
+    // correct trade and is not closed by blocking the interactive path.
+    //
+    // Placed BETWEEN the estimate's own output and the one-time hook-less notice:
+    // everything above describes the estimate the user just asked for, and the
+    // `─────` notice block stays visually last exactly as it ships today.
+    //
+    // `claim` is the whole once-per-run mechanism: it marks the record shown and
+    // returns it only when that mark actually reached disk, so nothing is ever
+    // shown twice and nothing is marked on a run that showed nothing.
+    const claimed = new MeasuredStore({
+      path: measuredFilePath(args.home),
+      logger: { warn: (m) => process.stderr.write(`${m}\n`) },
+      ...(args.now !== undefined ? { now: args.now } : {}),
+    }).claim(projectId);
+    if (claimed !== null) {
+      text += `\n\n${measuredLines(claimed.record, {
+        recordedEarlier: true,
+        otherProject: claimed.otherProject,
+      }).join("\n")}`;
     }
 
     // ONCE per install: tell a hook-less Claude Code user that this install has

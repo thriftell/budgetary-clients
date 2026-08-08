@@ -1,6 +1,7 @@
 import type { EstimateResponse } from "@budgetary/sdk";
 
 import type { KeyPrefix } from "./config.js";
+import type { MeasuredSummary } from "./measured.js";
 
 function commas(n: number): string {
   return n.toLocaleString("en-US");
@@ -355,6 +356,108 @@ export function renderEstimate(
   lines.push("");
   lines.push(...storedFooter(options.host, options.stored ?? true, estimate.estimateId));
   return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// The measured summary (0026c). Every line below prints a SERVER field. There is
+// no threshold, no bucket, no inference and no fallback label anywhere in this
+// section: a field the server did not send produces no line at all.
+// ---------------------------------------------------------------------------
+
+/**
+ * The five behavior phases, in the order the server's breakdown declares them.
+ * This is the shape of the payload, not a client ranking: none is dropped,
+ * merged, or reordered by size, so the line reads the same way for every run.
+ * (The VS Code dashboard prints the same five, in the same order.)
+ */
+const PHASE_KEYS = ["exploration", "generation", "testing", "retries", "other"] as const;
+
+/**
+ * A server-returned `[0, 1]` share as a percentage. This changes the UNIT of a
+ * measured number and nothing else — not a bucket, not a threshold, not a
+ * judgment. A share that is positive but would round to `0%` prints `<1%`
+ * instead: reporting "0%" for tokens that were genuinely measured is the kind of
+ * small lie this surface does not tell. Matches the dashboard's rule exactly.
+ */
+function sharePercent(share: number): string {
+  const pct = share * 100;
+  const rounded = Math.round(pct);
+  if (rounded === 0 && pct > 0) return "<1%";
+  return `${rounded}%`;
+}
+
+export interface MeasuredRenderOptions {
+  /**
+   * True when the summary is being shown beneath a LATER estimate rather than
+   * immediately after the submit that produced it — the lag is named so the
+   * appearance of an older run's numbers reads as the promise being kept.
+   */
+  recordedEarlier: boolean;
+  /**
+   * True ONLY when the summary is known to come from a different project
+   * directory than the one being estimated in. Never a guess: a record with no
+   * project attached leaves this false and prints no qualifier.
+   */
+  otherProject?: boolean;
+}
+
+/**
+ * The measured summary as displayed lines, with no surrounding blank lines and
+ * no indentation — the caller places it (the estimate output appends it after a
+ * blank line; the CLI indents each line by two, matching its other detail lines).
+ *
+ * The ORDER is the argument. The breakdown leads because it is exact: it is a
+ * measurement of the run's own counts and needs nothing to compare against. The
+ * verdict follows, phrased as the question it answers, because it is the part
+ * that may honestly have no basis — `insufficient_data` is that answer given
+ * truthfully, and it prints exactly like every other verdict. There is no
+ * apology, no error framing, no severity, and no ordering among verdicts here;
+ * ranking them would be a judgment the server never sent.
+ *
+ * Every token on screen is a server field: the phase names are the payload's own
+ * keys, each percentage is that phase's `share` with its unit changed, the total
+ * is `phases.totalTokens`, the verdict is `assessment.verdict` printed as
+ * received (an unrecognized value included), the fragment after it is
+ * `assessment.note`, and the composition line is `assessment.efficiency`'s own
+ * `label` and `burnShare`. The only client-authored values are the estimate id
+ * this measures — which is the misattribution defense, so it is never omitted —
+ * and the framing words around them.
+ */
+export function measuredLines(
+  summary: MeasuredSummary,
+  options: MeasuredRenderOptions,
+): string[] {
+  const qualifier = options.recordedEarlier
+    ? options.otherProject
+      ? " (a run recorded earlier in a different project directory)"
+      : " (a run recorded earlier)"
+    : "";
+  const lines: string[] = [
+    `Measured breakdown for ${shortEstimateId(summary.estimate_id)}${qualifier}:`,
+  ];
+  // Absent OR null: the deployment sent no breakdown, or sent one and had none
+  // to give (no trace was forwarded). Both are silence — never a computed guess.
+  const phases = summary.phases;
+  if (phases !== null && phases !== undefined) {
+    lines.push(
+      PHASE_KEYS.map((key) => `${key} ${sharePercent(phases[key].share)}`).join(" · "),
+    );
+    lines.push(`${commas(phases.totalTokens)} tokens measured`);
+  }
+  // The question this answers, in the words the published contract uses for it.
+  const { verdict, note, efficiency } = summary.assessment;
+  lines.push(
+    `Was that normal for a task like this? ${verdict}${note ? ` — ${note}` : ""}`,
+  );
+  // Composition of the measured spend — WHERE the tokens went, never whether the
+  // work was worth it. `null` when no trace was forwarded: composition cannot be
+  // inferred without measured steps, so its absence is silence.
+  if (efficiency !== null) {
+    lines.push(
+      `Composition: ${efficiency.label} (burn share ${sharePercent(efficiency.burnShare)})`,
+    );
+  }
+  return lines;
 }
 
 /** One-word key-tier footer line, or null for an unrecognized/absent prefix. */
