@@ -169,8 +169,8 @@ function confidenceLabel(confidence: number): string {
  * estimate leads with an approximate midpoint plus the range; an uncertain /
  * sparse / unknown estimate leads with the range itself and a caution, so
  * honesty about coverage reaches the surface. The footer is host-aware and never
- * claims the estimate was stored when it wasn't. A void result intentionally
- * omits any pending-storage line — the caller stores nothing for it.
+ * claims the estimate was stored when it wasn't. A void result carries the same
+ * footer beneath its own message — it stores a pending entry too (0024c).
  */
 export interface RenderEstimateOptions {
   /** The host tag (`claude-code`/`codex`/…) — selects the right actuals path. */
@@ -229,14 +229,79 @@ function storedFooter(
   }
 }
 
+/**
+ * The sentence a void's append closes on: what the user gets back for the
+ * pending entry that was just stored on their behalf.
+ *
+ * ⚠ It promises the MEASUREMENT and nothing else. Not a forecast — the message
+ * two lines above says there is none, and a follow-up that hinted at one would
+ * take it back. Not a timeline — nothing here knows when, or whether, that run's
+ * counts are ever submitted, so the promise is conditional on the recording, not
+ * on a clock. Not a verdict — whether a run was normal for its kind is a
+ * separate, server-computed answer that may honestly be "no basis to judge",
+ * whereas the breakdown of a run's own counts is exact and needs no comparison
+ * at all. That exactness is the whole reason this line can be promised beneath a
+ * query we could NOT forecast.
+ *
+ * "here" is this tool's output: the render arrives beneath a later estimate, not
+ * in the process that submits (a session-end hook's stdout never reaches the
+ * user). Naming the place is what keeps the lag legible as the promise being
+ * kept rather than as a thing that did not work.
+ */
+const MEASURED_FOLLOW_UP =
+  "When this run's token counts are recorded, its measured breakdown appears here.";
+
 export function renderEstimate(
   estimate: EstimateResponse,
   options: RenderEstimateOptions = {},
 ): string {
   if (estimate.void || estimate.distribution === null) {
-    return [
+    // ★ The invariant: these two lines are exactly 149 UTF-8 bytes and are what
+    // every void rendered before 0026c. Nothing below may edit a byte of them —
+    // the void's own MESSAGE belongs to a separate item; this one owns only what
+    // is APPENDED after the blank line. Pinned by a test that compares the first
+    // 149 bytes against a transcribed literal, not a `toContain`.
+    const message = [
       "Budgetary cannot confidently estimate this query (out of domain).",
       "This estimate wasn't billed. Proceed without a prediction — at your own judgment.",
+    ].join("\n");
+    const stored = options.stored ?? true;
+    // Everything appended below describes the pending entry this estimate just
+    // gained (0024c) and what comes back from it, so it is printed only when
+    // there IS one. Two guards, both fail-closed to `main`'s exact two lines:
+    //
+    //  - No `estimateId` → nothing pairable was stored, so there is no id to
+    //    print and no run whose counts could ever be recorded against it. (The
+    //    SDK validates a non-empty id on every response; the guard documents the
+    //    invariant rather than expecting to fire.)
+    //  - Not stored → the un-stored footer is deliberately NOT reused here. Its
+    //    copy is written for a BILLED estimate ("this estimate was ALREADY
+    //    billed, so do NOT re-estimate"), and the void's second line says the
+    //    opposite four lines above. Reusing it verbatim would put a flat
+    //    contradiction on screen; re-authoring it would move copy this item does
+    //    not own and would change the priced path's bytes. So the void keeps
+    //    `main`'s output in that state — no worse than today — and the store
+    //    failure still reaches stderr through the store's logger.
+    if (!stored || !estimate.estimateId) return message;
+    return [
+      message,
+      // Byte 150 onward. The blank line is the seam: everything before it is the
+      // invariant, everything after it is this item's.
+      "",
+      // 1. The same short form the priced footer, `pending` and the submit
+      //    confirmation all print, so a user can correlate this render with its
+      //    pending row and its eventual actuals submission.
+      `Estimate id: ${shortEstimateId(estimate.estimateId)}`,
+      "",
+      // 2. The existing host-aware lines, produced by the existing function —
+      //    they already say what happens next on this host, and a void's next
+      //    step is identical to a priced one's (neither route needs a forecast
+      //    band). Re-authoring them here would fork the copy.
+      ...storedFooter(options.host, true, estimate.estimateId),
+      // 3. What the recording gives back. Sits directly under the footer because
+      //    it continues the same thought: those lines say how the counts get
+      //    recorded, this one says what recording them returns.
+      MEASURED_FOLLOW_UP,
     ].join("\n");
   }
 

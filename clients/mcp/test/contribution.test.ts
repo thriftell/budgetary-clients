@@ -404,6 +404,39 @@ const VOID_TEXT =
   "Budgetary cannot confidently estimate this query (out of domain).\n" +
   "This estimate wasn't billed. Proceed without a prediction — at your own judgment.";
 
+/**
+ * What a void renders BENEATH that message since 0026c: after the blank-line
+ * seam, the estimate id, the host's existing stored footer, and one sentence on
+ * what a recorded run returns. The footers are transcribed for the same reason
+ * `VOID_TEXT` is — an expectation computed from `storedFooter` would pass
+ * whatever that copy became, and these assertions exist to notice.
+ *
+ * The notice is NOT part of this: it is appended after, and stays last.
+ */
+const CC_FOOTER = [
+  "Pending estimate stored. With the Budgetary plugin installed, actuals are",
+  "recorded automatically at session end — otherwise run `npx @budgetary/mcp report-actual`.",
+];
+const DEFAULT_FOOTER = [
+  "Pending estimate stored. After the run, record actuals with",
+  "`npx @budgetary/mcp report-actual`.",
+];
+const CODEX_FOOTER = [
+  "Pending estimate stored. After the run, record actuals with",
+  "`npx @budgetary/mcp on-session-end --transcript <rollout>` (or `report-actual`).",
+];
+
+function voidRender(footer: string[] = CC_FOOTER): string {
+  return [
+    VOID_TEXT,
+    "",
+    "Estimate id: est_void",
+    "",
+    ...footer,
+    "When this run's token counts are recorded, its measured breakdown appears here.",
+  ].join("\n");
+}
+
 describe("estimate — the one-time hook-less notice", () => {
   it("shows it once on a hook-less Claude Code install, then never again", async () => {
     const first = await estimate(CC);
@@ -445,11 +478,40 @@ describe("estimate — the one-time hook-less notice", () => {
     // could be forecast. What the 0024c rule protects is the void's MESSAGE, and
     // this is an append — proven by exact equality below, not by a `toContain`.
     const voidText = await estimate(CC, true);
-    expect(voidText).toBe(`${VOID_TEXT}\n\n${hooklessNoticeLines().join("\n")}`);
+    expect(voidText).toBe(`${voidRender()}\n\n${hooklessNoticeLines().join("\n")}`);
     // Stated separately so a failure says which half broke: the message is a
-    // byte-identical PREFIX, and the block is strictly beneath it.
+    // byte-identical PREFIX, and everything else is strictly beneath it.
     expect(voidText.startsWith(`${VOID_TEXT}\n\n`)).toBe(true);
     expect(voidText.slice(0, VOID_TEXT.length)).toBe(VOID_TEXT);
+    expect(Buffer.from(voidText, "utf8").subarray(0, 149).toString("utf8")).toBe(
+      VOID_TEXT,
+    );
+  });
+
+  it("keeps the notice VISUALLY LAST when both fire — id and footer come first", async () => {
+    // ★ The claim this item flagged as most likely to be wrong: that appending
+    // beneath the void still reads well once the one-time notice also fires. It
+    // is settled by rendering, not by reasoning — the full output is asserted
+    // above; here the ORDER is pinned so a later edit cannot quietly interleave
+    // the two blocks.
+    const text = await estimate(CC, true);
+    const idAt = text.indexOf("Estimate id: est_void");
+    const footerAt = text.indexOf("Pending estimate stored.");
+    const measuredAt = text.indexOf("When this run's token counts are recorded");
+    const separatorAt = text.indexOf("\n─────\n");
+    for (const at of [idAt, footerAt, measuredAt, separatorAt]) expect(at).toBeGreaterThan(-1);
+    expect(idAt).toBeGreaterThan(VOID_TEXT.length - 1);
+    expect(footerAt).toBeGreaterThan(idAt);
+    expect(measuredAt).toBeGreaterThan(footerAt);
+    // The `─────` block opens after everything 0026c appends…
+    expect(separatorAt).toBeGreaterThan(measuredAt);
+    // …and closes the message: the notice is the last thing on screen, exactly as
+    // it ships today.
+    expect(text.endsWith(hooklessNoticeLines().join("\n"))).toBe(true);
+    // One blank line between the two blocks — never a run-on, never a double gap.
+    expect(text).toContain(
+      "its measured breakdown appears here.\n\n─────\nNote for the person running this session.",
+    );
   });
 
   it("still shows it ONCE — a void burns the marker exactly as a priced estimate does", async () => {
@@ -457,21 +519,21 @@ describe("estimate — the one-time hook-less notice", () => {
     expect(first).toContain("automatic session-end submission has been recorded");
     // Neither a second void nor a later priced estimate repeats it. Firing on the
     // void must not turn a once-only notice into a per-estimate nag.
-    expect(await estimate(CC, true)).toBe(VOID_TEXT);
+    expect(await estimate(CC, true)).toBe(voidRender());
     expect(await estimate(CC)).not.toContain("automatic session-end submission");
   });
 
   it("shows NOTHING new on a VOID when the plugin declared a hook — the working path", async () => {
     // The suppression conditions are unchanged, so an install that CAN contribute
-    // sees exactly the two void lines and keeps its marker unspent.
+    // sees the void and its own footer, and keeps its marker unspent.
     const text = await estimate({ ...CC, [SESSION_END_ENV]: SESSION_END_HOOK }, true);
-    expect(text).toBe(VOID_TEXT);
+    expect(text).toBe(voidRender());
     expect(existsSync(noticeMarkerPath(HOOKLESS_NOTICE, home))).toBe(false);
   });
 
   it("shows NOTHING new on a VOID once a session-end run has been recorded", async () => {
     writeBreadcrumb(home, { startedAt: "2026-08-07T09:00:00Z", outcome: "submitted" });
-    expect(await estimate(CC, true)).toBe(VOID_TEXT);
+    expect(await estimate(CC, true)).toBe(voidRender());
     expect(existsSync(noticeMarkerPath(HOOKLESS_NOTICE, home))).toBe(false);
   });
 
@@ -479,7 +541,11 @@ describe("estimate — the one-time hook-less notice", () => {
     for (const host of [undefined, "codex", "cursor", "copilot"]) {
       const env = { BUDGETARY_API_KEY: "bg_test_x" } as NodeJS.ProcessEnv;
       if (host !== undefined) env.BUDGETARY_HOST = host;
-      expect(await estimate(env, true)).toBe(VOID_TEXT);
+      // Each host gets ITS OWN existing footer beneath the void — the same lines
+      // it already prints on a priced estimate, produced by the same function.
+      expect(await estimate(env, true)).toBe(
+        voidRender(host === "codex" ? CODEX_FOOTER : DEFAULT_FOOTER),
+      );
       expect(existsSync(noticeMarkerPath(HOOKLESS_NOTICE, home))).toBe(false);
     }
   });
@@ -505,7 +571,7 @@ describe("estimate — the one-time hook-less notice", () => {
       "utf8",
     );
     const text = await estimate(CC, true);
-    expect(text).toBe(`${VOID_TEXT}\n\n${hooklessNoticeLines().join("\n")}`);
+    expect(text).toBe(`${voidRender()}\n\n${hooklessNoticeLines().join("\n")}`);
     expect(text).not.toContain("await actuals");
   });
 

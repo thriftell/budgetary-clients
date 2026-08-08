@@ -80,11 +80,18 @@ Scenario: uncertain — supported, but the range is wide.
 Confidence: 0.35 (low)
 ```
 
-Out-of-domain queries return a void response:
+Out-of-domain queries return a void response — no forecast, and no bill. The run is
+still recorded, so its real counts can be submitted like any other:
 
 ```text
 Budgetary cannot confidently estimate this query (out of domain).
 This estimate wasn't billed. Proceed without a prediction — at your own judgment.
+
+Estimate id: est_01H2XYZA…
+
+Pending estimate stored. With the Budgetary plugin installed, actuals are
+recorded automatically at session end — otherwise run `npx @budgetary/mcp report-actual`.
+When this run's token counts are recorded, its measured breakdown appears here.
 ```
 
 The slash command and the model-invokable `estimate` tool are the same path: both call the Budgetary API, print the estimate verbatim, and append a pending entry to `~/.budgetary/pending.json`.
