@@ -181,13 +181,34 @@ It is read **only** for orgs the operator has explicitly designated, where it di
 ```json
 {
   "received": true,
-  "ledger_entry_id": "led_01HZZZZZZZZZZZZZZZZZZZZZ"
+  "ledger_entry_id": "led_01HZZZZZZZZZZZZZZZZZZZZZ",
+  "phases": {
+    "exploration": { "tokens": 14000, "share": 0.288 },
+    "generation": { "tokens": 20000, "share": 0.412 },
+    "testing": { "tokens": 9550, "share": 0.197 },
+    "retries": { "tokens": 3000, "share": 0.062 },
+    "other": { "tokens": 2000, "share": 0.041 },
+    "total_tokens": 48550,
+    "scheme_version": "phases-v4"
+  },
+  "assessment": {
+    "verdict": "insufficient_data",
+    "note": null,
+    "efficiency": { "burn_share": 0.103, "label": "lean" },
+    "scheme_version": "assessment-v4"
+  }
 }
 ```
 
 Idempotent: re-submitting the same `estimate_id` returns 202 with the original `ledger_entry_id`; the second body is ignored. This lets clients retry safely without producing duplicate entries.
 
 If the `estimate_id` is unknown or belongs to a different org, returns `404 not_found`.
+
+**`phases` / `assessment` on the 202 (0026c, additive).** The submission's own measurement, returned with the acknowledgement: the same `phases` breakdown and `assessment` verdict `GET /v1/ledger` serves for this run, defined exactly as in §4.3. It is here because the ledger has **no `estimate_id` filter** and orders strictly by `estimate_id DESC` — a client reconciling an *older* run cannot address that run's entry there without paging, so the pairing is done at submit time, where it is exact.
+
+⚠️ **The 202's `assessment` carries `verdict`, `note`, `efficiency` and `scheme_version`; the peer-benchmarked `conversion` and `resolution` blocks are computed only on `GET /v1/ledger`, so their absence here means *"not computed on this endpoint"*, never `insufficient_data`.** They are **omitted, not returned as `null`** — `null` would assert that the peer benchmark ran and came back empty, when on this endpoint it is never run at all (it needs a corpus-neighbour read that a write path must not take). Read `GET /v1/ledger` for those two blocks.
+
+Both fields are a **bonus, not the contract** — the total is. Both are nullable and fail closed: `phases` is `null` when no usable trace was stored, and *both* are `null` if the derivation fails for any reason (the call still returns `202`, never a `5xx`). `null` means **not computed**, never `normal`. On an idempotent replay the summary is recomputed from the **stored** row, not from the discarded incoming body, so replaying with a different `trace` — or with none — returns the same body as the original submission.
 
 ### 4.3 `GET /v1/ledger`
 
@@ -513,3 +534,4 @@ The limits below are **enforced only when the limiter is enabled** (it is off by
 | 2026-07-03 | Added optional `external_symbols` / `unresolved_symbols` (discrete symbol counts, **not code/names**; measured client-side, fail-closed, `unresolved ≤ external` — a bad pair is dropped, never a `422`) to `POST /v1/actuals`, and an additive `assessment.resolution` block (coverage-gated **structural-hallucination rate** vs comparable tasks — the first *correctness* axis; `verdict ∈ {low, elevated, insufficient_data}`, mostly `insufficient_data` today) to `GET /v1/ledger` entries. The neighbor rate distribution behind `region_rate` is **never returned**. **Structural existence only, not semantic correctness** (`low` ≠ correct); **regional, not a per-output flag**. New nullable columns + one migration; no estimate math change — additive per §3. `assessment.scheme_version` → `assessment-v4`. |
 | 2026-07-14 | **Correction, not a change.** `metadata` was documented as *"Fields are **not** analyzed"* — which stopped being true when 0024a shipped: the server reads **`metadata.source`** as an opaque provenance label, but **only for operator-designated orgs**. For every other org it is stored and ignored, and confers nothing (the promotion lane is derived **server-side from the authenticated org**, never from a client-supplied claim). The published client `@budgetary/mcp` ≥ 0.6.0 now sends the constant `mcp_client`, so the field is visible in the wild and its limits must be public too. **No behavior change, no new field, no migration** — the contract now describes what the server has been doing since 0024a. |
 | 2026-07-29 | Added optional `censoring` / `cap_ms` / `cap_tokens` (a closed four-value run-termination category — `natural`, `harness_watchdog`, `operative_cap`, `kill_switch` — plus the wall-clock and per-run token caps in force; measured harness- or client-side, never model-supplied, **omitted rather than guessed**) to `POST /v1/actuals`. Fail-closed like `trace` and the count pairs — an unrecognised category, a bool, a negative or an out-of-range integer is dropped to `null`, never a `422` — but **unlike** the acceptance/symbol pairs the three coerce **independently**: a bad cap does not drop the category. ⚠️ **`null` means *unknown*, not *uncensored*** — historical rows carry `null` and are deliberately **not** backfilled, because the fact was never captured. `cap_ms` is the cap *mechanism*, not a bound on token spend. **Ingest only:** nothing is echoed back, no read endpoint changed, no `assessment` block, no `scheme_version` bump. New nullable columns + one migration; no estimate math change — additive per §3. |
+| 2026-08-09 | Added additive, nullable `phases` + `assessment` to the **`POST /v1/actuals` 202 body** — the same measurement `GET /v1/ledger` already serves for that run, handed back at submit time because the ledger has no `estimate_id` filter and a reconciled run is never its first row. Derived from rows the route already holds (no new query, no engine call) and **fail-closed**: a derivation failure returns `null` for both with the `202`, never a `5xx`; `null` means *not computed*, never `normal`. ⚠️ The 202's `assessment` carries **only** `verdict` / `note` / `efficiency` / `scheme_version` — the peer-benchmarked `conversion` and `resolution` blocks are **omitted, not `null`**, because they are computed only on `GET /v1/ledger`; their absence here means *not computed on this endpoint*, never `insufficient_data`. An idempotent replay recomputes from the **stored** row, so a replay carrying a different `trace` (or none) returns a byte-identical body. No existing field changed, no ingest change, no migration, no `scheme_version` bump — additive per §3. |
