@@ -1,7 +1,8 @@
-import type { LedgerEntry } from "@budgetary/sdk";
+import type { LedgerEntry, Phases } from "@budgetary/sdk";
 
 import {
   escapeHtml,
+  formatShare,
   formatTimestamp,
   formatTokens,
   truncateEstimateId,
@@ -9,6 +10,19 @@ import {
 import { scenarioLabel } from "./scenario";
 
 const QUERY_MAX = 48;
+
+/**
+ * The five behavior phases, in the order the server's breakdown declares them.
+ * This is the shape of the payload, not a client ranking — nothing here decides
+ * which phase matters, and none is ever dropped, merged or reordered by size.
+ */
+const PHASE_KEYS = [
+  "exploration",
+  "generation",
+  "testing",
+  "retries",
+  "other",
+] as const satisfies readonly (keyof Phases)[];
 
 function resultCell(entry: LedgerEntry): string {
   // A void / out-of-domain estimate has no prediction and will NEVER receive an
@@ -46,6 +60,76 @@ function actualCell(entry: LedgerEntry): string {
   return formatTokens(entry.actual.total);
 }
 
+/**
+ * The MEASURED column: where this run's realized spend actually went, as the
+ * server broke it down. Every token printed here is a server field — the five
+ * phase names are the payload's own keys, each share is `phases[name].share`
+ * with its unit changed, and the second line is `phases.totalTokens`.
+ *
+ * Two absent states, one rendering: `undefined` (the deployment didn't send the
+ * field) and `null` (it sent one and had no breakdown to give — no trace was
+ * forwarded) both render an em-dash. Neither is a licence to compute a
+ * breakdown here; a measurement the server didn't make is silence, not a guess.
+ */
+function measuredCell(entry: LedgerEntry): string {
+  const phases = entry.phases;
+  if (phases === null || phases === undefined) return "—";
+  // `?.` so a slice missing from a malformed payload degrades to that phase's
+  // own em-dash instead of throwing the whole dashboard into the error view.
+  const list = PHASE_KEYS.map(
+    (key) => `${key} ${formatShare(phases[key]?.share)}`,
+  ).join(" · ");
+  // Escaped, not because a phase name can carry markup (they are our literals)
+  // but because formatShare can legitimately emit "<1%".
+  return `<span class="b-phase-list">${escapeHtml(list)}</span><span class="b-phase-total">${formatTokens(
+    phases.totalTokens,
+  )} tokens measured</span>`;
+}
+
+/**
+ * The server's raw verdict for this entry, or `null` when there is none to show.
+ * The single source of truth for both the cell and its class hook, so the two
+ * can never disagree about whether a verdict exists.
+ *
+ * Typed as a string and guarded anyway: a malformed payload must read as honest
+ * silence — exactly like a non-finite p10/p90 collapses the range cell — never
+ * throw the whole dashboard into the error view.
+ */
+function rawVerdict(entry: LedgerEntry): string | null {
+  const verdict = entry.assessment?.verdict;
+  return typeof verdict === "string" && verdict.length > 0 ? verdict : null;
+}
+
+/**
+ * The NORMAL? column: the server's verdict on where this run's realized total
+ * landed against its own predicted interval, printed exactly as received — no
+ * client label, no folding of an unrecognized value into a known one, no
+ * threshold recomputed here. Beneath it, the efficiency label when the server
+ * returned one (it can only exist where a trace was forwarded).
+ *
+ * `insufficient_data` is deliberately styled like every other verdict. It is
+ * the honest answer to "was that normal for a task like this?", not a failure
+ * and not a partial result, and the measured breakdown in the cell beside it is
+ * exact regardless. Nothing in this column is colored by severity either:
+ * painting one verdict red and dimming another would rank them against each
+ * other — a judgment the server never sent, and one that would make the honest
+ * answer read as an error. No verdict value is written down anywhere in this
+ * file for the same reason; there is nothing here to keep in sync with the
+ * server's vocabulary.
+ */
+function verdictCell(entry: LedgerEntry): string {
+  const verdict = rawVerdict(entry);
+  if (verdict === null) return "—";
+  // `efficiency` is null when no trace was forwarded — composition cannot be
+  // inferred without measured steps, so its absence is silence.
+  const label = entry.assessment?.efficiency?.label;
+  const efficiencyLine =
+    typeof label === "string" && label.length > 0
+      ? `<span class="b-efficiency">${escapeHtml(label)}</span>`
+      : "";
+  return `<span class="b-verdict">${escapeHtml(verdict)}</span>${efficiencyLine}`;
+}
+
 function queryCell(entry: LedgerEntry): string {
   const q = entry.queryExcerpt ?? "";
   if (q.length === 0) return "—";
@@ -57,6 +141,11 @@ function row(entry: LedgerEntry): string {
   const id = escapeHtml(truncateEstimateId(entry.estimateId, 12));
   // Humanized scenario for display; the raw value stays in the class hook.
   const scenario = escapeHtml(scenarioLabel(entry.scenario));
+  // Same convention as the scenario column: the RAW server verdict is the class
+  // hook. No hook at all when there is no verdict — an absent field must not
+  // acquire a name here.
+  const verdict = rawVerdict(entry);
+  const verdictClass = verdict === null ? "" : ` b-verdict-${escapeHtml(verdict)}`;
   return `<tr>
     <td class="b-cell-when">${escapeHtml(formatTimestamp(entry.createdAt))}</td>
     <td class="b-cell-query">${queryCell(entry)}</td>
@@ -64,6 +153,8 @@ function row(entry: LedgerEntry): string {
     <td class="b-cell-num">${predictedCell(entry)}</td>
     <td class="b-cell-num">${rangeCell(entry)}</td>
     <td class="b-cell-num">${actualCell(entry)}</td>
+    <td class="b-cell-measured">${measuredCell(entry)}</td>
+    <td class="b-cell-verdict${verdictClass}">${verdictCell(entry)}</td>
     <td class="b-cell-scenario b-scenario-${escapeHtml(entry.scenario)}">${scenario}</td>
     <td class="b-cell-done">${resultCell(entry)}</td>
   </tr>`;
@@ -101,7 +192,7 @@ export function renderRecentTable(
     : "";
 
   return `<table class="b-table">
-  <caption class="b-caption">Recent estimates — predicted vs. actual, newest first.${capNote}</caption>
+  <caption class="b-caption">Recent estimates — predicted vs. actual, newest first. Measured and Normal? are reported by the server; an em-dash means it reported none.${capNote}</caption>
   <thead>
     <tr>
       <th scope="col">When</th>
@@ -110,6 +201,8 @@ export function renderRecentTable(
       <th scope="col" class="b-cell-num">Predicted p50</th>
       <th scope="col" class="b-cell-num">Range (p10–p90)</th>
       <th scope="col" class="b-cell-num">Actual</th>
+      <th scope="col">Measured</th>
+      <th scope="col">Normal?</th>
       <th scope="col">Scenario</th>
       <th scope="col">Result</th>
     </tr>
