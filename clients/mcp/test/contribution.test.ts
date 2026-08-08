@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -18,7 +26,7 @@ import {
   sessionEndHookLines,
 } from "../src/contribution.js";
 import { runDoctor } from "../src/doctor.js";
-import { runEstimateTool } from "../src/tools/estimate.js";
+import { projectIdFromCwd, runEstimateTool } from "../src/tools/estimate.js";
 
 let home: string;
 let cwd: string;
@@ -381,6 +389,21 @@ async function estimate(env: NodeJS.ProcessEnv, isVoid = false): Promise<string>
 
 const CC = { BUDGETARY_API_KEY: "bg_test_x", BUDGETARY_HOST: "claude-code" } as NodeJS.ProcessEnv;
 
+/**
+ * A void estimate's user-facing message, verbatim — the exact two lines `main`
+ * rendered before the notice was allowed beneath one.
+ *
+ * TRANSCRIBED rather than imported from `renderEstimate` on purpose: the point of
+ * these assertions is that the void's own text did not move, and computing the
+ * expectation from the same function that produces it would pass no matter what
+ * that copy became. Held here, a change to either side fails loudly — which is
+ * what should happen, since rewriting the void's message belongs to 0026b, not
+ * to a change that only stops suppressing a block underneath it.
+ */
+const VOID_TEXT =
+  "Budgetary cannot confidently estimate this query (out of domain).\n" +
+  "This estimate wasn't billed. Proceed without a prediction — at your own judgment.";
+
 describe("estimate — the one-time hook-less notice", () => {
   it("shows it once on a hook-less Claude Code install, then never again", async () => {
     const first = await estimate(CC);
@@ -416,14 +439,74 @@ describe("estimate — the one-time hook-less notice", () => {
     }
   });
 
-  it("leaves a VOID's text byte-for-byte unchanged (the 0024c rule)", async () => {
+  it("APPENDS the notice beneath a VOID, leaving the void's own message byte-identical", async () => {
+    // The notice used to be suppressed on a void. It no longer is: whether a run
+    // can be submitted is a property of the install, not of whether this query
+    // could be forecast. What the 0024c rule protects is the void's MESSAGE, and
+    // this is an append — proven by exact equality below, not by a `toContain`.
     const voidText = await estimate(CC, true);
-    expect(voidText).not.toContain("automatic session-end submission");
-    // The marker is untouched, so the notice still reaches the user on their
-    // next non-void estimate rather than being silently consumed by the void.
+    expect(voidText).toBe(`${VOID_TEXT}\n\n${hooklessNoticeLines().join("\n")}`);
+    // Stated separately so a failure says which half broke: the message is a
+    // byte-identical PREFIX, and the block is strictly beneath it.
+    expect(voidText.startsWith(`${VOID_TEXT}\n\n`)).toBe(true);
+    expect(voidText.slice(0, VOID_TEXT.length)).toBe(VOID_TEXT);
+  });
+
+  it("still shows it ONCE — a void burns the marker exactly as a priced estimate does", async () => {
+    const first = await estimate(CC, true);
+    expect(first).toContain("automatic session-end submission has been recorded");
+    // Neither a second void nor a later priced estimate repeats it. Firing on the
+    // void must not turn a once-only notice into a per-estimate nag.
+    expect(await estimate(CC, true)).toBe(VOID_TEXT);
+    expect(await estimate(CC)).not.toContain("automatic session-end submission");
+  });
+
+  it("shows NOTHING new on a VOID when the plugin declared a hook — the working path", async () => {
+    // The suppression conditions are unchanged, so an install that CAN contribute
+    // sees exactly the two void lines and keeps its marker unspent.
+    const text = await estimate({ ...CC, [SESSION_END_ENV]: SESSION_END_HOOK }, true);
+    expect(text).toBe(VOID_TEXT);
     expect(existsSync(noticeMarkerPath(HOOKLESS_NOTICE, home))).toBe(false);
-    const nextText = await estimate(CC);
-    expect(nextText).toContain("automatic session-end submission");
+  });
+
+  it("shows NOTHING new on a VOID once a session-end run has been recorded", async () => {
+    writeBreadcrumb(home, { startedAt: "2026-08-07T09:00:00Z", outcome: "submitted" });
+    expect(await estimate(CC, true)).toBe(VOID_TEXT);
+    expect(existsSync(noticeMarkerPath(HOOKLESS_NOTICE, home))).toBe(false);
+  });
+
+  it("shows NOTHING new on a VOID on any other host", async () => {
+    for (const host of [undefined, "codex", "cursor", "copilot"]) {
+      const env = { BUDGETARY_API_KEY: "bg_test_x" } as NodeJS.ProcessEnv;
+      if (host !== undefined) env.BUDGETARY_HOST = host;
+      expect(await estimate(env, true)).toBe(VOID_TEXT);
+      expect(existsSync(noticeMarkerPath(HOOKLESS_NOTICE, home))).toBe(false);
+    }
+  });
+
+  it("appends the notice and NOTHING ELSE — the pending-hygiene nudges stay off a void", async () => {
+    // This project already has an unexpired pending estimate, so a PRICED estimate
+    // here would append "earlier estimates await actuals". A void must still not:
+    // only the notice may follow the void's message, and only beneath it.
+    writeFileSync(
+      join(home, ".budgetary", "pending.json"),
+      JSON.stringify({
+        version: 1,
+        entries: [
+          {
+            estimate_id: "est_prior",
+            query: "an earlier task",
+            project_id: projectIdFromCwd(cwd, home),
+            created_at: new Date(Date.now() - 60_000).toISOString(),
+            attempts: 0,
+          },
+        ],
+      }),
+      "utf8",
+    );
+    const text = await estimate(CC, true);
+    expect(text).toBe(`${VOID_TEXT}\n\n${hooklessNoticeLines().join("\n")}`);
+    expect(text).not.toContain("await actuals");
   });
 
   it("never lets the notice turn an estimate into an error", async () => {

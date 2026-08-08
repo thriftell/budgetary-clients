@@ -305,13 +305,28 @@ export async function runEstimateTool(
     //     says so; adding this there would be noise, not news.
     //   - suppressed by ANY positive sign of an automatic path (see
     //     `contributionStatus`), so an install that can contribute is untouched.
-    //   - not on a VOID: a void's user-facing text stays byte-for-byte what it
-    //     was (the 0024c rule). The notice simply waits for the next estimate,
-    //     and `doctor` states it unconditionally in the meantime.
     //   - `claimOneTimeNotice` last, and only if everything else already matched,
     //     so the marker is never burned on a run that would not have shown it.
+    //
+    // On a VOID TOO — appended BENEATH the void's own message, never in place of
+    // it. This block originally carried a `!response.void` gate, reasoning that a
+    // void's text stays byte-for-byte what it was (the 0024c rule) and that the
+    // notice could simply wait for the next estimate while `doctor` said it
+    // unconditionally. Both halves of that fail. Waiting couples two independent
+    // things: whether a finished run can be SUBMITTED is a property of how the
+    // install is wired, and whether a forecast could be made is a property of the
+    // query — the very coupling 0024c removed from the store, left standing on the
+    // text. And `doctor` closes nothing, because thinking to run it already
+    // requires suspecting the gap the notice exists to disclose.
+    //
+    // The 0024c rule is about the void's MESSAGE, and that is untouched: the two
+    // pending-hygiene nudges above stay `!void`-gated, so everything preceding the
+    // separator below is byte-identical to what a void rendered before. The copy
+    // needs no rewrite to be true here either — a void stores a pending entry too
+    // (0024c), so "nothing will submit this run's real token counts when it
+    // finishes" holds exactly as written, and both routes it offers act on that
+    // entry (neither requires a forecast band).
     if (
-      !response.void &&
       host === "claude-code" &&
       contributionStatus(args.env, args.home).kind === "manual-only" &&
       claimOneTimeNotice(HOOKLESS_NOTICE, args.home)
