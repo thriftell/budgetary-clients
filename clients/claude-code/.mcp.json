@@ -2,7 +2,7 @@
   "mcpServers": {
     "budgetary": {
       "command": "npx",
-      "args": ["-y", "@budgetary/mcp@0.9.1"],
+      "args": ["-y", "@budgetary/mcp@0.9.2"],
       "env": {
         "BUDGETARY_HOST": "claude-code",
         "BUDGETARY_SESSION_END": "hook",
