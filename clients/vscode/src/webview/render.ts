@@ -130,6 +130,24 @@ const STYLES = `
   td.b-cell-when { white-space: nowrap; color: var(--vscode-descriptionForeground); font-size: 12px; }
   td.b-cell-query { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   td.b-cell-scenario { font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; }
+  td.b-cell-measured { max-width: 280px; font-size: 12px; }
+  td.b-cell-measured .b-phase-list { display: block; }
+  td.b-cell-measured .b-phase-total {
+    display: block;
+    margin-top: 2px;
+    font-size: 11px;
+    color: var(--vscode-descriptionForeground);
+  }
+  /* No per-verdict color, by design — see verdictCell() in table.ts. The raw
+     verdict is a class hook (b-verdict-<value>) that nothing here styles. */
+  td.b-cell-verdict { font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; }
+  td.b-cell-verdict .b-verdict { display: block; }
+  td.b-cell-verdict .b-efficiency {
+    display: block;
+    margin-top: 2px;
+    font-size: 11px;
+    color: var(--vscode-descriptionForeground);
+  }
   td.b-cell-id { font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; color: var(--vscode-descriptionForeground); }
   .b-empty { color: var(--vscode-descriptionForeground); font-style: italic; }
   .b-message {

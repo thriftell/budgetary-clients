@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   escapeHtml,
+  formatShare,
   formatTimestamp,
   formatTokens,
   truncateEstimateId,
@@ -21,6 +22,31 @@ describe("formatTokens", () => {
     expect(formatTokens(undefined)).toBe("—");
     expect(formatTokens(NaN)).toBe("—");
     expect(formatTokens(Infinity)).toBe("—");
+  });
+});
+
+describe("formatShare", () => {
+  it("renders a [0,1] share as a percentage", () => {
+    expect(formatShare(0)).toBe("0%");
+    expect(formatShare(0.12)).toBe("12%");
+    expect(formatShare(0.475)).toBe("48%");
+    expect(formatShare(1)).toBe("100%");
+  });
+
+  it("says '<1%' rather than '0%' for a positive share that rounds to zero", () => {
+    // Those tokens were measured. Printing "0%" would deny a measurement the
+    // server actually made.
+    expect(formatShare(0.004)).toBe("<1%");
+    expect(formatShare(0.0000001)).toBe("<1%");
+    // Exactly zero is genuinely zero and says so.
+    expect(formatShare(0)).toBe("0%");
+  });
+
+  it("returns em-dash for null, undefined, NaN, Infinity", () => {
+    expect(formatShare(null)).toBe("—");
+    expect(formatShare(undefined)).toBe("—");
+    expect(formatShare(NaN)).toBe("—");
+    expect(formatShare(Infinity)).toBe("—");
   });
 });
 
