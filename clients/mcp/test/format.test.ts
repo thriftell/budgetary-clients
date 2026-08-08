@@ -85,15 +85,260 @@ describe("renderEstimate — honest presentation", () => {
     expect(text).toContain("cannot confidently estimate");
     expect(text).toContain("wasn't billed");
     expect(text).not.toContain("No charge");
+    // Still not a single forecast number: no band, no midpoint, no worst case,
+    // no confidence decimal. What 0026c appended beneath it is prose about the
+    // pending entry — nothing derived from a distribution that does not exist.
     expect(text).not.toContain("Estimated");
-    // The void path returns early — no footer, and NO "Estimate id" line (that
-    // is only added on the non-void render).
-    expect(text).not.toContain("Estimate id");
+    expect(text).not.toContain("Worst case");
+    expect(text).not.toContain("Confidence:");
+    expect(text).not.toContain("p10");
   });
 
   it("clamps a malformed confidence into [0,1] rather than printing a raw decimal", () => {
     expect(renderEstimate(estimate({ confidence: 1.5 }))).toContain("Confidence: 1.00 (high)");
     expect(renderEstimate(estimate({ confidence: Number.NaN }))).toContain("(very low)");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 0026c — the void moment. What is APPENDED beneath a message that may not move.
+// ---------------------------------------------------------------------------
+
+/**
+ * A void estimate's own message, verbatim and TRANSCRIBED — deliberately not
+ * computed from `renderEstimate`, which is the function under test: an
+ * expectation derived from the code under test passes whatever that code becomes.
+ *
+ * Exactly 149 UTF-8 bytes (147 characters — the em-dash is 3), and exactly what
+ * `main` returned for EVERY void before this change. It is the invariant: 0026c
+ * owns only what follows the blank line after it, and rewriting the message
+ * itself belongs to a separate item. A change to either side fails here, loudly.
+ */
+const VOID_MESSAGE =
+  "Budgetary cannot confidently estimate this query (out of domain).\n" +
+  "This estimate wasn't billed. Proceed without a prediction — at your own judgment.";
+
+/** The sentence the append closes on, transcribed for the same reason. */
+const MEASURED_FOLLOW_UP =
+  "When this run's token counts are recorded, its measured breakdown appears here.";
+
+function voidEstimate(): EstimateResponse {
+  return estimate({
+    estimateId: "est_01ABCDEF2345",
+    scenario: "out_of_domain",
+    void: true,
+    distribution: null,
+    confidence: 0,
+  });
+}
+
+describe("renderEstimate — the void's first 149 bytes never move (0026c)", () => {
+  it("the transcribed message really is 149 UTF-8 bytes / 147 characters", () => {
+    // Pinned so the "everything after byte 149 is ours" rule is measured, not
+    // asserted: if the message ever changes length, that number is wrong and this
+    // fails before any prefix comparison can quietly start passing.
+    expect(Buffer.byteLength(VOID_MESSAGE, "utf8")).toBe(149);
+    expect(VOID_MESSAGE.length).toBe(147);
+  });
+
+  it("every host's void render OPENS with those exact 149 bytes, then a blank line", () => {
+    for (const host of [undefined, "claude-code", "codex", "cursor", "mcp"]) {
+      const bytes = Buffer.from(
+        renderEstimate(voidEstimate(), { host, stored: true }),
+        "utf8",
+      );
+      // Byte-level equality against the literal — not `toContain`, and not a
+      // character-index slice, since what is being proven is the ENCODING.
+      expect(bytes.subarray(0, 149).toString("utf8")).toBe(VOID_MESSAGE);
+      // The seam is a blank line, so nothing appended can run into the message.
+      expect(bytes.subarray(149, 151).toString("utf8")).toBe("\n\n");
+    }
+  });
+
+  it("appends the id, the host's EXISTING stored footer, and the measured follow-up", () => {
+    // Whole-output equality, per host. The footer lines are transcribed from the
+    // shipped copy rather than imported, so a silent edit to `storedFooter` shows
+    // up here as a diff instead of passing by construction.
+    expect(renderEstimate(voidEstimate(), { host: "claude-code", stored: true })).toBe(
+      [
+        VOID_MESSAGE,
+        "",
+        "Estimate id: est_01ABCDEF…",
+        "",
+        "Pending estimate stored. With the Budgetary plugin installed, actuals are",
+        "recorded automatically at session end — otherwise run `npx @budgetary/mcp report-actual`.",
+        MEASURED_FOLLOW_UP,
+      ].join("\n"),
+    );
+    expect(renderEstimate(voidEstimate(), { host: "codex", stored: true })).toBe(
+      [
+        VOID_MESSAGE,
+        "",
+        "Estimate id: est_01ABCDEF…",
+        "",
+        "Pending estimate stored. After the run, record actuals with",
+        "`npx @budgetary/mcp on-session-end --transcript <rollout>` (or `report-actual`).",
+        MEASURED_FOLLOW_UP,
+      ].join("\n"),
+    );
+    expect(renderEstimate(voidEstimate(), { host: "mcp", stored: true })).toBe(
+      [
+        VOID_MESSAGE,
+        "",
+        "Estimate id: est_01ABCDEF…",
+        "",
+        "Pending estimate stored. After the run, record actuals with",
+        "`npx @budgetary/mcp report-actual`.",
+        MEASURED_FOLLOW_UP,
+      ].join("\n"),
+    );
+  });
+
+  it("prints the SHORT id — the same form the priced footer and `pending` show", () => {
+    const text = renderEstimate(voidEstimate(), { stored: true });
+    expect(text).toContain("Estimate id: est_01ABCDEF…");
+    expect(text).not.toContain("est_01ABCDEF2345"); // truncated, never full
+  });
+
+  it("stays at `main`'s two lines when nothing was stored", () => {
+    // The un-stored footer is written for a BILLED estimate ("this estimate was
+    // ALREADY billed, so do NOT re-estimate"), which the void's own second line
+    // contradicts four lines above. Reusing it verbatim would print both claims
+    // at once; re-authoring it would move copy this item does not own AND change
+    // the priced path's bytes. So a void with no pending entry renders exactly
+    // what it rendered before — never a footer describing an entry that isn't
+    // there, and never the follow-up promise it underwrites.
+    const text = renderEstimate(voidEstimate(), { host: "claude-code", stored: false });
+    expect(text).toBe(VOID_MESSAGE);
+    expect(text).not.toContain("ALREADY billed");
+    expect(text).not.toContain(MEASURED_FOLLOW_UP);
+  });
+
+  it("stays at `main`'s two lines when the response carried no estimate id", () => {
+    // Nothing pairable was stored, so there is no id to print and no run whose
+    // counts could ever be recorded against one. (The SDK validates a non-empty
+    // id on every response; this pins the fail-closed behaviour if it ever isn't.)
+    expect(renderEstimate(estimate({ ...voidEstimate(), estimateId: "" }))).toBe(
+      VOID_MESSAGE,
+    );
+  });
+
+  it("promises the MEASUREMENT — never a forecast, a timeline, or a verdict", () => {
+    const s = MEASURED_FOLLOW_UP.toLowerCase();
+    // A forecast is precisely what the message above said it could not give.
+    for (const word of ["forecast", "predict", "estimate of", "expect"]) {
+      expect(s).not.toContain(word);
+    }
+    // No clock: nothing here knows when, or whether, the counts are submitted.
+    for (const word of ["soon", "shortly", "next time", "within", "minute", "hour", "day"]) {
+      expect(s).not.toContain(word);
+    }
+    // No judgement about the run — that is a separate, server-computed answer.
+    for (const word of ["normal", "efficient", "elevated", "anomalous", "verdict", "good", "bad"]) {
+      expect(s).not.toContain(word);
+    }
+    // What it DOES promise.
+    expect(s).toContain("measured breakdown");
+  });
+
+  it("keeps engine vocabulary, rates and commercial claims out of the appended copy", () => {
+    const appended = renderEstimate(voidEstimate(), { host: "claude-code", stored: true })
+      .slice(VOID_MESSAGE.length)
+      .toLowerCase();
+    // No engine vocabulary on a public surface.
+    for (const word of ["coverage", "stability", "bandwidth", "csr", "neighbor", "out_of_domain"]) {
+      expect(appended).not.toContain(word);
+    }
+    // No rate, ever: this copy may describe THIS query and this install, never
+    // how often anything happens.
+    for (const word of ["usually", "often", "most ", "rarely", "typically", "%"]) {
+      expect(appended).not.toContain(word);
+    }
+    expect(appended).not.toMatch(/\b\d+\s*(%|percent)/);
+    // No commercial claim of any kind.
+    for (const word of ["price", "pricing", "paid", "plan", "tier", "licence", "license", "enterprise", "trial", "$"]) {
+      expect(appended).not.toContain(word);
+    }
+  });
+});
+
+describe("renderEstimate — the PRICED path is byte-unchanged by 0026c", () => {
+  /**
+   * `main`'s exact priced output, transcribed. 0026c touches only the void
+   * branch, and "only" is a claim worth failing on: these four goldens are the
+   * whole priced surface (three host footers plus the un-stored branch), asserted
+   * as complete strings rather than by substring.
+   */
+  function priced(): EstimateResponse {
+    return estimate({ estimateId: "est_01ABCDEF2345", confidence: 0.74 });
+  }
+
+  const HEAD = [
+    "Estimated cost: ~48,000 tokens (range 12,500–220,000, p10–p90)",
+    "Worst case (p90): ~220,000 tokens",
+    "Scenario: confident — well-supported, the range is reliable.",
+    "Confidence: 0.74 (moderate)",
+    "Model: claude-opus-4-7",
+    "Valid until: 2026-05-27T10:14:00Z",
+    "Estimate id: est_01ABCDEF…",
+  ];
+
+  it("claude-code, with the key tier line", () => {
+    expect(
+      renderEstimate(priced(), { host: "claude-code", stored: true, keyPrefix: "bg_test_" }),
+    ).toBe(
+      [
+        ...HEAD,
+        "Key: bg_test_ (free)",
+        "",
+        "Pending estimate stored. With the Budgetary plugin installed, actuals are",
+        "recorded automatically at session end — otherwise run `npx @budgetary/mcp report-actual`.",
+      ].join("\n"),
+    );
+  });
+
+  it("the default host", () => {
+    expect(renderEstimate(priced(), { host: "mcp", stored: true })).toBe(
+      [
+        ...HEAD,
+        "",
+        "Pending estimate stored. After the run, record actuals with",
+        "`npx @budgetary/mcp report-actual`.",
+      ].join("\n"),
+    );
+  });
+
+  it("codex", () => {
+    expect(renderEstimate(priced(), { host: "codex", stored: true })).toBe(
+      [
+        ...HEAD,
+        "",
+        "Pending estimate stored. After the run, record actuals with",
+        "`npx @budgetary/mcp on-session-end --transcript <rollout>` (or `report-actual`).",
+      ].join("\n"),
+    );
+  });
+
+  it("un-stored — the already-billed free close, untouched", () => {
+    expect(renderEstimate(priced(), { host: "claude-code", stored: false })).toBe(
+      [
+        ...HEAD,
+        "",
+        "⚠ Couldn't save this as a pending estimate — the local store under ~/.budgetary",
+        "  is unwritable. This estimate was ALREADY billed, so do NOT re-estimate (that",
+        "  bills again). Record its actuals directly against its id — no pending row needed:",
+        "    npx @budgetary/mcp report-actual --estimate-id est_01ABCDEF2345",
+        "  Fix ~/.budgetary to restore automatic recording; re-estimating is a last resort.",
+      ].join("\n"),
+    );
+  });
+
+  it("carries no measured follow-up — that promise belongs to the void's append", () => {
+    // The priced path gains nothing here. When a recorded run's summary does
+    // render beneath a later estimate, a separate item owns that.
+    expect(renderEstimate(priced(), { host: "claude-code", stored: true })).not.toContain(
+      MEASURED_FOLLOW_UP,
+    );
   });
 });
 

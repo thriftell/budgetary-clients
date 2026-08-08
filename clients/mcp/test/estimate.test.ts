@@ -352,6 +352,37 @@ describe("runEstimateTool — void (0024c: out-of-domain still ingests)", () => 
     expect(entry.forecast_p90).toBeUndefined();
   });
 
+  it("NAMES the entry it stored — the id it prints is the id it wrote (0026c)", async () => {
+    // The point of the append is that a void stops being a dead end: the user is
+    // told an entry exists and can be closed. That is only true if the id on
+    // screen is the id in the store, so the two are read from the same run.
+    const fake = makeFakeClient(async () => voidEstimate());
+    const result = await runEstimateTool({
+      query: "???",
+      env: {
+        BUDGETARY_API_KEY: "bg_test_dummy",
+        BUDGETARY_HOST: "claude-code",
+      } as NodeJS.ProcessEnv,
+      cwd,
+      home,
+      clientFactory: () => asClient(fake),
+    });
+
+    const file = JSON.parse(
+      readFileSync(join(home, ".budgetary", "pending.json"), "utf8"),
+    );
+    expect(file.entries).toHaveLength(1);
+    expect(result.text).toContain(`Estimate id: ${file.entries[0].estimate_id}`);
+    // The host's own footer, and the one sentence about what recording returns.
+    expect(result.text).toContain("Pending estimate stored.");
+    expect(result.text).toContain(
+      "When this run's token counts are recorded, its measured breakdown appears here.",
+    );
+    // Still no forecast anywhere: a void has no band, and nothing invents one.
+    expect(result.text).not.toContain("p10");
+    expect(result.text).not.toContain("Worst case");
+  });
+
   it("leaves the void's user-facing text UNCHANGED — no pending-hygiene nudge (spec §3)", async () => {
     // The project already has an unexpired pending estimate, so a CONFIDENT run
     // here would append the "earlier estimates await actuals" nudge. A void must
