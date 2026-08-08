@@ -1,5 +1,34 @@
 # @budgetary/mcp
 
+## 0.9.0
+
+### Minor Changes
+
+- dd06ae0: Submit a finished Claude Code session's real token counts automatically, on the next estimate.
+
+  An install wired with `claude mcp add` has the `estimate` tool and no session-end hook, so a completed run was never reported. It turns out nothing was missing but a moment to act: a stdio MCP server is told by Claude Code which session spawned it and where that project's transcripts live, and a session that has ended leaves a complete transcript behind. The next `estimate` reads that transcript and closes out the earlier run.
+
+  - Each pending estimate now records which session made it, which call it was, and which process served it — all from the host, none of it from the model, and none of it sent to the server.
+  - A later estimate closes out at most one earlier run whose serving process has exited, measuring it from that run's own transcript with the same reader the hook uses. Counts and execution trace are identical to what the hook would have sent.
+  - Every step fails closed. No binding, no transcript, an unreadable or unparseable one, or one that changes while being read all mean nothing is submitted and the run stays pending for a later estimate.
+  - A run is only ever matched to its own transcript, proven by the host's own identifier for the call rather than assumed from a name. A run it cannot prove is left alone.
+  - The estimate itself is untouched: the work is scheduled after the response has been sent, so it cannot delay the result, change its text, or make it fail. When there is nothing to close out, no transcript is opened at all.
+
+  The session-end hook remains the primary path and still fires at the better moment: it can report how a session ended, which a later reader cannot. Submissions are settled by estimate id, so whichever path arrives first wins and the other is discarded — either order leaves exactly one result and nothing counted twice.
+
+  The tool surface is unchanged: `estimate` remains the only model-invokable tool, and no path accepts a model-supplied token count.
+
+### Patch Changes
+
+- 9b03c0c: Let a one-click registry install say which host it is running under.
+
+  The MCP registry listing declared a single environment variable, `BUDGETARY_API_KEY`, so an install made from it started the server with no `BUDGETARY_HOST`. The host then resolved to the generic `mcp` default — honest, but also the one value that suppresses the first-run notice about nothing submitting your finished runs. The install path with the least setup was the one least likely to hear about the gap it has.
+
+  - `server.json` now declares `BUDGETARY_HOST` as an optional, non-secret variable whose description names the values that matter, so an install made from the listing can identify itself the way a hand-written host config already does.
+  - The README documents the registry path: what it offers, why to fill that field in even though it is optional, and what the listing's remote endpoint can and cannot do — it estimates only, and has no local process that could measure what a run actually cost.
+
+  Nothing in the server changed. `BUDGETARY_HOST` remains a tag and only a tag: it says which host this is, never whether anything is wired to submit a finished run. A test now holds the manifest to that — nothing it declares may be read as evidence of an automatic path, and it may never declare the one variable that is.
+
 ## 0.8.0
 
 ### Minor Changes
