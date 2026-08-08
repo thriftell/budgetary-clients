@@ -42,13 +42,21 @@ export const TOOL_NAME = "estimate";
 const ESTIMATE_TOOL: Tool = {
   name: TOOL_NAME,
   title: "Budgetary: estimate token spend",
+  // ⚠ The FINAL clause used to end "it never reports how many tokens a run
+  // actually used", which 0026c makes false: a run whose actuals were recorded
+  // earlier now has its measured breakdown rendered beneath a later estimate.
+  // The live-usage disclaimer is what mattered in that clause and it is kept —
+  // this tool still observes nothing about the run it is called during — while
+  // the post-hoc half is now conditional on the recording having happened.
+  // Nothing before the em-dash is touched here; that copy is a separate item's.
   description:
     "Return a pre-flight, probabilistic token-spend estimate for a coding " +
     "task before you run it, and store it so the realized cost can be " +
     "recorded afterward. Call this with the user's task described in natural " +
     "language. Returns a token range (p10–p90), a scenario label, and a " +
-    "confidence score. This tool only estimates and records — it never " +
-    "reports how many tokens a run actually used.",
+    "confidence score. This tool only estimates and records — it does not " +
+    "observe the current run's usage; when an earlier run's counts have been " +
+    "recorded, it reports that run's measured breakdown.",
   inputSchema: {
     type: "object",
     properties: {
