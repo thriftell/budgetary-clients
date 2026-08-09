@@ -217,17 +217,35 @@ class BudgetaryClient:
         estimate_id: str,
         tokens_in: int,
         tokens_out: int,
-        success: bool,
+        success: bool | None = None,
         duration_ms: int,
         metadata: dict[str, Any] | None = None,
     ) -> ActualsResponse:
+        """Submit the realized counts for an estimate.
+
+        ``success`` is an OBSERVATION, not a status: pass it only if
+        something measured whether the run met its objective. Left as
+        ``None`` (the default) the key is OMITTED from the body, which
+        the server stores as "not observed" — a third state that means
+        neither failed nor succeeded. Never default it in either
+        direction: the route is idempotent on ``estimate_id``, only the
+        first stored submission's value persists, and there is no update
+        endpoint, so a guessed verdict is permanent.
+        """
         body: dict[str, Any] = {
             "estimate_id": estimate_id,
             "tokens_in": tokens_in,
             "tokens_out": tokens_out,
-            "success": success,
-            "duration_ms": duration_ms,
         }
+        # Conditional, exactly like `metadata` below: an unobserved outcome is
+        # ABSENT from the wire, never serialized as `null` (the two mean the
+        # same thing to the server, but an older deployment rejects the body
+        # outright — and a rejected submit loses the counts that WERE measured).
+        # Inserted HERE, before `duration_ms`, so a caller that DOES pass a
+        # verdict sends byte-identical JSON to every previous release.
+        if success is not None:
+            body["success"] = success
+        body["duration_ms"] = duration_ms
         if metadata is not None:
             body["metadata"] = metadata
 

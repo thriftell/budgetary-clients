@@ -176,7 +176,26 @@ export interface ActualsRequest {
   estimateId: string;
   tokensIn: number;
   tokensOut: number;
-  success: boolean;
+  /**
+   * Optional OBSERVATION of whether the run completed its objective — not a
+   * status the caller is obliged to produce. **Send it only if you measured
+   * it.** Omitting the key stores "not observed", which is a third state: it
+   * does not mean the run failed, and it does not mean it succeeded.
+   *
+   * Omit rather than guess, in EITHER direction. A default of `true` biases
+   * every downstream read toward success; a default of `false` does the
+   * mirror-image damage. Both are affirmative false claims about a run nothing
+   * measured, and neither is recoverable: the server stores only the **first**
+   * submission's value for an `estimate_id` (a replay's is discarded) and there
+   * is no update endpoint, so an invented verdict is permanent.
+   *
+   * Never model-supplied and never inferred from a transcript's shape — an
+   * agent's account of its own run is not a measurement. Only an instrument
+   * that watched the run (a harness's own oracle, a human's explicit answer)
+   * may set it. Omitting one unobserved field is always better than dropping
+   * the submission: the token counts you DID measure are worth keeping.
+   */
+  success?: boolean;
   durationMs: number;
   /**
    * Optional additive execution trace. The server classifies it into phases
@@ -371,7 +390,14 @@ export interface LedgerActual {
   tokensOut: number;
   total: number;
   durationMs: number;
-  success: boolean;
+  /**
+   * Three-valued: `true` (observed success), `false` (observed failure), and
+   * `null` — **the outcome was not observed**, which is neither of the other
+   * two. ⚠️ A truthy check on this field renders "we don't know" as "it
+   * failed"; render the third state distinctly. Required (never absent) so a
+   * consumer must handle `null` on purpose rather than fall into it.
+   */
+  success: boolean | null;
 }
 
 export interface LedgerPredicted {

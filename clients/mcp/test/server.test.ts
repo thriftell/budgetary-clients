@@ -41,10 +41,14 @@ describe("SERVER_VERSION", () => {
 });
 
 describe("parseOnSessionEndArgs", () => {
-  it("parses --transcript <path> and defaults success=true", () => {
+  it("★ parses --transcript <path> and declares NO outcome without a flag", () => {
+    // Was `success: true`. A harness that passed neither flag declared
+    // nothing, and a default of `true` recorded an unmeasured success on every
+    // flag-less invocation — permanently, since only the first submission for
+    // an estimate is stored. Absence of a flag is now absence of a value.
     expect(parseOnSessionEndArgs(["--transcript", "/tmp/r.jsonl"])).toEqual({
       transcript: "/tmp/r.jsonl",
-      success: true,
+      success: null,
       censoring: null,
       error: null,
     });
@@ -56,10 +60,24 @@ describe("parseOnSessionEndArgs", () => {
     );
     expect(parseOnSessionEndArgs(["/tmp/r.jsonl"])).toEqual({
       transcript: "/tmp/r.jsonl",
-      success: true,
+      success: null,
       censoring: null,
       error: null,
     });
+  });
+
+  it("★ --success declares true explicitly, and the last flag wins", () => {
+    // The flags are the one honest producer of this field: a harness invoking
+    // this subcommand is declaring what its own oracle measured. Both remain
+    // parsed exactly as before — only their ABSENCE changed meaning.
+    expect(
+      parseOnSessionEndArgs(["--success", "--transcript", "/tmp/r.jsonl"]).success,
+    ).toBe(true);
+    expect(
+      parseOnSessionEndArgs(["--transcript", "/tmp/r.jsonl", "--success"]).success,
+    ).toBe(true);
+    expect(parseOnSessionEndArgs(["--success", "--failed"]).success).toBe(false);
+    expect(parseOnSessionEndArgs(["--failed", "--success"]).success).toBe(true);
   });
 
   it("--failed sets success=false regardless of order", () => {
@@ -87,7 +105,7 @@ describe("parseOnSessionEndArgs", () => {
   it("no args → hook path (no transcript, no error)", () => {
     expect(parseOnSessionEndArgs([])).toEqual({
       transcript: null,
-      success: true,
+      success: null,
       censoring: null,
       error: null,
     });

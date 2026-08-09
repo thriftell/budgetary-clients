@@ -34,9 +34,20 @@ function resultCell(entry: LedgerEntry): string {
   // A glyph with an accessible label, so a screen reader announces the outcome
   // instead of an ambiguous symbol.
   if (entry.actual === null) return `<span aria-label="pending">○</span>`;
-  return entry.actual.success
-    ? `<span aria-label="succeeded">✓</span>`
-    : `<span aria-label="failed">✗</span>`;
+  // THREE states, not two. `success` is an observation, and `null` means nobody
+  // observed one — which is neither a success nor a failure. A truthy check
+  // here would print ✗ and tell the reader the run FAILED on the strength of a
+  // measurement that was never taken. Compared against the literals so a future
+  // wire value this client doesn't know also lands on "—" rather than silently
+  // joining one of the two verdicts. Distinct from the ○ above: that row is
+  // still waiting for an actual, this one has its actual and no verdict in it.
+  if (entry.actual.success === true) {
+    return `<span aria-label="succeeded">✓</span>`;
+  }
+  if (entry.actual.success === false) {
+    return `<span aria-label="failed">✗</span>`;
+  }
+  return `<span aria-label="outcome not reported">—</span>`;
 }
 
 function predictedCell(entry: LedgerEntry): string {

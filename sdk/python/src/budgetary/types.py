@@ -98,7 +98,10 @@ class LedgerActual:
     tokens_out: int
     total: int
     duration_ms: int
-    success: bool
+    # Three-valued. `None` means the outcome was NOT OBSERVED — neither a
+    # failure nor a success. A truthy check renders "we don't know" as "it
+    # failed"; test against `is True` / `is False` / `is None` instead.
+    success: bool | None
 
 
 @dataclass(frozen=True)

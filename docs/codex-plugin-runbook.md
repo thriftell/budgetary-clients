@@ -86,8 +86,10 @@ excluded), so the foreground form closes the loop on Codex today:
 npx -y @budgetary/mcp on-session-end --transcript ~/.codex/sessions/rollout-<ts>-<uuid>.jsonl
 ```
 
-It prints what it submitted, or exactly why it didn't; add `--failed` if the
-task didn't complete. (Piping a raw rollout to stdin — `cat rollout | … on-session-end`
+It prints what it submitted, or exactly why it didn't; add `--success` or
+`--failed` to declare how the run turned out. With neither flag the outcome is
+left unreported — not recorded as either — so pass one only if something
+actually checked. (Piping a raw rollout to stdin — `cat rollout | … on-session-end`
 — does **not** work: stdin is the hook-payload channel, not a transcript, so a
 raw rollout there is rejected with a pointer to the `--transcript` form.)
 

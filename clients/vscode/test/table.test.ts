@@ -148,6 +148,45 @@ describe("renderRecentTable", () => {
     expect(failed).toContain('aria-label="failed"');
   });
 
+  it("★★ renders an UNOBSERVED outcome as — (not reported), never as a failure", () => {
+    // `success: null` means nobody measured the outcome. It is a third state:
+    // not a success, and — critically — not a failure. The truthy check this
+    // replaced printed ✗ for it, telling the reader the run FAILED on the
+    // strength of a measurement that was never taken.
+    const unobserved = renderRecentTable([
+      {
+        ...entry("est_unobserved", "2026-05-27T10:14:00Z", 100),
+        actual: { tokensIn: 1, tokensOut: 1, total: 100, durationMs: 1, success: null },
+      },
+    ]);
+    expect(unobserved).toContain('aria-label="outcome not reported"');
+    expect(unobserved).toContain("—");
+    expect(unobserved).not.toContain('aria-label="failed"');
+    expect(unobserved).not.toContain("✗");
+    expect(unobserved).not.toContain("✓");
+    // And it is NOT the pending glyph either: this row HAS its actual (the
+    // spend is measured and shown), it just carries no verdict.
+    expect(unobserved).not.toContain('aria-label="pending"');
+    expect(unobserved).toContain("100");
+  });
+
+  it("renders all three outcome states distinctly in one table", () => {
+    const html = renderRecentTable([
+      entry("est_ok", "2026-05-27T10:16:00Z", 100),
+      {
+        ...entry("est_no", "2026-05-27T10:15:00Z", 100),
+        actual: { tokensIn: 1, tokensOut: 1, total: 100, durationMs: 1, success: false },
+      },
+      {
+        ...entry("est_unk", "2026-05-27T10:14:00Z", 100),
+        actual: { tokensIn: 1, tokensOut: 1, total: 100, durationMs: 1, success: null },
+      },
+    ]);
+    expect(html).toContain('aria-label="succeeded"');
+    expect(html).toContain('aria-label="failed"');
+    expect(html).toContain('aria-label="outcome not reported"');
+  });
+
   it("escapes a markup-shaped scenario", () => {
     const html = renderRecentTable([
       entry("est_x", "2026-05-27T10:14:00Z", 100, "<b>x</b>"),

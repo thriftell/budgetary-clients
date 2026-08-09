@@ -103,7 +103,19 @@ export function censoringCategory(raw: unknown): CensoringCategory | undefined {
 export interface ActualCounts {
   tokensIn: number;
   tokensOut: number;
-  success: boolean;
+  /**
+   * Optional OBSERVATION of whether the run met its objective, forwarded
+   * VERBATIM from a caller that measured it: an outer harness's
+   * `--success`/`--failed` declaration, or the human's own answer on
+   * `report-actual`. `undefined` means "nothing observed the outcome" and
+   * OMITS the field — never a default, in either direction. Two submit paths
+   * can never populate it, by design: the SessionEnd hook (its `reason` is
+   * session-scoped, describing how the WINDOW closed, not how the RUN turned
+   * out) and the in-process reconcile (it runs in a later session and observed
+   * only that an earlier one ended, never that it worked). Never
+   * model-supplied, and never inferred from the transcript's shape.
+   */
+  success?: boolean;
   durationMs: number;
   /**
    * Optional measured execution trace, forwarded additively on the same POST.
@@ -236,10 +248,19 @@ function withPersistedCounts(
     ...entry,
     tokens_in: counts.tokensIn,
     tokens_out: counts.tokensOut,
-    success: counts.success,
     duration_ms: counts.durationMs,
     has_trace: !!(counts.trace && counts.trace.length > 0),
   };
+  // ★★ The outcome round-trips as an ABSENCE, exactly like the termination
+  // category below — it is not a required scalar. The run whose first submit
+  // failed is the run most likely to have an interesting outcome, so it is
+  // precisely the wrong row to mislabel: persisting a `false` (or a `true`) to
+  // keep the shape total would manufacture the verdict the retry then stores
+  // permanently. Set when THIS submission observed one, removed when it did
+  // not — a stale verdict from an earlier attempt must not pair with counts
+  // that no longer declare one.
+  if (counts.success !== undefined) updated.success = counts.success;
+  else delete updated.success;
   // The termination category rides the persisted round-trip too — on the retry
   // path the retry IS the first submission that stores the row, and a run that
   // was killed is exactly the run most likely to have had its first submit
@@ -265,12 +286,22 @@ export function persistedCounts(entry: PendingEntry): ActualCounts | null {
     !Number.isSafeInteger(tokens_in) ||
     typeof tokens_out !== "number" ||
     !Number.isSafeInteger(tokens_out) ||
-    typeof success !== "boolean" ||
     typeof duration_ms !== "number" ||
     !Number.isFinite(duration_ms)
   ) {
     return null;
   }
+  // ★★ `success` is deliberately NOT in the gate above. It is OPTIONAL now, so
+  // its absence is a legitimate persisted state ("the first submit observed no
+  // outcome") — not corruption. Requiring it here would reject the whole entry
+  // and send the retry down the fresh path to re-derive counts from a DIFFERENT
+  // session's transcript, which is the mis-pairing this function exists to
+  // prevent. (An entry with no counts at all is still rejected: `tokens_in` is
+  // absent on a fresh estimate, which is what distinguishes the two.)
+  // Re-validated like every other stored field: a corrupt or hand-edited value
+  // degrades to OMITTED — never coerced to a boolean, and never `null`
+  // masquerading as an observation.
+  const persistedSuccess = typeof success === "boolean" ? success : undefined;
   // Retry sends totals only — the original trace was intentionally not persisted.
   // The persisted termination category is re-validated exactly like every other
   // stored field: a corrupt or hand-edited value degrades to OMITTED (the
@@ -280,7 +311,7 @@ export function persistedCounts(entry: PendingEntry): ActualCounts | null {
   return {
     tokensIn: tokens_in,
     tokensOut: tokens_out,
-    success,
+    ...(persistedSuccess !== undefined ? { success: persistedSuccess } : {}),
     durationMs: duration_ms,
     ...(censoring !== undefined ? { censoring } : {}),
   };
@@ -398,7 +429,16 @@ export async function submitActuals(
       estimateId: entry.estimate_id,
       tokensIn: counts.tokensIn,
       tokensOut: counts.tokensOut,
-      success: counts.success,
+      // Additive: only sent when a caller OBSERVED whether the run met its
+      // objective (a harness's `--success`/`--failed`, or the human's own
+      // answer). Absent ⇒ the server stores "not observed", which is neither a
+      // failure nor a success. Spread conditionally rather than assigned as
+      // `undefined`: the key must be ABSENT from the JSON, never `null` — the
+      // two mean the same thing to the current server, but the explicit `null`
+      // breaks the byte-identity this body otherwise keeps. Kept in its
+      // original key POSITION so a submit that does declare an outcome
+      // serializes byte-for-byte as it did before this field became optional.
+      ...(counts.success !== undefined ? { success: counts.success } : {}),
       durationMs: counts.durationMs,
       // Additive: only sent when the caller measured a non-empty trace.
       ...(counts.trace && counts.trace.length > 0
@@ -911,10 +951,21 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
         traceNote = `trace over cap: ${overage.steps} steps / ${overage.bytes} bytes — totals only`;
         debug(`fresh path: ${traceNote}`);
       }
+      // ★★ No `success`. The host's close `reason` is the only outcome-shaped
+      // thing this path can see, and it cannot answer the question: it is
+      // SESSION-scoped (how the window closed) while `success` is RUN-scoped
+      // (how the task turned out), and a session holds many runs — the entry
+      // being paired may be hours old. No member of the enum names an outcome;
+      // `other` is the host's DEFAULT parameter value, covering crashes,
+      // SIGTERM and clean shutdowns indistinguishably; and a task that simply
+      // finishes never fires this hook at all, so the enum cannot even
+      // represent the most common ending. Deriving a run fact from a session
+      // event is a category error no remapping repairs — which is why the
+      // reason→success helper was deleted rather than narrowed. The counts
+      // ARE measured and still submit; the outcome is left unobserved.
       counts = {
         tokensIn: usage.tokensIn,
         tokensOut: usage.tokensOut,
-        success: isSuccessReason(args.payload.reason),
         durationMs: inferDurationMs(args.payload, entry, now),
         ...(trace ? { trace } : {}),
       };
@@ -1020,13 +1071,6 @@ export async function runAutoActuals(args: AutoActualsArgs): Promise<number> {
       } durationMs=${durationMs}`,
     );
   }
-}
-
-function isSuccessReason(reason: unknown): boolean {
-  // Conservative: only documented "normal" terminations count as success.
-  return (
-    reason === "clear" || reason === "logout" || reason === "prompt_input_exit"
-  );
 }
 
 function inferDurationMs(
@@ -1165,11 +1209,7 @@ export async function runManualActuals(args: ManualActualsArgs): Promise<number>
   if (tokensIn === null) return 2;
   const tokensOut = await promptNonNegInt(args, "Output tokens (tokens_out): ", "tokens_out", false);
   if (tokensOut === null) return 2;
-  const success = parseBool(await args.prompt("Did the task succeed? [y/N]: "));
-  if (success === null) {
-    args.out("Please answer y or n. Nothing submitted.");
-    return 2;
-  }
+  const success = await promptSuccess(args);
   const durationMs = await promptNonNegInt(args, "Duration in ms (optional): ", "duration_ms", true);
   if (durationMs === null) return 2;
   const censoring = await promptCensoring(args);
@@ -1190,7 +1230,8 @@ export async function runManualActuals(args: ManualActualsArgs): Promise<number>
     counts: {
       tokensIn,
       tokensOut,
-      success,
+      // Sent only on an explicit yes/no; a shrug omits the key entirely.
+      ...(success !== undefined ? { success } : {}),
       durationMs,
       ...(censoring !== undefined ? { censoring } : {}),
     },
@@ -1269,6 +1310,67 @@ export async function runManualActuals(args: ManualActualsArgs): Promise<number>
     );
   }
   return 1;
+}
+
+/**
+ * Ask the human whether the run met its objective, defaulting to OMISSION.
+ * Built on the same shape as {@link promptCensoring} — the one prompt helper in
+ * this file whose empty answer produces an ABSENCE rather than a value — and
+ * for the same reason: this question has a legitimate third answer.
+ *
+ *  - Yes and No are offered PLUS an explicit "not sure / prefer not to say",
+ *    and an EMPTY answer selects that one. Nothing is pre-selected. The old
+ *    `[y/N]` prompt made a bare Enter mean **failure**, so a person who did not
+ *    know — or did not want to say — was recorded as reporting a failed run,
+ *    permanently (only the first submission for an estimate is stored).
+ *  - Returns `undefined` — the key is ABSENT from the body — for "not sure",
+ *    for an empty answer, and for input that stays uninterpretable after
+ *    {@link MAX_PROMPT_TRIES} tries. The yes/no parser this replaces has been
+ *    DELETED rather than left beside it: a helper whose empty answer is `false`
+ *    converts a shrug into a value, which is this very bug in helper form, and
+ *    the same objection rules out {@link promptNonNegInt}'s optional mode
+ *    (whose empty answer SENDS `0`).
+ *  - An unanswered question NEVER fails the submit. Previously an
+ *    uninterpretable answer aborted the whole command (exit 2), so a person
+ *    who could not answer this one question also lost the token counts they
+ *    had just typed in. Those counts were measured; they are kept.
+ *  - The answer LINE is whitespace-trimmed, like every prompt in this file.
+ *    `y`/`yes`/`n`/`no` are accepted beside the numbers, case-insensitively:
+ *    unlike the termination CATEGORY, this field has no vocabulary to protect
+ *    — the wire values are booleans, so a case variant of a yes cannot become
+ *    a confident wrong answer, only the answer the person plainly gave.
+ *    Anything else re-prompts and then omits — never a value, never an abort.
+ */
+async function promptSuccess(
+  args: Pick<ManualActualsArgs, "prompt" | "out">,
+): Promise<boolean | undefined> {
+  args.out("Did the run complete its objective?");
+  args.out("  1. Yes");
+  args.out("  2. No");
+  args.out("  3. Not sure / prefer not to say");
+  // A Map, not an object literal: a bare `byChoice[raw]` would resolve
+  // prototype keys, so a user typing `constructor` would get a function back
+  // and this would return it as an "answer" (the same masquerade
+  // promptCensoring guards against).
+  const byChoice = new Map<string, boolean>([
+    ["1", true],
+    ["y", true],
+    ["yes", true],
+    ["2", false],
+    ["n", false],
+    ["no", false],
+  ]);
+  for (let i = 0; i < MAX_PROMPT_TRIES; i++) {
+    const raw = (await args.prompt("Outcome [1-3, Enter = 3]: ")).trim();
+    if (raw.length === 0 || raw === "3") return undefined;
+    const chosen = byChoice.get(raw.toLowerCase());
+    if (chosen !== undefined) return chosen;
+    if (i < MAX_PROMPT_TRIES - 1) {
+      args.out("Please answer 1-3 (or press Enter if not sure). Try again.");
+    }
+  }
+  args.out("Leaving the run's outcome unrecorded.");
+  return undefined;
 }
 
 /**
@@ -1381,12 +1483,19 @@ export interface RolloutActualsArgs {
   /** Path to the rollout / transcript JSONL file to read real counts from. */
   transcriptPath: string;
   /**
-   * Whether the run completed its objective. The transcript carries real token
-   * counts but not a trustworthy success signal, so the caller supplies it
-   * (default true; `--failed` sets it false). Like {@link censoring}, it is a
-   * caller declaration — the token counts are always measured, never entered.
+   * Whether the run completed its objective, as DECLARED by the invoking
+   * harness (`--success` / `--failed`). This is the one honest producer of the
+   * field anywhere in the client: a harness that spawned the agent owns its own
+   * oracle and is reporting what that oracle measured, so the value is
+   * forwarded verbatim and never second-guessed.
+   *
+   * ⚠️ Optional, and **there is no default**. A harness that passes neither
+   * flag has declared nothing, and this field is then OMITTED from the body —
+   * where it previously defaulted to `true`, silently recording an unmeasured
+   * success on every flag-less invocation. Like {@link censoring}, absence is
+   * an absence: the transcript-measured token counts submit either way.
    */
-  success: boolean;
+  success?: boolean;
   /**
    * The raw `--censoring <value>` declaration, when the invoking harness passed
    * one. A harness that spawned the agent host is a measuring instrument: it
@@ -1514,7 +1623,9 @@ export async function runRolloutActuals(
     counts: {
       tokensIn: usage.tokensIn,
       tokensOut: usage.tokensOut,
-      success: args.success,
+      // Forwarded verbatim when the harness declared one; omitted when it did
+      // not. Never defaulted — see RolloutActualsArgs.success.
+      ...(args.success !== undefined ? { success: args.success } : {}),
       durationMs: inferDurationMs({}, entry, now),
       ...(trace ? { trace } : {}),
       ...(censoring !== undefined ? { censoring } : {}),
@@ -1529,9 +1640,17 @@ export async function runRolloutActuals(
 
   if (outcome.submitted) {
     const commas = (n: number) => n.toLocaleString("en-US");
+    // Three states, said plainly. A flag-less run must not be reported as
+    // "successful" — that is the very claim this path stopped making.
+    const outcomeText =
+      args.success === undefined
+        ? "outcome not reported"
+        : args.success
+          ? "recorded as successful"
+          : "recorded as failed";
     args.out(
       `Actuals submitted (${shortEstimateId(entry.estimate_id)}): ${commas(usage.tokensIn)} in / ${commas(usage.tokensOut)} out, ` +
-        `recorded as ${args.success ? "successful" : "failed"}. ` +
+        `${outcomeText}. ` +
         "Thanks — this calibrates future estimates.",
     );
     // A hand-run command in the user's own terminal: show what the server
@@ -1546,7 +1665,17 @@ export async function runRolloutActuals(
       });
       if (cmp !== null) args.out(`  Forecast check: ${cmp}.`);
     }
-    if (args.success) {
+    if (args.success === undefined) {
+      // Name the omission at the point it happens, so a harness author sees
+      // that the field was left unset rather than assuming a default landed.
+      // Also say it is not fixable later: only the FIRST submission for an
+      // estimate is stored, so a re-run with a flag would be discarded.
+      args.out(
+        "(No --success/--failed flag, so the outcome was left unreported — " +
+          "not recorded as either. Pass the flag your own check measured; it " +
+          "has to ride this first submit.)",
+      );
+    } else if (args.success) {
       args.out("(Re-run with `--failed` if the task didn't actually complete.)");
     }
     return 0;
@@ -1574,13 +1703,6 @@ export async function runRolloutActuals(
     );
   }
   return 1;
-}
-
-function parseBool(raw: string): boolean | null {
-  const v = raw.trim().toLowerCase();
-  if (v === "y" || v === "yes" || v === "true") return true;
-  if (v === "n" || v === "no" || v === "false" || v === "") return false;
-  return null;
 }
 
 // ---------------------------------------------------------------------------

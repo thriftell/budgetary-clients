@@ -189,14 +189,16 @@ A pre-flight estimate is only half the loop; calibration needs the **realized** 
   npx @budgetary/mcp on-session-end --transcript ~/.claude/projects/<project>/<session-id>.jsonl
   ```
 
-  Run it from the directory you estimated in, and name a **finished** session — a transcript still being written is incomplete, and the first submission for an estimate is the one that counts. Add `--failed` if the task didn't complete. Better still, wire the hook [above](#claude-code) and stop doing this by hand.
+  Run it from the directory you estimated in, and name a **finished** session — a transcript still being written is incomplete, and the first submission for an estimate is the one that counts. Add `--success` or `--failed` to declare how the run turned out — with neither, the outcome is left unreported (see below). Better still, wire the hook [above](#claude-code) and stop doing this by hand.
 - **Codex — manual, from the rollout.** Codex ships no session-end hook, but it writes a rollout transcript. After a session, submit its real counts:
 
   ```bash
   npx @budgetary/mcp on-session-end --transcript ~/.codex/sessions/rollout-<ts>-<uuid>.jsonl
   ```
 
-  Run it from the directory you estimated in. Add `--failed` if the task didn't complete.
+  Run it from the directory you estimated in.
+
+  **Declaring the outcome is optional, and there is no default.** `--success` / `--failed` say whether the run met its objective, and they are forwarded verbatim — but only a caller that actually *checked* has anything to declare, so with **neither flag the field is omitted** and the server records the outcome as *not observed*. That is a third state: it does not mean the run failed, and it does not mean it succeeded. Don't guess in either direction — a wrong verdict is permanent (only the first submission for an estimate is stored, and there is no update call), while the token counts you did measure submit either way.
 
   A harness that spawned the session itself — and therefore *observed how the run ended* — can declare that too, with `--censoring <category>`: exactly one of `natural`, `harness_watchdog`, `operative_cap`, `kill_switch` (the API contract's closed vocabulary). The value is matched **exactly** and forwarded verbatim; anything else is omitted from the submission — never normalized into a category, and never an error. Don't pass it for a run whose ending you didn't observe: an absent field honestly records "unknown", while a guessed `natural` is a false claim the server has no way to detect.
 - **Cursor / Copilot / other hosts — manual.** These hosts do **not** hand a third-party server the token totals of a completed agent run, and the language model does not know them either. So you record them yourself when you have a moment:
