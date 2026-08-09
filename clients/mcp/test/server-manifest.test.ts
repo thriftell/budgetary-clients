@@ -17,6 +17,7 @@ import { DEFAULT_HOST } from "../src/tools/estimate.js";
  */
 interface Manifest {
   version: string;
+  description: string;
   packages: {
     identifier: string;
     version: string;
@@ -45,6 +46,28 @@ describe("server.json — the registry manifest", () => {
     expect(key).toBeDefined();
     expect(key!.isRequired).toBe(true);
     expect(key!.isSecret).toBe(true);
+  });
+
+  it("★ keeps `description` inside the registry schema's 100-character cap (0026b-2)", () => {
+    // The manifest declares its own `$schema` on line 2, and that schema
+    // constrains the top-level `description` to `{ minLength: 1, maxLength: 100 }`.
+    // Nothing in this repo checked it: CI's only server.json gate is the
+    // version-drift guard, and the assertions around this one are about
+    // environment variables and `remotes`.
+    //
+    // ★ A description that outgrew the cap fails at the worst possible moment —
+    // `mcp-publisher publish`, the MANUAL step, AFTER the npm half of a release
+    // has already gone out. And it fails silently in the meantime: the registry
+    // keeps serving the previous listing, so a copy change reaches every surface
+    // except the one it was written for. 0026b-2 rewrote this field, blew
+    // straight through the cap at 281 characters, and nothing caught it. This is
+    // the guard that would have.
+    //
+    // The bound is TRANSCRIBED from the schema, not fetched from it: a test that
+    // needed the network to know its own expectation would be worse than none.
+    expect(typeof manifest.description).toBe("string");
+    expect(manifest.description.length).toBeGreaterThanOrEqual(1);
+    expect(manifest.description.length).toBeLessThanOrEqual(100);
   });
 
   it("declares BUDGETARY_HOST as OPTIONAL and NON-SECRET", () => {

@@ -23,6 +23,8 @@ import {
 import {
   claimOneTimeNotice,
   contributionStatus,
+  DATA_NOTICE,
+  dataDisclosureLines,
   HOOKLESS_NOTICE,
   hooklessNoticeLines,
 } from "../contribution.js";
@@ -398,6 +400,44 @@ export async function runEstimateTool(
         recordedEarlier: true,
         otherProject: claimed.otherProject,
       }).join("\n")}`;
+    }
+
+    // 0026b-2: ONCE per install, say what leaves this machine.
+    //
+    // Until now nothing at runtime said it. `claimOneTimeNotice` had exactly one
+    // call site — the hook-less notice — and nothing at startup, in `doctor`, or
+    // on any other path stated what is transmitted. Everything a user was told
+    // about it lived in a README they had no reason to open.
+    //
+    // ⚠ UNCONDITIONAL on success — not gated on host, not on whether a
+    // session-end hook is wired, not on void-vs-priced. Every install can record
+    // by hand, and every install reaching this line has already sent a query.
+    // That breadth is the whole point: the population that most needs this is
+    // the one that configured the server with a bare `claude mcp add` and read
+    // nothing else.
+    //
+    // ⚠ NEVER ON AN ERROR PATH. The claim sits here, on the single successful
+    // text return, and LAST — after the text is otherwise built. Burning the
+    // marker on a render that goes back as `isError: true` would spend the one
+    // disclosure a user whose first estimate fails auth ever gets. The two error
+    // returns and the no-key guidance return all sit outside this block and
+    // reach it never.
+    //
+    // ⚠ It fails closed to SILENCE. An unwritable home makes the claim false and
+    // nothing renders. That is the right failure — the alternative is a
+    // per-estimate nag — and it is the entire argument for stating this
+    // unconditionally in `doctor` as well, where it is repeated every run.
+    //
+    // ⚠ ORDERING: after the measured block, before the `─────` notice. The
+    // disclosure says what recording sends; the notice tells the user to wire
+    // recording. Instructing before disclosing is the wrong order. On a genuine
+    // first run no measured record can exist yet, so the worst case here is four
+    // blocks, not five.
+    //
+    // Existing users see it on their next estimate. That is correct and
+    // intended: they have never been shown it.
+    if (claimOneTimeNotice(DATA_NOTICE, args.home)) {
+      text += `\n\n${dataDisclosureLines().join("\n")}`;
     }
 
     // ONCE per install: tell a hook-less Claude Code user that this install has

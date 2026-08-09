@@ -20,6 +20,7 @@ import {
   claimOneTimeNotice,
   claudeCodePresent,
   contributionStatus,
+  DATA_NOTICE,
   HOOKLESS_NOTICE,
   hooklessNoticeLines,
   noticeMarkerPath,
@@ -41,6 +42,18 @@ beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "budgetary-contrib-"));
   cwd = mkdtempSync(join(tmpdir(), "budgetary-contrib-cwd-"));
   mkdirSync(join(home, ".budgetary"), { recursive: true });
+  // Spend the first-run data disclosure's marker before any test runs (0026b-2).
+  // Every `home` here is a fresh temp dir, so without this EVERY first estimate
+  // below would carry that once-per-install block and every `toBe(voidRender())`
+  // would be re-asserting it. This file's subject is the HOOK-LESS notice and
+  // what suppresses it; folding a second, unrelated once-only block into each
+  // expectation would blur exactly the claim these tests exist to make.
+  //
+  // The disclosure's own behaviour — fires once, on the successful text path
+  // only, never on an error path, silent when the marker cannot be written — is
+  // proven on genuinely fresh homes in `disclosure.test.ts`, including the
+  // four-block worst case that stacks it with everything here.
+  claimOneTimeNotice(DATA_NOTICE, home);
 });
 
 afterEach(() => {
@@ -401,19 +414,25 @@ async function estimate(
 const CC = { BUDGETARY_API_KEY: "bg_test_x", BUDGETARY_HOST: "claude-code" } as NodeJS.ProcessEnv;
 
 /**
- * A void estimate's user-facing message, verbatim — the exact two lines `main`
- * rendered before the notice was allowed beneath one.
+ * A void estimate's user-facing message, verbatim — the exact two lines that
+ * open every void render.
  *
  * TRANSCRIBED rather than imported from `renderEstimate` on purpose: the point of
- * these assertions is that the void's own text did not move, and computing the
- * expectation from the same function that produces it would pass no matter what
- * that copy became. Held here, a change to either side fails loudly — which is
- * what should happen, since rewriting the void's message belongs to 0026b, not
- * to a change that only stops suppressing a block underneath it.
+ * these assertions is that the notice is APPENDED beneath the message and never
+ * interleaved with it, and computing the expectation from the same function that
+ * produces it would pass no matter what that copy became. Held here, a change to
+ * either side fails loudly.
+ *
+ * 0026b — the rewrite this docblock used to defer to — has now landed as
+ * 0026b-2, which is why these bytes are not the ones the comment above them
+ * described before.
  */
 const VOID_TEXT =
-  "Budgetary cannot confidently estimate this query (out of domain).\n" +
-  "This estimate wasn't billed. Proceed without a prediction — at your own judgment.";
+  "No forecast for this task — Budgetary has no firm basis to judge one like it, and won't guess.\n" +
+  "This estimate wasn't billed. Proceed on your own judgment — an abstention is an answer, not an error.";
+
+/** Derived from the literal above, never from `renderEstimate`. See `format.test.ts`. */
+const VOID_BYTES = Buffer.byteLength(VOID_TEXT, "utf8");
 
 /**
  * What a void renders BENEATH that message since 0026c: after the blank-line
@@ -494,7 +513,7 @@ describe("estimate — the one-time hook-less notice", () => {
     // byte-identical PREFIX, and everything else is strictly beneath it.
     expect(voidText.startsWith(`${VOID_TEXT}\n\n`)).toBe(true);
     expect(voidText.slice(0, VOID_TEXT.length)).toBe(VOID_TEXT);
-    expect(Buffer.from(voidText, "utf8").subarray(0, 149).toString("utf8")).toBe(
+    expect(Buffer.from(voidText, "utf8").subarray(0, VOID_BYTES).toString("utf8")).toBe(
       VOID_TEXT,
     );
   });
@@ -747,7 +766,7 @@ describe("estimate — handshake host detection (0024d-3)", () => {
     expect(text).toBe(
       `${voidRender(DEFAULT_FOOTER)}\n\n${hooklessNoticeLines().join("\n")}`,
     );
-    expect(Buffer.from(text, "utf8").subarray(0, 149).toString("utf8")).toBe(
+    expect(Buffer.from(text, "utf8").subarray(0, VOID_BYTES).toString("utf8")).toBe(
       VOID_TEXT,
     );
   });

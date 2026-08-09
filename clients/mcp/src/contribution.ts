@@ -165,6 +165,100 @@ export function claimOneTimeNotice(name: string, home?: string): boolean {
 export const HOOKLESS_NOTICE = "claude-code-session-end";
 
 /**
+ * The one-time notice name for the first-run data disclosure.
+ *
+ * ★ A MODULE CONSTANT, never derived from the host, the key, the version, or
+ * anything else that varies. Keying a once-only marker on something variable
+ * re-shows the notice every time that thing changes — a user who switches hosts,
+ * rotates a key, or upgrades would be told again, which is exactly the
+ * un-dismissable nag {@link claimOneTimeNotice} fails toward silence to avoid.
+ */
+export const DATA_NOTICE = "data-disclosure";
+
+/**
+ * What this package transmits, and where the complete account of it lives.
+ *
+ * ★ THE SINGLE SOURCE. Both surfaces that state it — the one-time block appended
+ * to a first estimate, and `doctor`'s unconditional line — compose from this
+ * array, so the two cannot drift into separately-maintained copies. Only the
+ * lead differs, because only one of them is the disclosure MOMENT.
+ *
+ * ⚠ It is a DISCLOSURE, not consent. You cannot consent to a transmission that
+ * has already happened, and by the time any runtime line can render, `estimate`
+ * has already sent the task text. So: no "by continuing you agree", no prompt,
+ * no acknowledgement, no opt-in or opt-out language, no terms, no rates, and no
+ * commercial statement of any kind. It asks for nothing, gates nothing, grants
+ * nothing.
+ *
+ * ⚠ It claims NO COMPLETENESS OF ITS OWN, and says so in as many words. The
+ * estimate also carries a salted project identifier, a host tag, an optional
+ * declared language tag, an optional model identifier, and a per-call request
+ * id; a block claiming "nothing else leaves this machine" would be false.
+ *
+ * ⚠ Nor does it promise the README is exhaustive — it points at "a fuller
+ * account", not at "every field, named one by one". The earlier wording said
+ * the latter and was wrong: the Privacy section it links omitted the host tag,
+ * the model identifier, the per-call request id and the declared run ending.
+ * (Those are added there in the same change, but the softer promise is what
+ * keeps this line true if that list ever falls behind the code again.)
+ *
+ * ★ It points at the README, not at a terms page. The README is versioned with
+ * the code that does the sending, so it is the accurate account — and pointing a
+ * runtime disclosure at terms of service would read as an acceptance gesture.
+ * There is no `/privacy` page on the site (it 404s); this URL resolves, and its
+ * `#privacy` anchor is a real heading in that file.
+ *
+ * ⚠ The negative claim is deliberately NARROW, because every wider one is false.
+ * A step's descriptor keeps an allowlisted program and build/test keyword in the
+ * clear and digests everything after, so "never command arguments" is untrue —
+ * and so is "never a whole command", because a bare `pytest` or `npm test` is
+ * ENTIRELY allowlisted words and reaches the server as written. What the
+ * redaction does guarantee is that no file contents and no path ever leave, and
+ * that nothing of a command reaches the clear except those allowlisted words.
+ * That is what this says; the README carries the rest.
+ */
+export const DATA_DISCLOSURE_BODY: readonly string[] = [
+  "`estimate` sends the task text you pass it to api.budgetary.tools. Recording a finished",
+  "run sends that run's token counts, its duration, and — on Claude Code — a redacted step",
+  "trace: per step, the tool's name and a digested descriptor of what it acted on. Never",
+  "file contents, never a path, and of a command only allowlisted words like `go test`.",
+  "That is not the whole list. A fuller account of what this package sends lives here:",
+  "https://github.com/thriftell/budgetary-clients/blob/main/clients/mcp/README.md#privacy",
+];
+
+/**
+ * The one-time block appended to a first successful estimate — the ONLY channel
+ * that reaches every MCP host and every install, including one with no
+ * session-end hook. A server's stderr lands in a debug log, the MCP handshake
+ * renders nothing, and a `SessionEnd` hook's stdout reaches neither the user nor
+ * a headless run, so the first tool result is the earliest moment this package
+ * owns.
+ *
+ * ★ And it is ONE CALL LATE. The lead says so rather than engineering around it.
+ * The alternative — withholding the first estimate until someone acknowledges a
+ * prompt — would gate a call on a disclosure about a transmission that had
+ * already happened, which is theatre. Naming the lag is the honest option.
+ *
+ * It carries NO separator of its own: the `─────` belongs to the hook-less
+ * notice, which stays visually last.
+ */
+export function dataDisclosureLines(): string[] {
+  return [
+    // Addressed to the human in the first words, for the same reason the
+    // hook-less notice is: this text is appended to a tool result, so it lands
+    // in the model's context too, and naming the reader keeps it legible as a
+    // status note rather than an instruction to the assistant. Nothing in it is
+    // actionable by a model.
+    // ★ Names the LAG. It does not restate the transmission — the body's first
+    // sentence does that, and saying "already sent its task text" here put the
+    // same fact on two consecutive lines.
+    "One-time note for the person running this session — the first thing this package can show",
+    "you, and so one estimate late: the call you just made has already gone out.",
+    ...DATA_DISCLOSURE_BODY,
+  ];
+}
+
+/**
  * The one-time notice a hook-less Claude Code install sees, appended to its first
  * estimate. States what is missing and what it costs the user — their completed
  * runs cannot improve future estimates — then gives both fixes.

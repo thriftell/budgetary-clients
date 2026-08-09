@@ -2,7 +2,7 @@
 
 A [Claude Code](https://claude.com/claude-code) plugin that adds:
 
-- **An `estimate` tool** (and a `/estimate <task>` slash command) — a pre-flight, probabilistic token-spend estimate for a coding task: a token range (p10–p90), a scenario label, and a confidence score.
+- **An `estimate` tool** (and a `/estimate <task>` slash command) — a pre-flight, probabilistic token-spend estimate for a coding task: a token range (p10–p90), a scenario label, and a confidence score — or no range at all when there is no firm basis to forecast that particular task, which is an answer rather than a failure.
 - **A session-end hook** — after the session finishes, it submits the realized token totals so future estimates calibrate.
 
 Together they close the predicted-vs-actual loop on this host. Without the hook the API has no feedback signal.
@@ -80,12 +80,13 @@ Scenario: uncertain — supported, but the range is wide.
 Confidence: 0.35 (low)
 ```
 
-Out-of-domain queries return a void response — no forecast, and no bill. The run is
-still recorded, so its real counts can be submitted like any other:
+When Budgetary has no firm basis to judge a task, it abstains rather than guessing — no
+forecast, and no bill. The run is still recorded, so its real counts can be submitted
+like any other:
 
 ```text
-Budgetary cannot confidently estimate this query (out of domain).
-This estimate wasn't billed. Proceed without a prediction — at your own judgment.
+No forecast for this task — Budgetary has no firm basis to judge one like it, and won't guess.
+This estimate wasn't billed. Proceed on your own judgment — an abstention is an answer, not an error.
 
 Estimate id: est_01H2XYZA…
 
