@@ -2,9 +2,11 @@
 
 This is the manual procedure for publishing (and updating) the Budgetary server's
 entry in the **official MCP registry** (`registry.modelcontextprotocol.io`). The
-entry advertises both install paths from one [`clients/mcp/server.json`](../clients/mcp/server.json):
-the npm **stdio** package `@budgetary/mcp` and the remote **Streamable-HTTP**
-endpoint `https://api.budgetary.tools/mcp`.
+entry advertises one install path from [`clients/mcp/server.json`](../clients/mcp/server.json):
+the npm **stdio** package `@budgetary/mcp`. The remote **Streamable-HTTP**
+endpoint `https://api.budgetary.tools/mcp` stays live and hand-configurable, but
+0024f **withdrew its `remotes` entry from the listing** — see
+[step 7](#7-verify-the-listing-resolves-and-is-discoverable) for why.
 
 > **Scope.** This covers the MCP registry only. The Claude Code plugin
 > marketplace (0014b-2) and the Codex marketplace (0014b-3) are separate, later
@@ -141,17 +143,23 @@ On success it prints `✓ Successfully published`.
 curl "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.thriftell/budgetary"
 ```
 
-Then confirm an MCP client can **discover + add** it and that **both** install
-paths are visible — the npm stdio package (`@budgetary/mcp`, with the
-`BUDGETARY_API_KEY` and `BUDGETARY_HOST` inputs) and the remote endpoint
-(`https://api.budgetary.tools/mcp`).
+Then confirm an MCP client can **discover + add** it, that the npm stdio package
+(`@budgetary/mcp`) is offered with its `BUDGETARY_API_KEY` and `BUDGETARY_HOST`
+inputs, and that **no remote is offered** on the `isLatest` row.
 
-> **On the remote entry.** It declares a URL and nothing else. The endpoint
-> answers `initialize` and `tools/list` unauthenticated, but `tools/call`
-> requires `Authorization: Bearer bg_…` and returns `authentication_failed`
-> without one — and the entry declares no `headers` input, so a client that
-> configures the remote strictly from this manifest has nowhere to put the key.
-> Verify by hand what a manifest-driven client would end up sending:
+> **On the withdrawn remote (0024f).** A `remotes` entry declares a URL and
+> nothing else. The endpoint answers `initialize` and `tools/list`
+> unauthenticated, but `tools/call` requires `Authorization: Bearer bg_…` and
+> returns `authentication_failed` without one — and the schema has no `headers`
+> input, so a client that configured the remote strictly from this manifest had
+> nowhere to put the key, and the listing had nowhere to say so. Nor could that
+> path contribute: no local process, no pending store, no route by which an
+> estimate is ever closed out by an actual. Both faults are structural rather
+> than fixable in the entry, so the entry was withdrawn. **Rows published before
+> the withdrawal keep their `remotes`** — installers resolve `isLatest`, so that
+> is the row to check. The endpoint stays live and is documented for
+> hand-configuration in [the client README](../clients/mcp/README.md); verify it
+> by hand with:
 >
 > ```bash
 > curl -s -X POST https://api.budgetary.tools/mcp \
@@ -171,8 +179,11 @@ paths are visible — the npm stdio package (`@budgetary/mcp`, with the
 
 ### Re-publish procedure (a version or metadata change)
 
-1. **Land the change** in `clients/mcp/server.json` on `main`, with a changeset
-   so the package version moves.
+1. **Land the change** in `clients/mcp/server.json` on `main`. Add a changeset
+   only if the npm package itself changed. A manifest-only edit — metadata, an
+   input declaration, a withdrawn `remotes` — is published against the version
+   already on npm; a changeset would move `server.json` ahead of npm and fail
+   the step-3 gate until the next release actually ships.
 2. **Merge the "Version Packages" PR.** `changeset version` runs
    `scripts/sync-mcp-pin.mjs`, which rewrites `server.json`'s two `version`
    fields for you — there is nothing to edit by hand. `release.yml` then
