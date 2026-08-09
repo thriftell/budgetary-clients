@@ -51,6 +51,60 @@ import {
 /** The default host tag when `BUDGETARY_HOST` is unset. */
 export const DEFAULT_HOST = "mcp";
 
+/**
+ * The client identity from the MCP `initialize` handshake, as the SDK's
+ * `Server.getClientVersion()` surfaces it. Host-supplied on a protocol channel
+ * established before the model ever spoke — the model cannot see, set, or
+ * influence it. `name` is typed `unknown` on purpose: the SDK validates it as
+ * `z.string()` and nothing else (empty, huge, control bytes and ANSI escapes
+ * all parse), so every reader must prove the type and then compare it against
+ * {@link attestedHost}'s frozen allowlist and discard it. The raw value is
+ * never rendered, logged, stored, or interpolated.
+ */
+export interface HandshakeClientInfo {
+  name?: unknown;
+}
+
+/**
+ * Verified `clientInfo.name` → the host tag it attests. EXACT, case-sensitive
+ * equality only — no trimming, no case folding, no prefix/substring/regex, no
+ * normalisation of any kind. The measured hosts follow no shared naming
+ * convention (Codex attests `codex-mcp-client`, not `codex`; VS Code would
+ * attest a space-separated display name), so any coercion would be a guess
+ * dressed as a rule — and Claude Code itself carries other identities on other
+ * channels (`claude-cli-design-tool` on a first-party MCP endpoint, and an LSP
+ * identity spelled `"Claude Code"` — title case, with a space), so "close
+ * enough" would match strings that are provably not this channel's.
+ *
+ * Every entry needs a live measured handshake AND a consumer. Verified and
+ * deliberately NOT mapped:
+ *   - `codex-mcp-client` (Codex CLI, live handshake) — the map's only consumer
+ *     asks one question, "is this Claude Code?"; an entry no consumer reads is
+ *     dead code that looks live and would silently acquire behaviour the day a
+ *     second consumer appears.
+ *   - `"Visual Studio Code"` (VS Code's built-in client) — static bundle
+ *     evidence only, never observed on a live handshake, and the string varies
+ *     by edition.
+ */
+const ATTESTED_HOSTS: ReadonlyMap<string, string> = new Map([
+  ["claude-code", "claude-code"],
+]);
+
+/**
+ * Resolve the handshake identity to a verified host tag, or `undefined`.
+ * Positive-only, in every direction: unrecognised, absent, malformed and empty
+ * all yield `undefined` — *unknown*, never "not Claude Code". An `undefined`
+ * never suppresses anything downstream; it only fails to widen. The notice
+ * gate in {@link runEstimateTool} is the sole consumer.
+ */
+export function attestedHost(
+  clientInfo: HandshakeClientInfo | undefined,
+): string | undefined {
+  const name = clientInfo?.name;
+  if (typeof name !== "string") return undefined;
+  return ATTESTED_HOSTS.get(name);
+}
+
 export interface EstimateToolArgs {
   query: string;
   model?: string;
@@ -74,6 +128,15 @@ export interface EstimateToolArgs {
    * the run is then simply not reconcilable.
    */
   toolUseId?: string;
+  /**
+   * The connected client's self-declared identity, read from
+   * `Server.getClientVersion()` INSIDE the tools/call handler and threaded
+   * here — the same host-supplied seam as {@link toolUseId}. `undefined`
+   * whenever the SDK has nothing (its return type is
+   * `Implementation | undefined` and nothing enforces initialize-first), and
+   * absence asserts nothing.
+   */
+  clientInfo?: HandshakeClientInfo;
 }
 
 export interface EstimateToolResult {
@@ -115,6 +178,17 @@ export async function runEstimateTool(
   }
 
   const host = args.env.BUDGETARY_HOST ?? DEFAULT_HOST;
+  // Two different questions, two answers, kept apart on purpose: `host` answers
+  // "what did the operator call this install?" — it is the WIRE tag and feeds
+  // every existing render — while `noticeHost` answers "what does the host call
+  // itself?" and gates exactly one paragraph of text (the hook-less notice
+  // below). An explicit BUDGETARY_HOST always wins: it is the only knob the
+  // operator has, and an attestation that could override it would be
+  // uncorrectable — there would be no way, anywhere, to say "no, this install
+  // is not that". The handshake fills only the unset case. And there is
+  // deliberately no `?? DEFAULT_HOST` tail: the notice path's "we don't know"
+  // is `undefined`, never a manufactured "mcp".
+  const noticeHost = args.env.BUDGETARY_HOST ?? attestedHost(args.clientInfo);
 
   const status = resolveConfigStatus(args.env, args.home);
   if (status.kind !== "ok") {
@@ -335,7 +409,14 @@ export async function runEstimateTool(
     // Narrow on purpose, so the WORKING PATH sees nothing new:
     //   - `claude-code` only — it is the only host with a session-end hook to be
     //     missing. Every other host is manual BY DESIGN and its footer already
-    //     says so; adding this there would be noise, not news.
+    //     says so; adding this there would be noise, not news. Resolved via
+    //     `noticeHost` (0024d-3): the operator's declared tag first, else the
+    //     handshake's verified attestation — because the population this notice
+    //     was written for is definitionally the env-unset one (the plugin's own
+    //     manifest sets BUDGETARY_HOST; a bare `claude mcp add` does not). The
+    //     other three `claude-code`-gated renders stay on the DECLARED host: a
+    //     handshake-detected install provably is not the plugin, so their
+    //     non-plugin branches are already the right text for it.
     //   - suppressed by ANY positive sign of an automatic path (see
     //     `contributionStatus`), so an install that can contribute is untouched.
     //   - `claimOneTimeNotice` last, and only if everything else already matched,
@@ -360,7 +441,7 @@ export async function runEstimateTool(
     // finishes" holds exactly as written, and both routes it offers act on that
     // entry (neither requires a forecast band).
     if (
-      host === "claude-code" &&
+      noticeHost === "claude-code" &&
       contributionStatus(args.env, args.home).kind === "manual-only" &&
       claimOneTimeNotice(HOOKLESS_NOTICE, args.home)
     ) {

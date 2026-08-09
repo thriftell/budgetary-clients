@@ -58,11 +58,16 @@ describe("server.json — the registry manifest", () => {
     expect(host!.isSecret).toBe(false);
   });
 
-  it("names the value that unlocks the first-run notice", () => {
-    // The declaration only helps if the installer's field says what to type.
-    // `claude-code` is the one value the 0024d notice keys on, so a description
-    // that stops naming it leaves a registry user with a blank box and no clue.
-    expect(byName.get("BUDGETARY_HOST")!.description ?? "").toContain("claude-code");
+  it("still names claude-code among the example tags, without claiming the notice depends on it", () => {
+    // The declaration only helps if the installer's field says what to type,
+    // so the description keeps naming `claude-code` among its examples. But it
+    // must no longer claim the first-run notice hinges on this variable: since
+    // 0024d-3 the notice reads the host's own name from the MCP handshake when
+    // BUDGETARY_HOST is unset, and a description saying otherwise would keep
+    // describing the very key-set/host-unset gap the handshake now closes.
+    const description = byName.get("BUDGETARY_HOST")!.description ?? "";
+    expect(description).toContain("claude-code");
+    expect(description).not.toContain("lets the server say once");
   });
 
   it("NEVER declares the session-end hook discriminator", () => {

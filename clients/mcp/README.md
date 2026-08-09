@@ -110,7 +110,7 @@ BUDGETARY_HOST = "codex"
 
 This server is listed in the [MCP registry](https://registry.modelcontextprotocol.io) as `io.github.thriftell/budgetary`. The listing advertises the npm package above and nothing else. A host that installs from it prompts you for the fields the listing declares — `BUDGETARY_API_KEY`, which is required, and `BUDGETARY_HOST`, which is optional.
 
-**Set `BUDGETARY_HOST` anyway.** It is what tags your estimates with the host they came from, and on `claude-code` it is what lets the server tell you, once, when nothing here is submitting your finished runs. Left blank, the host is recorded as `mcp` and that notice never appears — the same as any hand-written config that omits it. If the listing your client reads is an older one that offers no such field, add it to that server's entry in your host's own MCP config, exactly as in the sections above.
+**Set `BUDGETARY_HOST` anyway.** It is what tags your estimates with the host they came from, and an explicit value always wins over anything the server detects on its own. Left blank, the host is still recorded as `mcp` — but the one-time notice about unsubmitted runs no longer depends on the variable: the MCP handshake already carries the host's own name, so a Claude Code install that never set it is still told, once, when nothing here is submitting its finished runs. If the listing your client reads is an older one that offers no such field, add it to that server's entry in your host's own MCP config, exactly as in the sections above.
 
 ### The remote endpoint (hand-configured only)
 
@@ -173,7 +173,7 @@ Set it **in the environment of the process you launch for that batch**, so its l
 BUDGETARY_SOURCE=my-harness-run <the command your harness runs>
 ```
 
-> **Do not put this one in your MCP host config.** Unlike `BUDGETARY_HOST` and `BUDGETARY_LANGUAGE`, this label should *not* go in `claude mcp add --env`, `~/.claude.json`, `.mcp.json`, or `~/.budgetary/config.json`. Those are **machine-wide and permanent**: a label you set there for one batch silently outlives it, and every ordinary session on that machine is labelled with it afterwards — undetectably, because the rows still look perfectly normal. `~/.budgetary/config.json` is not even read for this variable, on purpose. A label that describes *a run* should not outlive the run.
+> **Do not put this one in your MCP host config.** Unlike `BUDGETARY_HOST` and `BUDGETARY_LANGUAGE`, this label should *not* go in `claude mcp add --env`, `~/.claude.json`, or `.mcp.json`. Those are **machine-wide and permanent**: a label you set there for one batch silently outlives it, and every ordinary session on that machine is labelled with it afterwards — undetectably, because the rows still look perfectly normal. `~/.budgetary/config.json` is not read for this variable either, on purpose — of these three, only `BUDGETARY_LANGUAGE` has a `config.json` fallback at all. A label that describes *a run* should not outlive the run.
 
 Each actuals submission carries this label. It defaults to `mcp_client`. It is an **opaque string** — the client attaches no meaning to it, validates only its shape (up to 64 characters of `A–Z a–z 0–9 . _ -`), and ignores anything malformed, falling back to the default rather than failing your submission. (Run with `BUDGETARY_DEBUG=1` to have it say so on stderr when it rejects a label; otherwise a typo is silent.)
 

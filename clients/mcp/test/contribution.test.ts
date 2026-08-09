@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -12,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { ActualsResponse, EstimateResponse, LedgerPage } from "@budgetary/sdk";
+import { BudgetaryAuthError } from "@budgetary/sdk";
 
 import { writeBreadcrumb } from "../src/breadcrumb.js";
 import {
@@ -26,7 +28,11 @@ import {
   sessionEndHookLines,
 } from "../src/contribution.js";
 import { runDoctor } from "../src/doctor.js";
-import { projectIdFromCwd, runEstimateTool } from "../src/tools/estimate.js";
+import {
+  projectIdFromCwd,
+  runEstimateTool,
+  type HandshakeClientInfo,
+} from "../src/tools/estimate.js";
 
 let home: string;
 let cwd: string;
@@ -371,7 +377,11 @@ function estimateResponse(isVoid = false): EstimateResponse {
       };
 }
 
-async function estimate(env: NodeJS.ProcessEnv, isVoid = false): Promise<string> {
+async function estimate(
+  env: NodeJS.ProcessEnv,
+  isVoid = false,
+  clientInfo?: HandshakeClientInfo,
+): Promise<string> {
   const client = {
     estimate: vi.fn(async () => estimateResponse(isVoid)),
     submitActuals: vi.fn(),
@@ -383,6 +393,7 @@ async function estimate(env: NodeJS.ProcessEnv, isVoid = false): Promise<string>
     cwd,
     home,
     clientFactory: () => client as never,
+    ...(clientInfo !== undefined ? { clientInfo } : {}),
   });
   return r.text;
 }
@@ -589,5 +600,188 @@ describe("estimate — the one-time hook-less notice", () => {
       clientFactory: () => client as never,
     });
     expect(r.isError).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 0024d-3 — the handshake reaches the notice gate, and nothing else
+// ---------------------------------------------------------------------------
+
+/** An env with a key and NO BUDGETARY_HOST — the advertised-install shape. */
+const KEY_ONLY = { BUDGETARY_API_KEY: "bg_test_x" } as NodeJS.ProcessEnv;
+/** The one verified handshake identity, as Claude Code sends it. */
+const ATTESTED: HandshakeClientInfo = { name: "claude-code" };
+/** A phrase only the hook-less notice contains. */
+const NOTICE = "automatic session-end submission has been recorded";
+
+describe("estimate — handshake host detection (0024d-3)", () => {
+  it("fires the notice for an env-unset install whose handshake attests claude-code", async () => {
+    // The point of the item: the population the notice was written for is
+    // definitionally the env-unset one, and the handshake now reaches it.
+    const first = await estimate(KEY_ONLY, false, ATTESTED);
+    expect(first).toContain(NOTICE);
+    // Still once per install — the same marker, the same claim.
+    const second = await estimate(KEY_ONLY, false, ATTESTED);
+    expect(second).not.toContain(NOTICE);
+  });
+
+  it("still fires when the operator declared claude-code, whatever the handshake says", async () => {
+    // Today's two cases, unregressed: a declared claude-code install keeps its
+    // notice whether the handshake agrees, disagrees, or is absent (wrappers,
+    // proxies, a harness fronting Claude Code).
+    for (const clientInfo of [
+      undefined,
+      { name: "claude-code" },
+      { name: "codex-mcp-client" },
+    ]) {
+      const text = await estimate(CC, false, clientInfo);
+      expect(text).toContain(NOTICE);
+      rmSync(noticeMarkerPath(HOOKLESS_NOTICE, home)); // fresh marker per case
+    }
+  });
+
+  it("an explicit non-claude-code BUDGETARY_HOST suppresses it under a claude-code handshake", async () => {
+    // The contested precedence case: env wins. BUDGETARY_HOST is the only knob
+    // the operator has; if the handshake could override it, a wrong or unwanted
+    // attestation would be uncorrectable by anyone.
+    const env = {
+      BUDGETARY_API_KEY: "bg_test_x",
+      BUDGETARY_HOST: "codex",
+    } as NodeJS.ProcessEnv;
+    const text = await estimate(env, false, ATTESTED);
+    expect(text).not.toContain(NOTICE);
+    // And the marker is unspent — the declaration decided, recoverably.
+    expect(existsSync(noticeMarkerPath(HOOKLESS_NOTICE, home))).toBe(false);
+  });
+
+  it("unknown, absent, malformed, empty and case-differing handshakes assert nothing", async () => {
+    // Positive-only, in every direction: none of these is "not Claude Code" —
+    // each is *unknown*, so with the env unset the behaviour is exactly today's.
+    // `Claude Code` (title case, space) is a REAL identity of the same product
+    // on a different channel; it must still not match — exact equality only.
+    for (const clientInfo of [
+      undefined,
+      {},
+      { name: "" },
+      { name: "codex-mcp-client" },
+      { name: "Visual Studio Code" },
+      { name: "Claude Code" },
+      { name: "CLAUDE-CODE" },
+      { name: " claude-code" },
+      { name: "claude-code\n" },
+      { name: 42 },
+      { name: "x".repeat(100_000) },
+    ]) {
+      const text = await estimate(KEY_ONLY, false, clientInfo);
+      expect(text).not.toContain(NOTICE);
+      expect(existsSync(noticeMarkerPath(HOOKLESS_NOTICE, home))).toBe(false);
+    }
+  });
+
+  it("a weird handshake never suppresses the notice the env var already earned", async () => {
+    // Absence (or garbage) only fails to widen — it must never subtract.
+    for (const clientInfo of [{}, { name: "" }, { name: "codex-mcp-client" }, { name: 42 }]) {
+      const text = await estimate(CC, false, clientInfo);
+      expect(text).toContain(NOTICE);
+      rmSync(noticeMarkerPath(HOOKLESS_NOTICE, home)); // fresh marker per case
+    }
+  });
+
+  it("keeps the DEFAULT stored footer — a handshake-detected install is provably not the plugin", async () => {
+    // The plugin's own manifest sets BUDGETARY_HOST; this install has none. So
+    // the claude-code footer's "With the Budgetary plugin installed, actuals
+    // are recorded automatically" would be a downgrade — the generic
+    // `report-actual` line is strictly more actionable here.
+    const text = await estimate(KEY_ONLY, false, ATTESTED);
+    expect(text).toContain("After the run, record actuals with");
+    // The notice's own copy may mention the plugin as a FIX; the claude-code
+    // FOOTER's opening claim is what must not appear.
+    expect(text).not.toContain("With the Budgetary plugin installed");
+  });
+
+  it("keeps the generic no-key guidance — /plugin configure cannot work for a non-plugin install", async () => {
+    const text = await estimate({} as NodeJS.ProcessEnv, false, ATTESTED);
+    expect(text).toContain("Set one of the following");
+    expect(text).not.toContain("/plugin configure");
+  });
+
+  it("keeps the generic 401 fix line for the same reason", async () => {
+    const client = {
+      estimate: vi.fn(async () => {
+        throw new BudgetaryAuthError({
+          code: "authentication_failed",
+          message: "bad key",
+          httpStatus: 401,
+          requestId: "req_401",
+        });
+      }),
+      submitActuals: vi.fn(),
+      getLedger: vi.fn(),
+    };
+    const r = await runEstimateTool({
+      query: "x",
+      env: KEY_ONLY,
+      cwd,
+      home,
+      clientFactory: () => client as never,
+      clientInfo: ATTESTED,
+    });
+    expect(r.text).toContain("was rejected");
+    expect(r.text).not.toContain("/plugin configure");
+  });
+
+  it("shows nothing new to a user who already saw it under the env var — same marker", async () => {
+    // Idempotency across the upgrade, free BECAUSE the marker is a module
+    // constant and not keyed on the attested name.
+    const first = await estimate(CC);
+    expect(first).toContain(NOTICE);
+    const second = await estimate(KEY_ONLY, false, ATTESTED);
+    expect(second).not.toContain(NOTICE);
+  });
+
+  it("APPENDS the notice beneath a VOID for a handshake-detected install — void text byte-identical", async () => {
+    // 0024d-2 preserved: the notice still fires beneath a void, and the void's
+    // own message is untouched. The footer beneath it is the DEFAULT one — the
+    // recorded host is still "mcp", so even on this path no render widened.
+    const text = await estimate(KEY_ONLY, true, ATTESTED);
+    expect(text).toBe(
+      `${voidRender(DEFAULT_FOOTER)}\n\n${hooklessNoticeLines().join("\n")}`,
+    );
+    expect(Buffer.from(text, "utf8").subarray(0, 149).toString("utf8")).toBe(
+      VOID_TEXT,
+    );
+  });
+
+  it("shows NOTHING to a wired install, however the handshake attests", async () => {
+    // The capability gate is untouched: a host identity says WHICH host, never
+    // WHETHER anything is wired. Declared hook first, then breadcrumb-observed.
+    const declared = await estimate(
+      { ...KEY_ONLY, [SESSION_END_ENV]: SESSION_END_HOOK } as NodeJS.ProcessEnv,
+      false,
+      ATTESTED,
+    );
+    expect(declared).not.toContain(NOTICE);
+    expect(existsSync(noticeMarkerPath(HOOKLESS_NOTICE, home))).toBe(false);
+
+    writeBreadcrumb(home, { startedAt: "2026-08-07T09:00:00Z", outcome: "submitted" });
+    const observed = await estimate(KEY_ONLY, false, ATTESTED);
+    expect(observed).not.toContain(NOTICE);
+    expect(existsSync(noticeMarkerPath(HOOKLESS_NOTICE, home))).toBe(false);
+  });
+
+  it("never echoes the raw attested name — compared and discarded", async () => {
+    // `clientInfo.name` is unvalidated wire input (empty, huge, ANSI escapes
+    // all parse). It may be compared against the allowlist and nothing else.
+    const hostile = "\u001b[31mpwned-by-handshake\u001b[0m";
+    const silent = await estimate(KEY_ONLY, false, { name: hostile });
+    expect(silent).not.toContain("pwned-by-handshake");
+    expect(silent).not.toContain("\u001b");
+    // Even when the notice DOES fire (env-earned), the name goes nowhere…
+    const shown = await estimate(CC, false, { name: hostile });
+    expect(shown).toContain(NOTICE);
+    expect(shown).not.toContain("pwned-by-handshake");
+    // …including into the pending store.
+    const pending = readFileSync(join(home, ".budgetary", "pending.json"), "utf8");
+    expect(pending).not.toContain("pwned-by-handshake");
   });
 });

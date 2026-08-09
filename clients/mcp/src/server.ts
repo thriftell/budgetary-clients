@@ -20,7 +20,7 @@ import {
 import { configDiagnostics } from "./config.js";
 import { runDoctor } from "./doctor.js";
 import { TOOL_USE_ID_META } from "./session.js";
-import { runEstimateTool } from "./tools/estimate.js";
+import { runEstimateTool, type HandshakeClientInfo } from "./tools/estimate.js";
 import { SERVER_VERSION } from "./version.js";
 
 const SERVER_NAME = "budgetary";
@@ -95,6 +95,14 @@ export interface CallToolDeps {
    * full ladder. Supplied by {@link buildServer} from the MCP request `extra`.
    */
   signal?: AbortSignal;
+  /**
+   * The client identity from the MCP `initialize` handshake, as
+   * `Server.getClientVersion()` returned it AT THIS CALL — supplied by
+   * {@link buildServer} from inside the tools/call handler, never captured
+   * earlier (see the note there). `undefined` is an ordinary, reachable answer
+   * (nothing enforces initialize-first) and asserts nothing downstream.
+   */
+  clientInfo?: HandshakeClientInfo;
 }
 
 /**
@@ -136,11 +144,18 @@ export async function handleCallTool(
     cwd: (deps.cwd ?? (() => process.cwd()))(),
     signal: deps.signal,
     toolUseId,
+    clientInfo: deps.clientInfo,
   });
   return {
     content: [{ type: "text", text: result.text }],
     isError: result.isError,
   };
+}
+
+/** Injectable dependencies for {@link buildServer} (tests). */
+export interface BuildServerDeps {
+  /** Override the estimate tool (tests); defaults to {@link runEstimateTool}. */
+  runEstimate?: typeof runEstimateTool;
 }
 
 /**
@@ -151,7 +166,7 @@ export async function handleCallTool(
  * avoid taking a direct dependency on `zod`. There is intentionally no
  * actuals/report tool: token counts are never model-supplied.
  */
-export function buildServer(): Server {
+export function buildServer(deps: BuildServerDeps = {}): Server {
   const server = new Server(
     { name: SERVER_NAME, version: SERVER_VERSION },
     { capabilities: { tools: {} } },
@@ -164,8 +179,23 @@ export function buildServer(): Server {
   // Forward the host's per-request cancellation (`extra.signal`) so an abandoned
   // estimate stops retrying against a struggling engine (sheds load in an outage)
   // rather than finishing its full ~5 min ladder for a result no one will read.
+  //
+  // The handshake identity is read HERE, inside the tools/call handler, at call
+  // time — never at `oninitialized` (notification dispatch is one microtask hop
+  // where request dispatch is two, so a client that pipelines `initialize` +
+  // `notifications/initialized` into a single chunk fires that callback BEFORE
+  // the identity is assigned) and never cached (a second `initialize` on a live
+  // connection overwrites it). The SDK types it `Implementation | undefined`
+  // and nothing enforces initialize-first, so `undefined` is an ordinary answer
+  // that the tool treats as *unknown* — it asserts nothing.
   server.setRequestHandler(CallToolRequestSchema, (request, extra) =>
-    handleCallTool(request, { signal: extra.signal }),
+    handleCallTool(request, {
+      signal: extra.signal,
+      clientInfo: server.getClientVersion(),
+      ...(deps.runEstimate !== undefined
+        ? { runEstimate: deps.runEstimate }
+        : {}),
+    }),
   );
 
   return server;
