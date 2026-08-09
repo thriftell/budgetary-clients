@@ -14,6 +14,7 @@ import { configDiagnostics, pendingFilePath, resolveConfig } from "./config.js";
 import {
   claudeCodePresent,
   contributionStatus,
+  DATA_DISCLOSURE_BODY,
   sessionEndHookLines,
 } from "./contribution.js";
 import { PendingStore } from "./store.js";
@@ -81,6 +82,33 @@ function printLocalState(args: DoctorArgs, now: Date): void {
       : "Last auto: (no automatic session-end run recorded yet)",
   );
   printContribution(args);
+  printDataDisclosure(args);
+}
+
+/**
+ * What leaves this machine — stated EVERY time `doctor` runs.
+ *
+ * ★ The secondary home, with a different job from the one-time block appended to
+ * a first estimate. `doctor` is not the disclosure MOMENT: thinking to run it
+ * already requires suspecting the thing it would disclose, so it closes nothing
+ * on its own. What it is, is the place a user who lost the block — scrolled past
+ * it, cleared the transcript, or never saw it because an unwritable home made
+ * the marker claim fail — can always read it again. That fail-toward-silence
+ * failure mode is the entire reason this line is unconditional rather than
+ * once-only.
+ *
+ * Printed from {@link DATA_DISCLOSURE_BODY} rather than re-authored, so the two
+ * surfaces cannot drift. The one-time block's own lead ("…one estimate late…")
+ * is deliberately not reused: there is no estimate this call is late for.
+ *
+ * Placed inside `printLocalState` so it reaches EVERY branch, including the two
+ * early returns for a missing or unreadable key. Someone whose setup is not
+ * finished is exactly the person who has not read anything else either.
+ */
+function printDataDisclosure(args: DoctorArgs): void {
+  const [first, ...rest] = DATA_DISCLOSURE_BODY;
+  args.out(`Data:      ${first}`);
+  for (const line of rest) args.out(`           ${line}`);
 }
 
 /**

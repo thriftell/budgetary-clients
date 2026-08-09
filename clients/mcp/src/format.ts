@@ -257,19 +257,49 @@ export function renderEstimate(
   options: RenderEstimateOptions = {},
 ): string {
   if (estimate.void || estimate.distribution === null) {
-    // ★ The invariant: these two lines are exactly 149 UTF-8 bytes and are what
-    // every void rendered before 0026c. Nothing below may edit a byte of them —
-    // the void's own MESSAGE belongs to a separate item; this one owns only what
-    // is APPENDED after the blank line. Pinned by a test that compares the first
-    // 149 bytes against a transcribed literal, not a `toContain`.
+    // ★ The abstention, in the product's own words. 0026b-2 rewrote these two
+    // lines; what 0026c appends beneath them is untouched, and the blank-line
+    // seam below has not moved. Exactly 200 UTF-8 bytes (196 characters — two
+    // em-dashes at 3 each), measured rather than asserted by the one test whose
+    // job that is, and compared byte-for-byte against a transcribed literal
+    // everywhere else — never a `toContain`.
+    //
+    // What changed, and why each word is load-bearing:
+    //
+    //  - It no longer LEADS with what the product cannot do. "No forecast for
+    //    this task" states the outcome; the old opener ("Budgetary cannot
+    //    confidently estimate this query") framed the honest answer as a
+    //    shortfall of ours.
+    //  - `(out of domain)` is GONE. It was engine vocabulary — an internal
+    //    scenario label — sitting on a public string that reaches users
+    //    directly, and it told a user nothing about their own task. Every other
+    //    surface is held to a banned list containing exactly that concept; this
+    //    one escaped only because the sweep scanned the APPENDED copy and
+    //    because the banned literal was spelled `out_of_domain`. Both holes are
+    //    closed in the test.
+    //  - "no firm basis to judge one like it" is the published API contract's
+    //    own phrasing, and it is about THIS answer. ⚠ It is not a rate and must
+    //    never become one: nothing here may say how often an abstention happens.
+    //  - "and won't guess" is the positive claim underneath the whole product —
+    //    the refusal is deliberate, not a failure to compute.
+    //  - "This estimate wasn't billed." is kept VERBATIM. It is precise, useful,
+    //    and already correct; only what the argument requires was changed.
+    //  - "an abstention is an answer, not an error" replaces "Proceed without a
+    //    prediction — at your own judgment", which read as a shrug. Abstention
+    //    is first-class here, so the copy says so instead of apologising.
+    //
+    // It must read complete ALONE, because the two guards below return it alone.
+    // It must NOT duplicate the measurement promise appended one blank line
+    // beneath it, and must NOT promise a future forecast or name a timeline.
     const message = [
-      "Budgetary cannot confidently estimate this query (out of domain).",
-      "This estimate wasn't billed. Proceed without a prediction — at your own judgment.",
+      "No forecast for this task — Budgetary has no firm basis to judge one like it, and won't guess.",
+      "This estimate wasn't billed. Proceed on your own judgment — an abstention is an answer, not an error.",
     ].join("\n");
     const stored = options.stored ?? true;
     // Everything appended below describes the pending entry this estimate just
     // gained (0024c) and what comes back from it, so it is printed only when
-    // there IS one. Two guards, both fail-closed to `main`'s exact two lines:
+    // there IS one. Two guards, both fail-closed to the message's two lines and
+    // nothing else — which is why it has to read complete on its own:
     //
     //  - No `estimateId` → nothing pairable was stored, so there is no id to
     //    print and no run whose counts could ever be recorded against it. (The
@@ -280,14 +310,14 @@ export function renderEstimate(
     //    billed, so do NOT re-estimate"), and the void's second line says the
     //    opposite four lines above. Reusing it verbatim would put a flat
     //    contradiction on screen; re-authoring it would move copy this item does
-    //    not own and would change the priced path's bytes. So the void keeps
-    //    `main`'s output in that state — no worse than today — and the store
+    //    not own and would change the priced path's bytes. So the void renders
+    //    its message alone in that state — no worse than today — and the store
     //    failure still reaches stderr through the store's logger.
     if (!stored || !estimate.estimateId) return message;
     return [
       message,
-      // Byte 150 onward. The blank line is the seam: everything before it is the
-      // invariant, everything after it is this item's.
+      // Byte 201 onward. The blank line is the seam, and 0026b-2 moved only the
+      // literal above it — never the seam, and never anything below.
       "",
       // 1. The same short form the priced footer, `pending` and the submit
       //    confirmation all print, so a user can correlate this render with its

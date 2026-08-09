@@ -27,7 +27,11 @@ import {
   submitActuals,
 } from "../src/actuals.js";
 import { measuredFilePath } from "../src/config.js";
-import { hooklessNoticeLines } from "../src/contribution.js";
+import {
+  claimOneTimeNotice,
+  DATA_NOTICE,
+  hooklessNoticeLines,
+} from "../src/contribution.js";
 import { measuredLines } from "../src/format.js";
 import {
   MAX_MEASURED_RECORDS,
@@ -120,6 +124,20 @@ beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "budgetary-measured-"));
   cwd = mkdtempSync(join(tmpdir(), "budgetary-measured-cwd-"));
   mkdirSync(join(home, ".budgetary"), { recursive: true });
+  // Spend the first-run data disclosure's marker before any test runs (0026b-2).
+  // Every `home` here is a fresh temp dir, so without this EVERY first estimate
+  // in this file would carry that once-per-install block and every whole-output
+  // golden below would be re-asserting it. This file's subject is the MEASURED
+  // block and the ordering around it; the disclosure is a separate once-only
+  // thing that would only add noise to each expectation.
+  //
+  // It is exactly the trick the `CC` env below already plays on the OTHER
+  // once-only block — declaring a session-end hook to suppress the hook-less
+  // notice so those cases isolate their subject. The disclosure has no env
+  // switch, so its marker is spent directly. Its own behaviour (fires once, on
+  // success only, never on an error path) is proven on genuinely fresh homes in
+  // `disclosure.test.ts`.
+  claimOneTimeNotice(DATA_NOTICE, home);
 });
 
 afterEach(() => {
@@ -964,8 +982,16 @@ describe("CLI stdout — the summary beside the confirmation", () => {
 // ---------------------------------------------------------------------------
 
 const VOID_TEXT =
-  "Budgetary cannot confidently estimate this query (out of domain).\n" +
-  "This estimate wasn't billed. Proceed without a prediction — at your own judgment.";
+  "No forecast for this task — Budgetary has no firm basis to judge one like it, and won't guess.\n" +
+  "This estimate wasn't billed. Proceed on your own judgment — an abstention is an answer, not an error.";
+
+/**
+ * Derived from the transcribed literal above, never from `renderEstimate` — so
+ * the byte comparisons below still prove the OUTPUT opens with these exact
+ * bytes. See the note on `VOID_BYTES` in `format.test.ts`, which owns the one
+ * remaining hardcoded length in the suite.
+ */
+const VOID_BYTES = Buffer.byteLength(VOID_TEXT, "utf8");
 
 function estimateResponse(isVoid: boolean): EstimateResponse {
   return isVoid
@@ -1052,9 +1078,9 @@ describe("the next estimate renders the measurement", () => {
         MEASURED_BLOCK,
       ].join("\n"),
     );
-    // The void's own message did not move: byte-identical first 149 bytes.
+    // The void's own message opens the render, byte for byte.
     expect(
-      Buffer.from(text, "utf8").subarray(0, 149).toString("utf8"),
+      Buffer.from(text, "utf8").subarray(0, VOID_BYTES).toString("utf8"),
     ).toBe(VOID_TEXT);
   });
 
@@ -1167,11 +1193,14 @@ describe("combined output — the hook-less notice stays visually last", () => {
     expect(noticeAt).toBeGreaterThan(measuredAt);
     expect(text.endsWith(hooklessNoticeLines().join("\n"))).toBe(true);
 
-    // The void's own 149 bytes are untouched with all three blocks present.
-    expect(Buffer.from(text, "utf8").subarray(0, 149).toString("utf8")).toBe(
+    // The void's own message opens the render with all three blocks present,
+    // and the seam beneath it is still a blank line.
+    expect(Buffer.from(text, "utf8").subarray(0, VOID_BYTES).toString("utf8")).toBe(
       VOID_TEXT,
     );
-    expect(Buffer.from(text, "utf8").subarray(149, 151).toString("utf8")).toBe("\n\n");
+    expect(
+      Buffer.from(text, "utf8").subarray(VOID_BYTES, VOID_BYTES + 2).toString("utf8"),
+    ).toBe("\n\n");
   });
 
   it("priced + measured summary + notice, in exactly that order", async () => {
@@ -1204,16 +1233,116 @@ describe("combined output — the hook-less notice stays visually last", () => {
 describe("the estimate tool's description", () => {
   const description = TOOLS[0]!.description!;
 
-  it("leaves the lead sentence exactly as it was", () => {
-    // Transcribed, not imported: the point is that this copy did not move, and
-    // an expectation read off the same string would pass whatever it became.
+  it("leads with the measurement as the CONSEQUENCE of recording (0026b-2)", () => {
+    // ★ This assertion used to read "leaves the lead sentence exactly as it
+    // was", and it existed to prove 0026c did not touch copy it did not own.
+    // 0026b-2 owns that copy, so the assertion is REWRITTEN rather than deleted
+    // — deleting it would leave the lead unpinned, which is the one outcome
+    // neither item wants. Transcribed, not imported, for the same reason as
+    // before: an expectation read off the same string passes whatever it
+    // becomes.
     expect(
       description.startsWith(
         "Return a pre-flight, probabilistic token-spend estimate for a coding " +
-          "task before you run it, and store it so the realized cost can be " +
-          "recorded afterward.",
+          "task before you run it, and store it so the same run's realized spend " +
+          "can be measured afterward — the forecast is a probability; the " +
+          "measurement is a count.",
       ),
     ).toBe(true);
+    // The measurement is named as what RECORDING yields, never as something
+    // this call serves. A description that advertised "see where your tokens
+    // went" would bait a call the tool cannot answer — the breakdown is
+    // captured at submit and rendered beneath a LATER estimate.
+    expect(description).not.toMatch(/\b(see|show|view|get)\b[^.]{0,40}\btokens went\b/i);
+    expect(description).not.toContain("realized cost can be recorded");
+  });
+
+  it("names the abstention as a returned outcome, per query and never as a rate", () => {
+    // ★ The highest-value edit in 0026b-2. S3 used to promise a range
+    // unconditionally, so a model told it would get a number treats an
+    // abstention as a failure — and is then under pressure to re-ask with a
+    // rephrased query, which bills a second estimate.
+    expect(description).toContain(
+      "or no range at all when there is no firm basis to forecast this particular task",
+    );
+    expect(description).toContain("an honest answer, not an error");
+    // ⚠ Per QUERY. The moment this acquires a frequency word it becomes a claim
+    // about how much is covered, which no public surface here may make.
+    for (const word of [
+      "usually",
+      "often",
+      "most ",
+      "rarely",
+      "typically",
+      "seldom",
+      "sometimes",
+      "generally",
+      "%",
+      "percent",
+    ]) {
+      expect(description.toLowerCase()).not.toContain(word);
+    }
+    expect(description).not.toMatch(/\b\d+\s*(%|percent)/);
+  });
+
+  it("makes no corpus, timeline, accuracy or commercial claim — over the WHOLE string", () => {
+    // Asserted by a test over the entire description rather than by a
+    // reviewer's eye, because every one of these is a claim the product cannot
+    // support and none of them is visible from a diff of one sentence.
+    const d = description.toLowerCase();
+    // No corpus or coverage description, and no engine vocabulary.
+    for (const word of [
+      "corpus",
+      "coverage",
+      "covered",
+      "dataset",
+      "training",
+      "stability",
+      "bandwidth",
+      "csr",
+      "neighbor",
+      "out_of_domain",
+      "out of domain",
+    ]) {
+      expect(d).not.toContain(word);
+    }
+    // No accuracy, benchmark or calibration claim. "the measurement is a count"
+    // is arithmetic over recorded numbers — a statement about what the number
+    // IS, not about how well anything predicts — which is why it is sayable.
+    for (const word of [
+      "accurate",
+      "accuracy",
+      "precise",
+      "benchmark",
+      "calibrat",
+      "proven",
+      "guarantee",
+      "reliable",
+      "state of the art",
+    ]) {
+      expect(d).not.toContain(word);
+    }
+    // No timeline: nothing here knows when, or whether, counts are submitted.
+    for (const word of ["soon", "shortly", "within", "minute", "hour", "days", "immediately"]) {
+      expect(d).not.toContain(word);
+    }
+    // No commercial statement of any kind.
+    for (const word of [
+      "price",
+      "pricing",
+      "free",
+      "paid",
+      "subscription",
+      "plan",
+      "tier",
+      "licence",
+      "license",
+      "enterprise",
+      "trial",
+      "$",
+    ]) {
+      expect(d).not.toContain(word);
+    }
   });
 
   it("drops the clause that this change makes false", () => {

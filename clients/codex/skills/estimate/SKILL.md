@@ -7,6 +7,6 @@ The user has asked for a Budgetary estimate. The task description should come fr
 
 Call the Budgetary **`estimate`** tool — provided by the bundled `budgetary` MCP server — passing the task description as the `query` argument. Show the tool's result to the user verbatim: do not rewrite it, summarize it, or add commentary.
 
-The tool returns a pre-flight token-spend estimate (a token range, a scenario label, and a confidence score) and records the estimate locally. If no API key is configured, the tool returns a short configure-your-key hint instead — show that verbatim too.
+The tool returns a pre-flight token-spend estimate (a token range, a scenario label, and a confidence score) and records the estimate locally. Where there is no firm basis to forecast a particular task it returns no range at all — that abstention IS the result; show it verbatim and do not re-ask with a reworded query, which bills a second estimate. If no API key is configured, the tool returns a short configure-your-key hint instead — show that verbatim too.
 
 Do not call the tool with an empty query, and do not invent a token number yourself: the estimate must come from the tool.

@@ -412,10 +412,13 @@ describe("runEstimateTool — void (0024c: out-of-domain still ingests)", () => 
       now: () => new Date("2026-05-27T10:14:00Z"),
     });
 
-    // The void's user-facing message is UNCHANGED — confidence still shapes what
-    // the user sees ("cannot confidently estimate … proceed at your own judgment").
+    // Confidence still shapes what the user sees — 0026b-2 rewrote that copy so
+    // the abstention reads as an answer ("No forecast for this task … an
+    // abstention is an answer, not an error"). It is emphatically NOT an error
+    // result, and never was.
     expect(result.isError).toBe(false);
-    expect(result.text).toContain("cannot confidently estimate");
+    expect(result.text).toContain("No forecast for this task");
+    expect(result.text).toContain("an abstention is an answer, not an error");
 
     // But the outcome is now RECORDABLE: a pending entry is written, keyed on the
     // void estimate's id, so `on-session-end` can pair the real actual to it. This
@@ -500,7 +503,7 @@ describe("runEstimateTool — void (0024c: out-of-domain still ingests)", () => 
       home,
       clientFactory: () => asClient(fake),
     });
-    expect(result.text).toContain("cannot confidently estimate");
+    expect(result.text).toContain("No forecast for this task");
     expect(result.text).not.toContain("await actuals");
     // The void entry is still recorded, alongside the prior one.
     const file = JSON.parse(

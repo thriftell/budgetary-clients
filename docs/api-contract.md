@@ -115,7 +115,7 @@ Returns a probabilistic estimate of total token spend (input + output) for the g
 }
 ```
 
-A void response is **not an error**. Clients should render it as "Budgetary cannot confidently estimate this query" — this is itself a useful product signal (it tells the user to gate or budget the run manually).
+A void response is **not an error**, and a client must not present it as one. It is an abstention: the server has no firm basis to judge a task like this one, and declines to guess rather than returning a number it cannot stand behind. The first-party clients render it as "No forecast for this task — Budgetary has no firm basis to judge one like it, and won't guess", followed by the fact that the estimate was not billed. That is itself a useful product signal — it tells the user to gate or budget the run manually — and the estimate is still stored, so the run's realized counts can be submitted against it like any other.
 
 ### 4.2 `POST /v1/actuals`
 

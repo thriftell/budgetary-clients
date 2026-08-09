@@ -82,9 +82,14 @@ describe("renderEstimate — honest presentation", () => {
     const text = renderEstimate(
       estimate({ scenario: "out_of_domain", void: true, distribution: null, confidence: 0 }),
     );
-    expect(text).toContain("cannot confidently estimate");
+    expect(text).toContain("No forecast for this task");
     expect(text).toContain("wasn't billed");
     expect(text).not.toContain("No charge");
+    // 0026b-2: the abstention is stated as an answer, not as a shortfall of
+    // ours, and the engine's own scenario label is gone from the copy.
+    expect(text).toContain("an abstention is an answer, not an error");
+    expect(text).not.toContain("cannot confidently estimate");
+    expect(text).not.toContain("out of domain");
     // Still not a single forecast number: no band, no midpoint, no worst case,
     // no confidence decimal. What 0026c appended beneath it is prose about the
     // pending entry — nothing derived from a distribution that does not exist.
@@ -109,14 +114,27 @@ describe("renderEstimate — honest presentation", () => {
  * computed from `renderEstimate`, which is the function under test: an
  * expectation derived from the code under test passes whatever that code becomes.
  *
- * Exactly 149 UTF-8 bytes (147 characters — the em-dash is 3), and exactly what
- * `main` returned for EVERY void before this change. It is the invariant: 0026c
- * owns only what follows the blank line after it, and rewriting the message
- * itself belongs to a separate item. A change to either side fails here, loudly.
+ * 0026b-2 rewrote it. What 0026c appends beneath it, and the blank-line seam
+ * between the two, are untouched — so a change to either side still fails here,
+ * loudly.
  */
 const VOID_MESSAGE =
-  "Budgetary cannot confidently estimate this query (out of domain).\n" +
-  "This estimate wasn't billed. Proceed without a prediction — at your own judgment.";
+  "No forecast for this task — Budgetary has no firm basis to judge one like it, and won't guess.\n" +
+  "This estimate wasn't billed. Proceed on your own judgment — an abstention is an answer, not an error.";
+
+/**
+ * The message's length in bytes, DERIVED from the transcribed literal above.
+ *
+ * ★ 0026b-2 killed the magic number. `149` used to be hardcoded eight times
+ * across three files while the literal it described was transcribed three times
+ * — two encodings of one fact, kept in step by hand, and the second item in a
+ * row to have to chase them. Deriving it costs nothing in strength: every
+ * comparison below still proves that `renderEstimate`'s OUTPUT opens with these
+ * exact bytes, because the literal is transcribed rather than read off
+ * `renderEstimate`. The one place the number stays hardcoded is the length test
+ * immediately below, whose entire job is to measure it.
+ */
+const VOID_BYTES = Buffer.byteLength(VOID_MESSAGE, "utf8");
 
 /** The sentence the append closes on, transcribed for the same reason. */
 const MEASURED_FOLLOW_UP =
@@ -132,16 +150,20 @@ function voidEstimate(): EstimateResponse {
   });
 }
 
-describe("renderEstimate — the void's first 149 bytes never move (0026c)", () => {
-  it("the transcribed message really is 149 UTF-8 bytes / 147 characters", () => {
-    // Pinned so the "everything after byte 149 is ours" rule is measured, not
-    // asserted: if the message ever changes length, that number is wrong and this
-    // fails before any prefix comparison can quietly start passing.
-    expect(Buffer.byteLength(VOID_MESSAGE, "utf8")).toBe(149);
-    expect(VOID_MESSAGE.length).toBe(147);
+describe("renderEstimate — the void's own message, and the seam beneath it", () => {
+  it("the transcribed message really is 200 UTF-8 bytes / 196 characters", () => {
+    // ★ THE ONE PLACE THE NUMBER IS HARDCODED, and the reason `VOID_BYTES` may
+    // be derived everywhere else: the length is MEASURED here, not asserted
+    // there. If the message ever changes length these two numbers are wrong and
+    // this fails first — before any prefix comparison built on `VOID_BYTES`
+    // could quietly re-align itself around the new literal and start passing.
+    expect(Buffer.byteLength(VOID_MESSAGE, "utf8")).toBe(200);
+    expect(VOID_MESSAGE.length).toBe(196);
+    // 196 characters, 200 bytes: the two em-dashes are 3 bytes each.
+    expect(VOID_BYTES).toBe(200);
   });
 
-  it("every host's void render OPENS with those exact 149 bytes, then a blank line", () => {
+  it("every host's void render OPENS with those exact bytes, then a blank line", () => {
     for (const host of [undefined, "claude-code", "codex", "cursor", "mcp"]) {
       const bytes = Buffer.from(
         renderEstimate(voidEstimate(), { host, stored: true }),
@@ -149,49 +171,59 @@ describe("renderEstimate — the void's first 149 bytes never move (0026c)", () 
       );
       // Byte-level equality against the literal — not `toContain`, and not a
       // character-index slice, since what is being proven is the ENCODING.
-      expect(bytes.subarray(0, 149).toString("utf8")).toBe(VOID_MESSAGE);
+      expect(bytes.subarray(0, VOID_BYTES).toString("utf8")).toBe(VOID_MESSAGE);
       // The seam is a blank line, so nothing appended can run into the message.
-      expect(bytes.subarray(149, 151).toString("utf8")).toBe("\n\n");
+      // 0026b-2 moved the literal above it; the seam itself did not move.
+      expect(bytes.subarray(VOID_BYTES, VOID_BYTES + 2).toString("utf8")).toBe("\n\n");
     }
   });
 
-  it("appends the id, the host's EXISTING stored footer, and the measured follow-up", () => {
-    // Whole-output equality, per host. The footer lines are transcribed from the
-    // shipped copy rather than imported, so a silent edit to `storedFooter` shows
-    // up here as a diff instead of passing by construction.
-    expect(renderEstimate(voidEstimate(), { host: "claude-code", stored: true })).toBe(
-      [
-        VOID_MESSAGE,
-        "",
-        "Estimate id: est_01ABCDEF…",
-        "",
-        "Pending estimate stored. With the Budgetary plugin installed, actuals are",
-        "recorded automatically at session end — otherwise run `npx @budgetary/mcp report-actual`.",
-        MEASURED_FOLLOW_UP,
-      ].join("\n"),
-    );
-    expect(renderEstimate(voidEstimate(), { host: "codex", stored: true })).toBe(
-      [
-        VOID_MESSAGE,
-        "",
-        "Estimate id: est_01ABCDEF…",
-        "",
-        "Pending estimate stored. After the run, record actuals with",
-        "`npx @budgetary/mcp on-session-end --transcript <rollout>` (or `report-actual`).",
-        MEASURED_FOLLOW_UP,
-      ].join("\n"),
-    );
-    expect(renderEstimate(voidEstimate(), { host: "mcp", stored: true })).toBe(
-      [
-        VOID_MESSAGE,
-        "",
-        "Estimate id: est_01ABCDEF…",
-        "",
-        "Pending estimate stored. After the run, record actuals with",
-        "`npx @budgetary/mcp report-actual`.",
-        MEASURED_FOLLOW_UP,
-      ].join("\n"),
-    );
+  it("★ THE FOOTER SEAM, whole-output, for EVERY host (0026b-2)", () => {
+    // Whole-output equality, per host — never a substring. The footer lines are
+    // transcribed from the shipped copy rather than imported, so a silent edit
+    // to `storedFooter` shows up here as a diff instead of passing by
+    // construction.
+    //
+    // ★ 0026b-2 widened this from three hosts to all FIVE. The message above the
+    // seam moved, so "the seam did not move" has to be re-proven rather than
+    // assumed, and `undefined` and `cursor` — the two that had no golden — are
+    // exactly the paths a footer regression would hide in.
+    //
+    // Note the SINGLE newline before the follow-up, where every other join here
+    // is a blank line. That is shipped behaviour and it must not drift: those
+    // footer lines say how the counts get recorded, and the follow-up continues
+    // the same thought by saying what recording them returns.
+    const CC_FOOTER = [
+      "Pending estimate stored. With the Budgetary plugin installed, actuals are",
+      "recorded automatically at session end — otherwise run `npx @budgetary/mcp report-actual`.",
+    ];
+    const CODEX_FOOTER = [
+      "Pending estimate stored. After the run, record actuals with",
+      "`npx @budgetary/mcp on-session-end --transcript <rollout>` (or `report-actual`).",
+    ];
+    const DEFAULT_FOOTER = [
+      "Pending estimate stored. After the run, record actuals with",
+      "`npx @budgetary/mcp report-actual`.",
+    ];
+    const footers: [string | undefined, string[]][] = [
+      [undefined, DEFAULT_FOOTER],
+      ["claude-code", CC_FOOTER],
+      ["codex", CODEX_FOOTER],
+      ["cursor", DEFAULT_FOOTER],
+      ["mcp", DEFAULT_FOOTER],
+    ];
+    for (const [host, footer] of footers) {
+      expect(renderEstimate(voidEstimate(), { host, stored: true })).toBe(
+        [
+          VOID_MESSAGE,
+          "",
+          "Estimate id: est_01ABCDEF…",
+          "",
+          ...footer,
+          MEASURED_FOLLOW_UP,
+        ].join("\n"),
+      );
+    }
   });
 
   it("prints the SHORT id — the same form the priced footer and `pending` show", () => {
@@ -200,13 +232,13 @@ describe("renderEstimate — the void's first 149 bytes never move (0026c)", () 
     expect(text).not.toContain("est_01ABCDEF2345"); // truncated, never full
   });
 
-  it("stays at `main`'s two lines when nothing was stored", () => {
+  it("renders the message ALONE when nothing was stored", () => {
     // The un-stored footer is written for a BILLED estimate ("this estimate was
     // ALREADY billed, so do NOT re-estimate"), which the void's own second line
     // contradicts four lines above. Reusing it verbatim would print both claims
     // at once; re-authoring it would move copy this item does not own AND change
-    // the priced path's bytes. So a void with no pending entry renders exactly
-    // what it rendered before — never a footer describing an entry that isn't
+    // the priced path's bytes. So a void with no pending entry renders its
+    // message and nothing else — never a footer describing an entry that isn't
     // there, and never the follow-up promise it underwrites.
     const text = renderEstimate(voidEstimate(), { host: "claude-code", stored: false });
     expect(text).toBe(VOID_MESSAGE);
@@ -214,13 +246,61 @@ describe("renderEstimate — the void's first 149 bytes never move (0026c)", () 
     expect(text).not.toContain(MEASURED_FOLLOW_UP);
   });
 
-  it("stays at `main`'s two lines when the response carried no estimate id", () => {
+  it("renders the message ALONE when the response carried no estimate id", () => {
     // Nothing pairable was stored, so there is no id to print and no run whose
     // counts could ever be recorded against one. (The SDK validates a non-empty
     // id on every response; this pins the fail-closed behaviour if it ever isn't.)
     expect(renderEstimate(estimate({ ...voidEstimate(), estimateId: "" }))).toBe(
       VOID_MESSAGE,
     );
+  });
+
+  it("★ and the message READS COMPLETE alone — the state both fail-closed branches reach", () => {
+    // ★ 0026b-2. Two branches return the message with nothing beneath it, so it
+    // has to stand on its own: a reader in that state gets these two lines and
+    // no other text at all. What "complete" means here is asserted rather than
+    // eyeballed.
+    for (const alone of [
+      renderEstimate(voidEstimate(), { host: "claude-code", stored: false }),
+      renderEstimate(estimate({ ...voidEstimate(), estimateId: "" })),
+    ]) {
+      expect(alone).toBe(VOID_MESSAGE);
+      // Exactly two lines, neither empty, no trailing seam left dangling where
+      // an appended block used to be.
+      const lines = alone.split("\n");
+      expect(lines).toHaveLength(2);
+      for (const line of lines) expect(line.trim().length).toBeGreaterThan(0);
+      expect(alone.endsWith("\n")).toBe(false);
+
+      // It says what happened, what it cost, and what to do — the three things
+      // a reader needs when this is all they get.
+      expect(alone).toContain("No forecast for this task"); // what happened
+      expect(alone).toContain("This estimate wasn't billed."); // what it cost
+      expect(alone).toContain("Proceed on your own judgment"); // what to do
+
+      // ⚠ It does NOT forward-reference anything that is not on screen. In this
+      // state there is no id, no footer, and no measured follow-up beneath it,
+      // so any promise of one would be a dangling reference.
+      expect(alone).not.toContain("below");
+      expect(alone).not.toContain("above");
+      expect(alone).not.toContain("here:");
+      expect(alone).not.toContain(MEASURED_FOLLOW_UP);
+      expect(alone).not.toContain("measured breakdown");
+      expect(alone).not.toContain("Estimate id");
+
+      // ⚠ And it does not duplicate the measurement promise that IS appended one
+      // blank line below in the stored case — the two must not read as the same
+      // sentence said twice.
+      const stored = renderEstimate(voidEstimate(), { host: "claude-code", stored: true });
+      expect(stored.slice(VOID_MESSAGE.length)).toContain(MEASURED_FOLLOW_UP);
+      expect(alone).not.toContain(MEASURED_FOLLOW_UP);
+
+      // ⚠ No promise that a forecast is coming, and no timeline for one. An
+      // abstention is the answer, not a delay before the real one.
+      for (const word of ["will be", "try again", "check back", "later", "next time", "for now"]) {
+        expect(alone.toLowerCase()).not.toContain(word);
+      }
+    }
   });
 
   it("promises the MEASUREMENT — never a forecast, a timeline, or a verdict", () => {
@@ -241,23 +321,57 @@ describe("renderEstimate — the void's first 149 bytes never move (0026c)", () 
     expect(s).toContain("measured breakdown");
   });
 
-  it("keeps engine vocabulary, rates and commercial claims out of the appended copy", () => {
-    const appended = renderEstimate(voidEstimate(), { host: "claude-code", stored: true })
-      .slice(VOID_MESSAGE.length)
+  it("keeps engine vocabulary, rates and commercial claims out of the WHOLE void render", () => {
+    // ★ 0026b-2 widened this from `.slice(VOID_MESSAGE.length)` to the whole
+    // output, because the narrow version was how `(out of domain)` survived on
+    // a public string that reaches users directly: the sweep scanned only what
+    // was APPENDED beneath the message, and the one banned literal that would
+    // have caught it was spelled `out_of_domain` while the copy said "out of
+    // domain". Both holes are closed — the scan now covers the message itself,
+    // and the spaced spelling is banned alongside the underscored one.
+    const whole = renderEstimate(voidEstimate(), { host: "claude-code", stored: true })
       .toLowerCase();
-    // No engine vocabulary on a public surface.
-    for (const word of ["coverage", "stability", "bandwidth", "csr", "neighbor", "out_of_domain"]) {
-      expect(appended).not.toContain(word);
+    // No engine vocabulary on a public surface, in either spelling.
+    for (const word of [
+      "coverage",
+      "stability",
+      "bandwidth",
+      "csr",
+      "neighbor",
+      "out_of_domain",
+      "out of domain",
+      "out-of-domain",
+    ]) {
+      expect(whole).not.toContain(word);
     }
-    // No rate, ever: this copy may describe THIS query and this install, never
-    // how often anything happens.
-    for (const word of ["usually", "often", "most ", "rarely", "typically", "%"]) {
-      expect(appended).not.toContain(word);
+    // No rate, EVER — and this is the sweep that matters most now the message
+    // itself is in scope. "no firm basis to judge one like it" is a statement
+    // about THIS answer; the moment it acquires a frequency word it becomes a
+    // claim about how much is covered, which nothing here may say.
+    for (const word of [
+      "usually",
+      "often",
+      "most ",
+      "rarely",
+      "typically",
+      "seldom",
+      "sometimes",
+      "generally",
+      "%",
+    ]) {
+      expect(whole).not.toContain(word);
     }
-    expect(appended).not.toMatch(/\b\d+\s*(%|percent)/);
-    // No commercial claim of any kind.
+    expect(whole).not.toMatch(/\b\d+\s*(%|percent)/);
+    // No commercial claim of any kind. "This estimate wasn't billed" is a fact
+    // about ONE transaction and is deliberately not extended.
     for (const word of ["price", "pricing", "paid", "plan", "tier", "licence", "license", "enterprise", "trial", "$"]) {
-      expect(appended).not.toContain(word);
+      expect(whole).not.toContain(word);
+    }
+    // No promise that a forecast is coming — an abstention is the answer, not a
+    // delay. (The measured breakdown promised beneath it is a COUNT of a run's
+    // own tokens; it is not a forecast and does not contradict this.)
+    for (const word of ["try again", "check back", "later", "soon", "shortly", "for now", "yet"]) {
+      expect(whole).not.toContain(word);
     }
   });
 });

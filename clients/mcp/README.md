@@ -1,6 +1,6 @@
 # @budgetary/mcp
 
-A single [Model Context Protocol](https://modelcontextprotocol.io) server that gives any MCP-capable host — Claude Code, Cursor, GitHub Copilot, Codex, and others — a pre-flight, probabilistic **token-spend estimate** for a coding task before you run it, and a best-effort, never-fabricated way to record what the task actually cost. Build it once; add it everywhere. It replaces the previously-planned per-host extensions.
+A single [Model Context Protocol](https://modelcontextprotocol.io) server that gives any MCP-capable host — Claude Code, Cursor, GitHub Copilot, Codex, and others — a pre-flight, probabilistic **token-spend estimate** for a coding task before you run it, and a best-effort, never-fabricated way to measure what the task actually cost. The forecast is a probability; the measurement is a count. Where there is no firm basis to forecast a particular task, it says so instead of guessing. Build it once; add it everywhere. It replaces the previously-planned per-host extensions.
 
 The server exposes exactly one model-invokable tool, `estimate`. It talks to the hosted Budgetary API at `https://api.budgetary.tools`.
 
@@ -238,11 +238,16 @@ For the predicted-vs-actual calibration dashboard, install **Budgetary** (`budge
 
 ## Privacy
 
+Your first successful `estimate` on a machine appends a one-time note pointing here, and `npx @budgetary/mcp doctor` repeats a short form of it on every run. That note is **one call late** and says so: by the time anything can be rendered, `estimate` has already sent the task text. It is a disclosure and a pointer — it asks for nothing, gates nothing, and grants nothing. This section is the account it points at.
+
 Only these things leave your machine, and only to `https://api.budgetary.tools`:
 
-- The **task description** you pass to `estimate`.
+- The **task description** you pass to `estimate`, verbatim.
+- If the model supplied one, the **target model identifier** it named (e.g. `claude-opus-4-7`) — the optional `model` argument of the `estimate` tool, omitted when absent.
+- The **host tag** — `BUDGETARY_HOST` if you set it, otherwise the constant `mcp`. It says which MCP host the call came from and nothing else.
+- A per-call **request id**, a fresh random UUID generated for each `estimate` so a retried call is not counted twice. It is derived from nothing about you, your machine, or your task.
 - If you set it, the **language tag** you declared (e.g. `TypeScript`) — a benign label, the same kind of thing as the host name. Never sent unless you opt in via `BUDGETARY_LANGUAGE` or the config `language` field.
-- After a run, the **token counts** (`tokens_in`, `tokens_out`), a `success` flag, and a duration.
+- After a run, the **token counts** (`tokens_in`, `tokens_out`) and a duration; a `success` flag **only when the outcome was actually observed**, and never otherwise; and, when one was declared, how the run **ended** — one of `natural`, `harness_watchdog`, `operative_cap`, `kill_switch`, and nothing else.
 - A constant **client label** — `mcp_client` unless an operator overrode it with `BUDGETARY_SOURCE` (see above). It says which client sent the row and nothing else: it is a fixed string, derived from no part of you, your machine, or your task.
 - On Claude Code, a **behavior trace**: per step, the host tool name (e.g. `Read`, `Bash`), its token count, a **redacted descriptor** of what it acted on, and whether it succeeded. The descriptor exposes a program name *in the clear only when it is a common, non-sensitive tool* (e.g. `pytest`, `npm run`) — a pasted credential or a private script name is never shown, only its **salted digest**; everything after the program (paths, arguments, the rest of the command) always lives inside the digest, or a bare path digest for a file tool. Custom/internal tool names (e.g. an org's private MCP tool) are reported generically as `mcp:other`, never verbatim. **No file contents, absolute paths, command arguments, or output ever leave the machine** — only an allowlisted program name and an opaque key. Set `BUDGETARY_TRACE_TARGET=off` to drop the descriptor entirely (the trace falls back to tool names + token counts); any value other than an explicit `1`/`true`/`on`/`yes` is treated as off.
 

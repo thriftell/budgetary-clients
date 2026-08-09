@@ -42,21 +42,52 @@ export const TOOL_NAME = "estimate";
 const ESTIMATE_TOOL: Tool = {
   name: TOOL_NAME,
   title: "Budgetary: estimate token spend",
-  // ⚠ The FINAL clause used to end "it never reports how many tokens a run
+  // ⚠ The FINAL sentence used to end "it never reports how many tokens a run
   // actually used", which 0026c makes false: a run whose actuals were recorded
   // earlier now has its measured breakdown rendered beneath a later estimate.
   // The live-usage disclaimer is what mattered in that clause and it is kept —
   // this tool still observes nothing about the run it is called during — while
-  // the post-hoc half is now conditional on the recording having happened.
-  // Nothing before the em-dash is touched here; that copy is a separate item's.
+  // the post-hoc half is now conditional on the recording having happened. That
+  // sentence is 0026c's; it is byte-identical below. 0026b-2 moved the LEAD.
+  //
+  // ★ Written for TWO readers, and the second one decides the wording: a model
+  // choosing tools reads this as well as a human does. That rules out
+  // advertising the measurement as something this call SERVES — the measured
+  // breakdown is captured when a run's counts are submitted and rendered
+  // beneath a LATER estimate, only when a buffered record exists. "See where
+  // your tokens went" would bait a call this tool cannot answer and leave the
+  // model explaining an absence it was led into. So the measurement appears in
+  // the lead only as the CONSEQUENCE of recording ("store it so … can be
+  // measured afterward"), never as a service of the call.
+  //
+  // What moved, sentence by sentence:
+  //  - S1: "the realized cost can be recorded" → "the same run's realized spend
+  //    can be measured". *Recorded* sounds like bookkeeping taken FROM the user;
+  //    *measured* is something they get back. The contrast clause that follows
+  //    ("the forecast is a probability; the measurement is a count") is the one
+  //    differentiating claim that is true at any level of evidence — it is
+  //    arithmetic over recorded numbers, which is exactly why it is sayable and
+  //    exactly why it is not an accuracy claim.
+  //  - S2: + "before the work starts" — a timing signal for the model reader.
+  //  - S3: ★ the highest-value edit, and the larger defect. It promised a range
+  //    UNCONDITIONALLY. An abstention is a legitimate, first-class outcome, and
+  //    a model told it will get a number treats one as a failure — and is then
+  //    under pressure to re-ask with a rephrased query, which bills a second
+  //    estimate. Naming the abstention as a RETURNED OUTCOME closes that.
+  //    ⚠ Phrased per query ("this particular task"). Never a rate, never a
+  //    frequency word, never a statement about how much is covered.
+  //  - S4: untouched, and pinned byte-for-byte by three shipped assertions.
   description:
     "Return a pre-flight, probabilistic token-spend estimate for a coding " +
-    "task before you run it, and store it so the realized cost can be " +
-    "recorded afterward. Call this with the user's task described in natural " +
-    "language. Returns a token range (p10–p90), a scenario label, and a " +
-    "confidence score. This tool only estimates and records — it does not " +
-    "observe the current run's usage; when an earlier run's counts have been " +
-    "recorded, it reports that run's measured breakdown.",
+    "task before you run it, and store it so the same run's realized spend " +
+    "can be measured afterward — the forecast is a probability; the " +
+    "measurement is a count. Call this with the user's task described in " +
+    "natural language, before the work starts. Returns a token range " +
+    "(p10–p90), a scenario label, and a confidence score — or no range at all " +
+    "when there is no firm basis to forecast this particular task, which is " +
+    "an honest answer, not an error. This tool only estimates and records — " +
+    "it does not observe the current run's usage; when an earlier run's " +
+    "counts have been recorded, it reports that run's measured breakdown.",
   inputSchema: {
     type: "object",
     properties: {
