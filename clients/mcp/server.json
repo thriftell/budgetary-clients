@@ -27,7 +27,7 @@
         },
         {
           "name": "BUDGETARY_HOST",
-          "description": "Optional tag naming the MCP host this server runs under — e.g. claude-code, cursor, codex, copilot. It labels each estimate with where it came from, and on claude-code it lets the server say once when no automatic submission of a finished run has been recorded here. Free-form; defaults to \"mcp\" when unset.",
+          "description": "Optional tag naming the MCP host this server runs under — e.g. claude-code, cursor, codex, copilot. It labels each estimate with where it came from, and an explicit value overrides the host name the MCP handshake reports. Free-form; defaults to \"mcp\" when unset.",
           "format": "string",
           "isRequired": false,
           "isSecret": false

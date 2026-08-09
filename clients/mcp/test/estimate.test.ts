@@ -22,7 +22,11 @@ import {
   BudgetaryRateLimitError,
 } from "@budgetary/sdk";
 
-import { projectIdFromCwd, runEstimateTool } from "../src/tools/estimate.js";
+import {
+  attestedHost,
+  projectIdFromCwd,
+  runEstimateTool,
+} from "../src/tools/estimate.js";
 
 interface FakeClient {
   estimate: ReturnType<typeof vi.fn>;
@@ -250,6 +254,89 @@ describe("runEstimateTool — happy path", () => {
 
     const [, opts] = fake.estimate.mock.calls[0]!;
     expect(opts.context.host).toBe("mcp");
+  });
+});
+
+describe("attestedHost — frozen exact-match allowlist (0024d-3)", () => {
+  it("maps the one verified name, and nothing else that was measured", () => {
+    expect(attestedHost({ name: "claude-code" })).toBe("claude-code");
+    // Verified on a live handshake and deliberately NOT mapped: the map's only
+    // consumer asks "is this Claude Code?", and an entry no consumer reads is
+    // dead code that looks live.
+    expect(attestedHost({ name: "codex-mcp-client" })).toBeUndefined();
+    // Static bundle evidence only — never allowlisted on that.
+    expect(attestedHost({ name: "Visual Studio Code" })).toBeUndefined();
+  });
+
+  it("matches exactly — no case folding, trimming, substring or suffix logic", () => {
+    // `Claude Code` (title case, with a space) is a REAL identity of the same
+    // product on a different channel; exact equality is what keeps it out.
+    for (const name of [
+      "Claude Code",
+      "Claude-Code",
+      "CLAUDE-CODE",
+      " claude-code",
+      "claude-code ",
+      "claude-code\n",
+      "claude",
+      "claude-code-mcp",
+      "claude-cli-design-tool",
+    ]) {
+      expect(attestedHost({ name })).toBeUndefined();
+    }
+  });
+
+  it("yields nothing on absent, malformed, empty or hostile input — unknown, never a verdict", () => {
+    expect(attestedHost(undefined)).toBeUndefined();
+    expect(attestedHost({})).toBeUndefined();
+    expect(attestedHost({ name: "" })).toBeUndefined();
+    expect(attestedHost({ name: 42 })).toBeUndefined();
+    expect(attestedHost({ name: "x".repeat(100_000) })).toBeUndefined();
+    expect(attestedHost({ name: "\u001b[2Jclaude-code" })).toBeUndefined();
+  });
+});
+
+describe("runEstimateTool — the handshake never reaches the wire (0024d-3)", () => {
+  it("context.host stays exactly \"mcp\" for an env-unset, handshake-claude-code install", async () => {
+    // The wire tag answers "what did the operator call this install?" — and
+    // this operator called it nothing, so the request body is byte-identical
+    // to what a pre-0024d-3 client sent: host "mcp", no new fields.
+    const fake = makeFakeClient(async () => happyEstimate());
+
+    await runEstimateTool({
+      query: "anything",
+      env: { BUDGETARY_API_KEY: "bg_test_dummy" } as NodeJS.ProcessEnv,
+      cwd,
+      home,
+      clientFactory: () => asClient(fake),
+      clientInfo: { name: "claude-code" },
+    });
+
+    const [, opts] = fake.estimate.mock.calls[0]!;
+    expect(opts.context.host).toBe("mcp");
+    expect(Object.keys(opts.context).sort()).toEqual(["host", "projectId"]);
+  });
+
+  it("keeps the recorded host byte-identical in every precedence case", async () => {
+    const cases = [
+      { env: {}, clientInfo: { name: "claude-code" }, wire: "mcp" },
+      { env: { BUDGETARY_HOST: "claude-code" }, clientInfo: { name: "claude-code" }, wire: "claude-code" },
+      { env: { BUDGETARY_HOST: "claude-code" }, clientInfo: undefined, wire: "claude-code" },
+      { env: { BUDGETARY_HOST: "codex" }, clientInfo: { name: "claude-code" }, wire: "codex" },
+    ];
+    for (const c of cases) {
+      const fake = makeFakeClient(async () => happyEstimate());
+      await runEstimateTool({
+        query: "anything",
+        env: { BUDGETARY_API_KEY: "bg_test_dummy", ...c.env } as NodeJS.ProcessEnv,
+        cwd,
+        home,
+        clientFactory: () => asClient(fake),
+        ...(c.clientInfo !== undefined ? { clientInfo: c.clientInfo } : {}),
+      });
+      const [, opts] = fake.estimate.mock.calls[0]!;
+      expect(opts.context.host).toBe(c.wire);
+    }
   });
 });
 

@@ -2,10 +2,15 @@ import { readFileSync } from "node:fs";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { CallToolRequest } from "@modelcontextprotocol/sdk/types.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import type {
+  CallToolRequest,
+  JSONRPCMessage,
+} from "@modelcontextprotocol/sdk/types.js";
 
 import type { AutoActualsArgs } from "../src/actuals.js";
 import {
+  buildServer,
   handleCallTool,
   main,
   parseOnSessionEndArgs,
@@ -310,6 +315,94 @@ describe("handleCallTool", () => {
     });
     expect(firstText(result)).toBe("the rendered estimate");
     expect(result.isError).toBe(true);
+  });
+
+  it("threads deps.clientInfo through to the estimate tool verbatim (0024d-3)", async () => {
+    // The same host-supplied seam as toolUseId: the model cannot see, set, or
+    // influence it, and the handler passes it through untouched.
+    const spy = estimateSpy({ text: "ok", isError: false });
+    const clientInfo = { name: "claude-code" };
+    await handleCallTool(callRequest({ query: "q" }), {
+      runEstimate: spy.runEstimate,
+      clientInfo,
+    });
+    expect(firstCall(spy.calls).clientInfo).toBe(clientInfo);
+  });
+
+  it("leaves clientInfo undefined when deps carry none — absence is unknown", async () => {
+    const spy = estimateSpy({ text: "ok", isError: false });
+    await handleCallTool(callRequest({ query: "q" }), {
+      runEstimate: spy.runEstimate,
+    });
+    expect(firstCall(spy.calls).clientInfo).toBeUndefined();
+  });
+});
+
+describe("buildServer — the handshake identity is read at call time (0024d-3)", () => {
+  // Drives the REAL Server + protocol dispatch over a linked in-memory pair,
+  // sending raw JSON-RPC frames back-to-back with nothing awaited in between —
+  // the same shape as a client that pipelines `initialize` +
+  // `notifications/initialized` + `tools/call` into one stdin chunk. This is
+  // the trap the design must survive: `oninitialized` fires BEFORE the
+  // identity is assigned in that shape, so the identity must be read inside
+  // the tools/call handler, where the SDK assigns it before its first await.
+  async function pipelinedCall(withInitialize: boolean) {
+    const calls: EstimateToolArgs[] = [];
+    const server = buildServer({
+      runEstimate: async (args) => {
+        calls.push(args);
+        return { text: "ok", isError: false };
+      },
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const done = new Promise<void>((resolve) => {
+      clientTransport.onmessage = (msg: JSONRPCMessage) => {
+        if ("id" in msg && msg.id === 2) resolve();
+      };
+    });
+    await server.connect(serverTransport);
+    try {
+      if (withInitialize) {
+        void clientTransport.send({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-11-25",
+            capabilities: {},
+            clientInfo: { name: "claude-code", version: "9.9.9" },
+          },
+        });
+        void clientTransport.send({
+          jsonrpc: "2.0",
+          method: "notifications/initialized",
+        });
+      }
+      void clientTransport.send({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: TOOL_NAME, arguments: { query: "q" } },
+      });
+      await done;
+    } finally {
+      await server.close();
+    }
+    return calls;
+  }
+
+  it("a pipelined initialize + tools/call still sees the attested identity", async () => {
+    const calls = await pipelinedCall(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.clientInfo?.name).toBe("claude-code");
+  });
+
+  it("a tools/call with NO initialize sees undefined — reachable, and asserts nothing", async () => {
+    // Nothing in the protocol layer rejects a pre-initialize request; the
+    // undefined branch is real and must stay an ordinary answer.
+    const calls = await pipelinedCall(false);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.clientInfo).toBeUndefined();
   });
 });
 
