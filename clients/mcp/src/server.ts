@@ -232,7 +232,9 @@ function usageText(): string {
     "  npx @budgetary/mcp report-actual --estimate-id ID close a specific (already-billed) estimate for free",
     "  npx @budgetary/mcp on-session-end                 actuals from a session-end payload on stdin (host hook)",
     "  npx @budgetary/mcp on-session-end --transcript P  actuals from a rollout/transcript file P",
-    "                     [--failed] [--censoring C]     C: how the run ended, exactly one of",
+    "                     [--success|--failed]           declare the outcome YOUR oracle measured;",
+    "                                                    neither flag = not observed (nothing is sent)",
+    "                     [--censoring C]                C: how the run ended, exactly one of",
     "                                                    natural | harness_watchdog | operative_cap | kill_switch",
     "                                                    (anything else is omitted, never an error)",
     "  npx @budgetary/mcp --version                      print the version and exit",
@@ -282,7 +284,14 @@ async function runReportActualCli(estimateId: string | null): Promise<number> {
 
 export interface OnSessionEndArgs {
   transcript: string | null;
-  success: boolean;
+  /**
+   * The outcome the invoking harness DECLARED (`--success` / `--failed`), or
+   * `null` when neither flag was passed. `null` is an absence, not a value:
+   * downstream it OMITS the field rather than defaulting it. Same shape as
+   * {@link censoring} for the same reason — a caller that declared nothing
+   * must not be recorded as having declared something.
+   */
+  success: boolean | null;
   /**
    * The RAW `--censoring <value>` declaration, or null when the flag was
    * absent. Syntactic only: the exact-match check against the four contract
@@ -297,8 +306,8 @@ export interface OnSessionEndArgs {
 
 /**
  * Parse `on-session-end` arguments: an optional rollout/transcript file path
- * (via `--transcript`/`--rollout` or a bare positional), a success flag
- * (`--failed` / `--success`, default success), and an optional
+ * (via `--transcript`/`--rollout` or a bare positional), an optional outcome
+ * flag (`--failed` / `--success`, **no default**), and an optional
  * `--censoring <value>` run-termination declaration. The counts are always
  * measured from the file; only success and censoring are caller-declared. A
  * `--transcript`/`--rollout` with no value (or a flag-shaped value like
@@ -313,10 +322,16 @@ export interface OnSessionEndArgs {
  * even when it is not a valid category (validation is downstream and
  * fail-closed to omission); a flag-shaped or missing value simply leaves the
  * declaration null — an absent observation, never an error.
+ *
+ * ⚠️ `success` starts at `null`, NOT `true`. The flags are the one honest
+ * producer of this field — a harness invoking this subcommand is declaring what
+ * its own oracle measured — but a harness that passes neither flag declared
+ * nothing, and initializing to `true` silently recorded every such invocation
+ * as a success it never measured. Absence of a flag is now absence of a value.
  */
 export function parseOnSessionEndArgs(rest: string[]): OnSessionEndArgs {
   let transcript: string | null = null;
-  let success = true;
+  let success: boolean | null = null;
   let censoring: string | null = null;
   let error: string | null = null;
   for (let i = 0; i < rest.length; i++) {
@@ -372,7 +387,7 @@ export async function runOnSessionEndCli(
   if (error !== null) {
     stderr.write(
       `Budgetary: ${error}.\n` +
-        "  Usage: npx @budgetary/mcp on-session-end --transcript <path> [--failed] [--censoring <category>]\n",
+        "  Usage: npx @budgetary/mcp on-session-end --transcript <path> [--success|--failed] [--censoring <category>]\n",
     );
     return 2;
   }
@@ -387,7 +402,10 @@ export async function runOnSessionEndCli(
     try {
       return await runRolloutActuals({
         transcriptPath: transcript,
-        success,
+        // Conditional, exactly like `censoring`: no flag ⇒ no field on the
+        // wire. A harness that measured an outcome says so and its value is
+        // forwarded verbatim; one that did not stays silent.
+        ...(success !== null ? { success } : {}),
         ...(censoring !== null ? { censoring } : {}),
         env,
         cwd: process.cwd(),

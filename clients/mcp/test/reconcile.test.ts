@@ -438,14 +438,15 @@ describe("reconcileEntry — measured from the entry's OWN transcript", () => {
     expect(readPending().entries).toHaveLength(0);
   });
 
-  it("★ stamps success=true, and that is a POLICY not a measurement", async () => {
-    // The hook decides `success` from a host-reported termination reason we do
-    // not have; its own default for an unknown reason is `false`, which here
-    // would stamp a systematic label on every reconciled run rather than a
-    // measurement. We submit only for a session whose serving process is gone
-    // and whose transcript is complete and stable — a session that ran to
-    // termination, which is what the hook counts as success. Pinned so the
-    // choice cannot be changed silently.
+  it("★★ sends NO success key — it observed that the session ended, never that the task worked", async () => {
+    // This path runs in a LATER session against a PREVIOUS session's entry.
+    // Every gate it passes proves only that the earlier session ENDED: the
+    // serving process is gone, the transcript is complete and stable. A
+    // session that was opened, estimated and then abandoned satisfies all of
+    // it. So there is no constant to stamp here that would be a measurement —
+    // `true` records abandoned work as achievement, `false` strands genuine
+    // successes permanently — and the field is left absent instead. Pinned as
+    // an ABSENCE (not as `false`) so neither default can return quietly.
     const dir = transcriptDir();
     writeTranscript(dir, SESSION_A, TOOL_USE_A, { input: 1, output: 2 });
     const entry = entryA();
@@ -460,7 +461,13 @@ describe("reconcileEntry — measured from the entry's OWN transcript", () => {
       clientFactory: () => asClient(fake),
     });
     const body = fake.submitActuals.mock.calls[0]![0] as Record<string, unknown>;
-    expect(body.success).toBe(true);
+    expect("success" in body).toBe(false);
+    // Absent, not `null`: serializing an explicit null would be the same claim
+    // in a different encoding, and an older server rejects the body outright.
+    expect(JSON.stringify(body)).not.toContain("success");
+    // The measured half is unaffected — the counts still submit.
+    expect(body.tokensIn).toBe(1);
+    expect(body.tokensOut).toBe(2);
   });
 
   it("★ submits nothing when two transcripts both carry the tool-use id", async () => {

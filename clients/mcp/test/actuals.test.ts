@@ -1154,7 +1154,10 @@ describe("runAutoActuals", () => {
     expect(sent.estimateId).toBe("est_auto");
     expect(sent.tokensIn).toBe(12340);
     expect(sent.tokensOut).toBe(36210);
-    expect(sent.success).toBe(true);
+    // No outcome: this path measures tokens, never whether the task worked.
+    // (`reason: "clear"` used to be mapped to a success here — see the
+    // dedicated six-reason pin below for why nothing maps.)
+    expect("success" in sent).toBe(false);
     // An empty trace is never attached.
     expect(sent.trace).toBeUndefined();
     expect(readPending(home).entries).toEqual([]);
@@ -1575,7 +1578,9 @@ describe("runAutoActuals — cross-session retry never mis-pairs (P-B1)", () => 
     expect(entry.attempts).toBe(1);
     expect(entry.tokens_in).toBe(4242);
     expect(entry.tokens_out).toBe(1717);
-    expect(entry.success).toBe(true);
+    // The hook observed no outcome, so nothing is persisted for it either —
+    // the store must not invent the value the wire declined to send.
+    expect("success" in entry).toBe(false);
     expect(typeof entry.duration_ms).toBe("number");
   });
 
@@ -3002,5 +3007,394 @@ describe("censoring — report-actual asks, and an unanswered question OMITS", (
     // Never a yes/no with a default — a shrug must not become `natural`.
     expect(questions).toContain("Ending [1-5, Enter = 5]: ");
     expect(text).not.toMatch(/finish normally/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// success — the run's OUTCOME (0024g). Same rule as censoring, different axis:
+// a path that did not OBSERVE the outcome sends NOTHING. Before this item every
+// one of the four submit paths sent a value and none of them had measured one —
+// two derived it from a session-close reason, one hardcoded a constant, one
+// read an unanswered prompt as a failure. Two paths now send nothing
+// permanently, by design, and both are pinned here: an absent key is only an
+// invariant if something checks for it.
+// ---------------------------------------------------------------------------
+
+describe("success — ★★ the SessionEnd hook path sends NOTHING (reason is session-scoped)", () => {
+  it("emits no success key for ANY of the six reason values", async () => {
+    // `reason` says how the SESSION closed; `success` says how the RUN turned
+    // out. No member of the enum names an outcome: `other` is the host's
+    // DEFAULT parameter value (crashes, SIGTERM and clean shutdowns report it
+    // indistinguishably), and a task that simply finishes never fires this hook
+    // at all. The old mapping read `clear`/`logout`/`prompt_input_exit` as
+    // success and everything else as failure, so tidying up after a failed task
+    // recorded a success and a crash after a perfect one recorded a failure.
+    // No member maps; none may leak — in EITHER direction.
+    for (const reason of SIX_SESSION_END_REASONS) {
+      writePending(home, { version: 1, entries: [censoringEntry(`est_s_${reason}`)] });
+      const fake = makeFakeClient();
+      const code = await runAutoActuals({
+        payload: { reason, transcript_path: "/tmp/t.jsonl" },
+        env: ENV,
+        home,
+        cwd,
+        now: () => NOW,
+        stderr: { write: () => {} },
+        clientFactory: () => asClient(fake),
+        readUsage: () => ({ tokensIn: 10, tokensOut: 20, trace: [] }),
+      });
+      expect(code).toBe(0);
+      expect(fake.submitActuals).toHaveBeenCalledTimes(1);
+      const sent = fake.submitActuals.mock.calls[0]![0] as Record<string, unknown>;
+      expect("success" in sent).toBe(false);
+      // Absent, not `null`: the two mean the same thing to the server, but an
+      // explicit null is still an emitted key — and an older deployment
+      // rejects the body outright, losing the counts that WERE measured.
+      expect(JSON.stringify(sent)).not.toContain("success");
+      // The measured half is untouched: the tokens still submit.
+      expect(sent.tokensIn).toBe(10);
+      expect(sent.tokensOut).toBe(20);
+      expect(readPending(home).entries).toEqual([]);
+    }
+  });
+});
+
+describe("success — the rollout path forwards the harness's own verdict verbatim", () => {
+  it("★ --success / --failed are sent exactly as declared", async () => {
+    // The invoking harness owns an oracle; this is the one honest producer of
+    // the field anywhere in the client. Its declaration is copied, never
+    // second-guessed and never enriched.
+    for (const declared of [true, false]) {
+      writePending(home, { version: 1, entries: [censoringEntry(`est_decl_${declared}`)] });
+      const fake = makeFakeClient();
+      const code = await runRolloutActuals({
+        transcriptPath: "/tmp/r.jsonl",
+        success: declared,
+        env: ENV,
+        home,
+        cwd,
+        now: () => NOW,
+        out: () => {},
+        clientFactory: () => asClient(fake),
+        readUsage: () => ({ tokensIn: 100, tokensOut: 200, trace: [] }),
+      });
+      expect(code).toBe(0);
+      const sent = fake.submitActuals.mock.calls[0]![0] as Record<string, unknown>;
+      expect(sent.success).toBe(declared);
+    }
+  });
+
+  it("★★ a body built WITH an explicit flag is BYTE-IDENTICAL to before this change", async () => {
+    // The whole point of making the field optional is that nothing changes for
+    // a caller that measured the outcome. Proven against the exact serialized
+    // bytes — including the key's POSITION — not asserted.
+    writePending(home, { version: 1, entries: [censoringEntry("est_bytes")] });
+    const fake = makeFakeClient();
+    const code = await runRolloutActuals({
+      transcriptPath: "/tmp/r.jsonl",
+      success: true,
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      out: () => {},
+      clientFactory: () => asClient(fake),
+      readUsage: () => ({ tokensIn: 100, tokensOut: 200, trace: [] }),
+    });
+    expect(code).toBe(0);
+    const sent = fake.submitActuals.mock.calls[0]![0] as Record<string, unknown>;
+    expect(JSON.stringify(sent)).toBe(
+      '{"estimateId":"est_bytes","tokensIn":100,"tokensOut":200,"success":true,' +
+        '"durationMs":840000,"metadata":{"source":"mcp_client"}}',
+    );
+  });
+
+  it("★★ NO flag ⇒ NO key — the silent default is gone (behavior change)", async () => {
+    // Previously `let success = true`, so a flag-less invocation recorded a
+    // success nothing had measured. The body is now the same six-key body
+    // MINUS the outcome — and the counts still submit.
+    writePending(home, { version: 1, entries: [censoringEntry("est_noflag")] });
+    const fake = makeFakeClient();
+    const out: string[] = [];
+    const code = await runRolloutActuals({
+      transcriptPath: "/tmp/r.jsonl",
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      out: (l) => out.push(l),
+      clientFactory: () => asClient(fake),
+      readUsage: () => ({ tokensIn: 100, tokensOut: 200, trace: [] }),
+    });
+    expect(code).toBe(0);
+    const sent = fake.submitActuals.mock.calls[0]![0] as Record<string, unknown>;
+    expect(JSON.stringify(sent)).toBe(
+      '{"estimateId":"est_noflag","tokensIn":100,"tokensOut":200,' +
+        '"durationMs":840000,"metadata":{"source":"mcp_client"}}',
+    );
+    expect(readPending(home).entries).toEqual([]);
+    // A foreground command in a human's terminal says what it did NOT record,
+    // rather than letting the reader assume a default landed.
+    const text = out.join("\n");
+    expect(text).toContain("outcome not reported");
+    expect(text).toContain("No --success/--failed flag");
+    // And it must not claim the run succeeded anywhere in that report.
+    expect(text).not.toContain("recorded as successful");
+  });
+});
+
+describe("success — ★★ absence AND an explicit value each survive the retry ladder", () => {
+  // The retry ladder persists the first attempt's scalars and resubmits them
+  // from a LATER session. The run whose first submit failed is the run most
+  // likely to have an interesting outcome, so it is exactly the wrong row to
+  // mislabel — and the pre-0024g round-trip REQUIRED a boolean, so an absence
+  // would have read as corruption (and the obvious "fix" persists `false`).
+  // Both directions are tested, separately.
+  it("a persisted ABSENCE survives to the attempt that stores the row, as an absence", async () => {
+    // 1) A flag-less harness submit measures counts and declares no outcome;
+    //    the network eats it.
+    writePending(home, { version: 1, entries: [censoringEntry("est_abs")] });
+    const failing = makeFakeClient(async () => {
+      throw new Error("network down");
+    });
+    const code = await runRolloutActuals({
+      transcriptPath: "/tmp/r.jsonl",
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      out: () => {},
+      clientFactory: () => asClient(failing),
+      readUsage: () => ({ tokensIn: 100, tokensOut: 200, trace: [] }),
+    });
+    expect(code).toBe(1);
+    // The counts ARE persisted; the outcome is NOT invented to fill the shape.
+    const kept = readPending(home).entries[0]! as unknown as Record<string, unknown>;
+    expect(kept.tokens_in).toBe(100);
+    expect("success" in kept).toBe(false);
+
+    // 2) A LATER session's hook retry — a different process that observed
+    //    nothing — carries the absence to the attempt that actually stores the
+    //    row. This is THE attempt that becomes the permanent record.
+    const succeeding = makeFakeClient();
+    const hookCode = await runAutoActuals({
+      payload: { reason: "other" },
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      stderr: { write: () => {} },
+      clientFactory: () => asClient(succeeding),
+    });
+    expect(hookCode).toBe(0);
+    const sent = succeeding.submitActuals.mock.calls[0]![0] as Record<string, unknown>;
+    expect("success" in sent).toBe(false);
+    // Critically: the counts still made it. An absent outcome must never cause
+    // persistedCounts to reject the entry and re-derive from a DIFFERENT
+    // session's transcript — that is the mis-pairing the round-trip prevents.
+    expect(sent.tokensIn).toBe(100);
+    expect(sent.tokensOut).toBe(200);
+    expect(readPending(home).entries).toEqual([]);
+  });
+
+  it("a persisted EXPLICIT value survives to the attempt that stores the row, as itself", async () => {
+    for (const declared of [true, false]) {
+      writePending(home, { version: 1, entries: [censoringEntry(`est_expl_${declared}`)] });
+      const failing = makeFakeClient(async () => {
+        throw new Error("network down");
+      });
+      await runRolloutActuals({
+        transcriptPath: "/tmp/r.jsonl",
+        success: declared,
+        env: ENV,
+        home,
+        cwd,
+        now: () => NOW,
+        out: () => {},
+        clientFactory: () => asClient(failing),
+        readUsage: () => ({ tokensIn: 7, tokensOut: 9, trace: [] }),
+      });
+      const kept = readPending(home).entries[0]! as unknown as Record<string, unknown>;
+      expect(kept.success).toBe(declared);
+
+      const succeeding = makeFakeClient();
+      await runAutoActuals({
+        payload: { reason: "other" },
+        env: ENV,
+        home,
+        cwd,
+        now: () => NOW,
+        stderr: { write: () => {} },
+        clientFactory: () => asClient(succeeding),
+      });
+      const sent = succeeding.submitActuals.mock.calls[0]![0] as Record<string, unknown>;
+      expect(sent.success).toBe(declared);
+      expect(sent.tokensIn).toBe(7);
+    }
+  });
+
+  it("a failed submit that declares NOTHING clears a stale persisted verdict", async () => {
+    // The persisted fields mirror THIS submission's declaration exactly — an
+    // outcome from an earlier attempt must not pair with counts that no longer
+    // declare one.
+    writePending(home, {
+      version: 1,
+      entries: [censoringEntry("est_stale_s", { success: true })],
+    });
+    const failing = makeFakeClient(async () => {
+      throw new Error("network down");
+    });
+    await runRolloutActuals({
+      transcriptPath: "/tmp/r.jsonl",
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      out: () => {},
+      clientFactory: () => asClient(failing),
+      readUsage: () => ({ tokensIn: 1, tokensOut: 2, trace: [] }),
+    });
+    const kept = readPending(home).entries[0]! as unknown as Record<string, unknown>;
+    expect(kept.tokens_in).toBe(1);
+    expect("success" in kept).toBe(false);
+  });
+
+  it("a corrupt persisted outcome degrades to OMITTED — the counts still resubmit", async () => {
+    // Re-validated at read time like every other stored field. A hand-edited
+    // "yes" must not be coerced to `true` (nor to `false`, nor reject the
+    // whole entry): it degrades to an absence and the measured counts survive.
+    for (const corrupt of ["yes", "true", 1, null, {}]) {
+      writePending(home, {
+        version: 1,
+        entries: [
+          censoringEntry("est_corrupt_s", {
+            tokens_in: 5,
+            tokens_out: 6,
+            duration_ms: 7,
+            success: corrupt as unknown as boolean,
+          }),
+        ],
+      });
+      const fake = makeFakeClient();
+      const code = await runAutoActuals({
+        payload: { reason: "other" },
+        env: ENV,
+        home,
+        cwd,
+        now: () => NOW,
+        stderr: { write: () => {} },
+        clientFactory: () => asClient(fake),
+      });
+      expect(code).toBe(0);
+      const sent = fake.submitActuals.mock.calls[0]![0] as Record<string, unknown>;
+      expect(sent.tokensIn).toBe(5);
+      expect("success" in sent).toBe(false);
+    }
+  });
+});
+
+describe("success — report-actual asks a question a human can decline", () => {
+  async function runManualWith(answers: string[]) {
+    writePending(home, { version: 1, entries: [censoringEntry("est_manual_s")] });
+    const fake = makeFakeClient();
+    const out: string[] = [];
+    const questions: string[] = [];
+    let i = 0;
+    const code = await runManualActuals({
+      env: ENV,
+      home,
+      cwd,
+      out: (l) => out.push(l),
+      prompt: async (q) => {
+        questions.push(q);
+        return answers[i++] ?? "";
+      },
+      clientFactory: () => asClient(fake),
+    });
+    return { code, fake, out, questions };
+  }
+
+  it("★★ an EMPTY answer selects 'not sure' and the key is ABSENT from the body", async () => {
+    // The old prompt was `Did the task succeed? [y/N]` and mapped an empty
+    // answer to `false`: a person who did not know, or did not want to say,
+    // was recorded as reporting a FAILED run — permanently.
+    const { code, fake } = await runManualWith(["100", "200", "", "", ""]);
+    expect(code).toBe(0);
+    const sent = fake.submitActuals.mock.calls[0]![0] as Record<string, unknown>;
+    expect("success" in sent).toBe(false);
+    // The contrast that motivates reusing the omission-defaulting helper: the
+    // optional duration is SENT as 0 when skipped; the outcome is OMITTED.
+    expect(sent.durationMs).toBe(0);
+    // And the counts they DID type are kept — declining costs them nothing.
+    expect(sent.tokensIn).toBe(100);
+    expect(sent.tokensOut).toBe(200);
+  });
+
+  it("an explicit '3' (not sure) also omits; nothing is pre-selected", async () => {
+    const { code, fake } = await runManualWith(["100", "200", "3", "", ""]);
+    expect(code).toBe(0);
+    const sent = fake.submitActuals.mock.calls[0]![0] as Record<string, unknown>;
+    expect("success" in sent).toBe(false);
+  });
+
+  it("an explicit yes/no sends exactly true/false", async () => {
+    for (const [answer, expected] of [
+      ["1", true],
+      ["y", true],
+      ["yes", true],
+      ["Y", true],
+      ["YES", true],
+      ["2", false],
+      ["n", false],
+      ["no", false],
+      ["N", false],
+      ["  yes  ", true],
+    ] as Array<[string, boolean]>) {
+      const { code, fake } = await runManualWith(["100", "200", answer, "", ""]);
+      expect(code).toBe(0);
+      const sent = fake.submitActuals.mock.calls[0]![0] as Record<string, unknown>;
+      expect(sent.success).toBe(expected);
+    }
+  });
+
+  it("★ an uninterpretable answer re-prompts and then OMITS — it never aborts the submit", async () => {
+    // Previously an unparseable answer exited 2 and threw away the token counts
+    // the person had just typed in. Those counts were measured; they are kept,
+    // and only the unanswerable field is dropped.
+    const { code, fake, out } = await runManualWith([
+      "100", "200", "maybe", "sort of", "dunno", "", "",
+    ]);
+    expect(code).toBe(0);
+    const sent = fake.submitActuals.mock.calls[0]![0] as Record<string, unknown>;
+    expect("success" in sent).toBe(false);
+    expect(sent.tokensIn).toBe(100);
+    expect(out.join("\n")).toContain("Leaving the run's outcome unrecorded.");
+  });
+
+  it("a prototype key is not a choice and not an answer — re-prompts, then omits", async () => {
+    // The choice lookup must answer only for its real members: an
+    // object-literal lookup would resolve `toString`/`constructor` from the
+    // prototype and hand back a function as the "answer".
+    const { code, fake } = await runManualWith([
+      "100", "200", "toString", "constructor", "__proto__", "", "",
+    ]);
+    expect(code).toBe(0);
+    const sent = fake.submitActuals.mock.calls[0]![0] as Record<string, unknown>;
+    expect("success" in sent).toBe(false);
+  });
+
+  it("asks a three-state question with an explicit not-sure, and no y/N default", async () => {
+    const { out, questions } = await runManualWith(["100", "200", "", "", ""]);
+    const text = out.join("\n");
+    expect(text).toContain("Did the run complete its objective?");
+    expect(text).toContain("  1. Yes");
+    expect(text).toContain("  2. No");
+    expect(text).toContain("  3. Not sure / prefer not to say");
+    expect(questions).toContain("Outcome [1-3, Enter = 3]: ");
+    // The old prompt pre-selected a verdict in its very punctuation. Nothing
+    // resembling it may survive.
+    expect(text).not.toContain("[y/N]");
+    expect(questions.join("\n")).not.toContain("[y/N]");
+    expect(text).not.toMatch(/did the task succeed/i);
   });
 });

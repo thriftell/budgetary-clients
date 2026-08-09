@@ -119,7 +119,7 @@ The Claude Code plugin closes the predicted-vs-actual loop **automatically** wit
 npx -y @budgetary/mcp on-session-end --transcript ~/.codex/sessions/rollout-<ts>-<uuid>.jsonl
 ```
 
-Run it from the **same directory you estimated in** — the estimate is bound to that project. The command parses the rollout's cumulative `token_count` events, submits only real counts (cache reads excluded, `input_tokens − cached_input_tokens`), and prints what it submitted — or exactly why it didn't (no API key, no pending estimate for this project, or a file it couldn't read). The run is recorded as **successful** by default; add `--failed` if the task didn't complete.
+Run it from the **same directory you estimated in** — the estimate is bound to that project. The command parses the rollout's cumulative `token_count` events, submits only real counts (cache reads excluded, `input_tokens − cached_input_tokens`), and prints what it submitted — or exactly why it didn't (no API key, no pending estimate for this project, or a file it couldn't read). Add `--success` or `--failed` to declare how the run turned out; with **neither flag the outcome is left unreported** — which is not the same as reporting a failure. Pass one only if something actually checked: the token counts submit either way, and the verdict is permanent (only the first submission for an estimate is stored).
 
 > If you have no rollout to point at, `npx -y @budgetary/mcp report-actual` prompts you for the counts by hand instead.
 

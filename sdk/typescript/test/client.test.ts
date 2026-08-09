@@ -195,6 +195,91 @@ describe("BudgetaryClient.submitActuals", () => {
     });
   });
 
+  it("★★ omits `success` from the wire body when the caller measured no outcome", async () => {
+    // `success` is an OBSERVATION, not a status. A caller with no oracle leaves
+    // it unset, and the key must then be ABSENT from the JSON — never `null`,
+    // never `false`. The two absences mean the same thing to the server, but
+    // an emitted key is a claim, and an older deployment rejects it outright.
+    handle.use(
+      http.post(`${TEST_BASE_URL}/v1/actuals`, () =>
+        HttpResponse.json(
+          { received: true, ledger_entry_id: "led_omit" },
+          { status: 202 },
+        ),
+      ),
+    );
+
+    const client = newClient();
+    await client.submitActuals({
+      estimateId: "est_omit",
+      tokensIn: 100,
+      tokensOut: 200,
+      durationMs: 1000,
+    });
+
+    const req = handle.requests[0]!;
+    expect(req.body).toEqual({
+      estimate_id: "est_omit",
+      tokens_in: 100,
+      tokens_out: 200,
+      duration_ms: 1000,
+    });
+    expect(Object.keys(req.body as object)).not.toContain("success");
+    expect(JSON.stringify(req.body)).not.toContain("success");
+  });
+
+  it("an explicitly `undefined` success is dropped, not serialized as null", async () => {
+    // Belt and braces for a caller that spreads an optional variable in rather
+    // than spreading conditionally: `undefined` must vanish at serialization,
+    // never become a JSON `null`.
+    handle.use(
+      http.post(`${TEST_BASE_URL}/v1/actuals`, () =>
+        HttpResponse.json(
+          { received: true, ledger_entry_id: "led_undef" },
+          { status: 202 },
+        ),
+      ),
+    );
+
+    const client = newClient();
+    await client.submitActuals({
+      estimateId: "est_undef",
+      tokensIn: 1,
+      tokensOut: 2,
+      success: undefined,
+      durationMs: 3,
+    });
+
+    expect(JSON.stringify(handle.requests[0]!.body)).not.toContain("success");
+  });
+
+  it("an explicit verdict is still sent verbatim — true AND false", async () => {
+    for (const declared of [true, false]) {
+      handle.use(
+        http.post(`${TEST_BASE_URL}/v1/actuals`, () =>
+          HttpResponse.json(
+            { received: true, ledger_entry_id: "led_v" },
+            { status: 202 },
+          ),
+        ),
+      );
+      const client = newClient();
+      await client.submitActuals({
+        estimateId: "est_v",
+        tokensIn: 1,
+        tokensOut: 2,
+        success: declared,
+        durationMs: 3,
+      });
+      const body = handle.requests[handle.requests.length - 1]!.body as Record<
+        string,
+        unknown
+      >;
+      // Identity, not truthiness: a coercion bug must not pass on `false`.
+      expect(body.success).toBe(declared);
+    }
+  });
+
   it("forwards the additive trace array verbatim on the wire", async () => {
     handle.use(
       http.post(`${TEST_BASE_URL}/v1/actuals`, () =>

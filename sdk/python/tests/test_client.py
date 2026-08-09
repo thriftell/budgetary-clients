@@ -162,6 +162,68 @@ def test_submit_actuals_posts_body_and_parses_202(respx_mock, client):
         "duration_ms": 420_000,
         "metadata": {"tool_calls": 47},
     }
+    # A caller that DOES declare an outcome sends byte-identical JSON to
+    # every previous release — the key keeps its position, not just its value.
+    assert route.calls.last.request.content == (
+        b'{"estimate_id":"est_01ABC","tokens_in":12340,"tokens_out":36210,'
+        b'"success":true,"duration_ms":420000,"metadata":{"tool_calls":47}}'
+    )
+
+
+def test_submit_actuals_omits_success_when_the_outcome_was_not_observed(
+    respx_mock, client
+):
+    # `success` is an OBSERVATION, not a status. Left unset the key is ABSENT
+    # from the body — never `null`, never `False`. A caller with no oracle must
+    # be able to contribute the counts it DID measure without inventing a
+    # verdict, and the verdict is permanent once stored (the route is
+    # idempotent on `estimate_id` and there is no update endpoint).
+    route = respx_mock.post("/v1/actuals").mock(
+        return_value=httpx.Response(
+            202, json={"received": True, "ledger_entry_id": "led_omit"}
+        )
+    )
+
+    client.submit_actuals(
+        estimate_id="est_omit",
+        tokens_in=100,
+        tokens_out=200,
+        duration_ms=1000,
+    )
+
+    import json as _json
+
+    raw = route.calls.last.request.content
+    assert b"success" not in raw
+    assert _json.loads(raw) == {
+        "estimate_id": "est_omit",
+        "tokens_in": 100,
+        "tokens_out": 200,
+        "duration_ms": 1000,
+    }
+
+
+def test_submit_actuals_sends_an_explicit_false_verdict_verbatim(respx_mock, client):
+    # Identity, not truthiness: an observed FAILURE is a real observation and
+    # must survive as `false`, never be collapsed into the same absence as
+    # "nobody looked".
+    route = respx_mock.post("/v1/actuals").mock(
+        return_value=httpx.Response(
+            202, json={"received": True, "ledger_entry_id": "led_false"}
+        )
+    )
+
+    client.submit_actuals(
+        estimate_id="est_false",
+        tokens_in=1,
+        tokens_out=2,
+        success=False,
+        duration_ms=3,
+    )
+
+    import json as _json
+
+    assert _json.loads(route.calls.last.request.content)["success"] is False
 
 
 def test_get_ledger_sends_query_params_and_parses_entries(respx_mock, client):

@@ -191,15 +191,17 @@ export async function reconcileEntry(
   const counts: ActualCounts = {
     tokensIn: usage.tokensIn,
     tokensOut: usage.tokensOut,
-    // We submit ONLY for a session whose serving process is gone and whose
-    // transcript is complete and stable — i.e. one that ran to termination,
-    // which is the same condition the hook path encodes as success (it counts
-    // `clear` / `logout` / `prompt_input_exit`, the normal endings). The hook's
-    // conservative default of `false` is not available to us: it keys off a
-    // termination reason only the host can report, and defaulting to it would
-    // stamp `false` on EVERY reconciled run — a systematic label, not a
-    // measurement. See the PR for the divergence this leaves.
-    success: true,
+    // ★★ No `success`. This path runs in a LATER session, against a PREVIOUS
+    // session's pending entry, and every gate it passes proves only that the
+    // earlier session ENDED: the serving process is gone and the transcript is
+    // complete and stable. None of that observes whether the task WORKED — a
+    // session that was opened, estimated and abandoned satisfies all of it. A
+    // constant is not a measurement, and picking either constant is an
+    // affirmative false claim about every reconciled run: `true` records
+    // abandoned work as achievement, `false` strands genuine successes
+    // permanently (the server stores only the first submission's value). The
+    // counts here ARE measured from the run's own transcript and still submit;
+    // the outcome is left unobserved, which is the only honest record.
     // Measured, not inferred from this process's clock. The hook can bound the
     // run with a real session-end moment; we cannot, so the transcript's own
     // last-write time is used as the end bound. Using `now` here would report
