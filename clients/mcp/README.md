@@ -197,13 +197,15 @@ A pre-flight estimate is only half the loop; calibration needs the **realized** 
   ```
 
   Run it from the directory you estimated in. Add `--failed` if the task didn't complete.
+
+  A harness that spawned the session itself — and therefore *observed how the run ended* — can declare that too, with `--censoring <category>`: exactly one of `natural`, `harness_watchdog`, `operative_cap`, `kill_switch` (the API contract's closed vocabulary). The value is matched **exactly** and forwarded verbatim; anything else is omitted from the submission — never normalized into a category, and never an error. Don't pass it for a run whose ending you didn't observe: an absent field honestly records "unknown", while a guessed `natural` is a false claim the server has no way to detect.
 - **Cursor / Copilot / other hosts — manual.** These hosts do **not** hand a third-party server the token totals of a completed agent run, and the language model does not know them either. So you record them yourself when you have a moment:
 
   ```bash
   npx @budgetary/mcp report-actual
   ```
 
-  It shows this project's most recent pending estimate and prompts you for the input/output token counts (read them from your host's usage UI, grouped numbers like `48,000` are fine), whether the task succeeded, and an optional duration.
+  It shows this project's most recent pending estimate and prompts you for the input/output token counts (read them from your host's usage UI, grouped numbers like `48,000` are fine), whether the task succeeded, an optional duration, and — if you observed it — how the run **ended** (a cap, a watchdog, a deliberate abort, or on its own). Pressing Enter on that last question records nothing for it: "not sure" is a first-class answer, and an unobserved ending is never turned into a value.
 
 To see which estimates still await actuals at any time (read-only, no server call):
 

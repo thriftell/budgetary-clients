@@ -1,7 +1,9 @@
 import {
   BudgetaryClient,
   BudgetaryError,
+  CENSORING_CATEGORIES,
   type BudgetaryClientOptions,
+  type CensoringCategory,
 } from "@budgetary/sdk";
 
 import {
@@ -77,6 +79,21 @@ export const MAX_ATTEMPTS = 5;
 const UNATTENDED_MAX_RETRIES = 0;
 
 /**
+ * The exact-match gate for a run-termination category: `raw` when it is one of
+ * the four {@link CENSORING_CATEGORIES} literals, else `undefined` (omit).
+ * Deliberately no case folding, no trimming, no aliasing — a normalizing
+ * coercion is where a typo becomes a confident wrong category. The server
+ * applies the same exact match and drops anything else to `null`; dropping it
+ * client-side keeps the wire honest and matches that posture. Not an error:
+ * a submit whose category is dropped still submits everything else.
+ */
+export function censoringCategory(raw: unknown): CensoringCategory | undefined {
+  return (CENSORING_CATEGORIES as readonly unknown[]).includes(raw)
+    ? (raw as CensoringCategory)
+    : undefined;
+}
+
+/**
  * Realized counts for a completed run. These are ALWAYS supplied by the
  * caller — either a session-end hook reading the real transcript, or a human
  * typing them into the `report-actual` CLI. There is deliberately no code
@@ -95,6 +112,17 @@ export interface ActualCounts {
    * to measure, and a model never supplies it.
    */
   trace?: TraceStep[];
+  /**
+   * Optional run-termination category, forwarded VERBATIM from a caller that
+   * observed it: an outer harness's `--censoring` declaration, or the human's
+   * own answer on `report-actual`. `undefined` means "nothing observed the
+   * ending" and OMITS the field — never a default, never `natural`. Two submit
+   * paths can never populate it, by design: the SessionEnd hook (its `reason`
+   * is session-scoped, not run-scoped) and the in-process reconcile (it runs
+   * in a later session and observed nothing about the run's ending). Never
+   * model-supplied.
+   */
+  censoring?: CensoringCategory;
 }
 
 /**
@@ -204,7 +232,7 @@ function withPersistedCounts(
   entry: PendingEntry,
   counts: ActualCounts,
 ): PendingEntry {
-  return {
+  const updated: PendingEntry = {
     ...entry,
     tokens_in: counts.tokensIn,
     tokens_out: counts.tokensOut,
@@ -212,6 +240,15 @@ function withPersistedCounts(
     duration_ms: counts.durationMs,
     has_trace: !!(counts.trace && counts.trace.length > 0),
   };
+  // The termination category rides the persisted round-trip too — on the retry
+  // path the retry IS the first submission that stores the row, and a run that
+  // was killed is exactly the run most likely to have had its first submit
+  // fail. Mirror THIS submission's declaration exactly: set when it declared
+  // one, removed when it didn't (a stale category from an earlier attempt must
+  // not pair with counts that no longer declare it).
+  if (counts.censoring !== undefined) updated.censoring = counts.censoring;
+  else delete updated.censoring;
+  return updated;
 }
 
 /**
@@ -235,7 +272,18 @@ export function persistedCounts(entry: PendingEntry): ActualCounts | null {
     return null;
   }
   // Retry sends totals only — the original trace was intentionally not persisted.
-  return { tokensIn: tokens_in, tokensOut: tokens_out, success, durationMs: duration_ms };
+  // The persisted termination category is re-validated exactly like every other
+  // stored field: a corrupt or hand-edited value degrades to OMITTED (the
+  // counts still resubmit) — never to a normalized category, and never `null`
+  // masquerading as an observation.
+  const censoring = censoringCategory(entry.censoring);
+  return {
+    tokensIn: tokens_in,
+    tokensOut: tokens_out,
+    success,
+    durationMs: duration_ms,
+    ...(censoring !== undefined ? { censoring } : {}),
+  };
 }
 
 /**
@@ -355,6 +403,16 @@ export async function submitActuals(
       // Additive: only sent when the caller measured a non-empty trace.
       ...(counts.trace && counts.trace.length > 0
         ? { trace: counts.trace }
+        : {}),
+      // Additive: only sent when a caller OBSERVED the run's ending (a harness
+      // declaration or the human's answer), re-checked against the exact
+      // four-member vocabulary at the wire — anything else is omitted, never
+      // normalized, and never fails the submit. Absent ⇒ the body is
+      // byte-identical to one built before this field existed. `cap_ms` /
+      // `cap_tokens` are deliberately NOT here: no channel the host controls
+      // exposes a per-run cap to this client, so no path can send one.
+      ...(censoringCategory(counts.censoring) !== undefined
+        ? { censoring: counts.censoring }
         : {}),
       // Provenance: read from the ENTRY (stamped at estimate time), never from
       // this process's environment — see entrySource. A constant, declared tag;
@@ -1114,6 +1172,7 @@ export async function runManualActuals(args: ManualActualsArgs): Promise<number>
   }
   const durationMs = await promptNonNegInt(args, "Duration in ms (optional): ", "duration_ms", true);
   if (durationMs === null) return 2;
+  const censoring = await promptCensoring(args);
 
   const factory =
     args.clientFactory ??
@@ -1128,7 +1187,13 @@ export async function runManualActuals(args: ManualActualsArgs): Promise<number>
     store,
     client,
     entry,
-    counts: { tokensIn, tokensOut, success, durationMs },
+    counts: {
+      tokensIn,
+      tokensOut,
+      success,
+      durationMs,
+      ...(censoring !== undefined ? { censoring } : {}),
+    },
     logger: { warn: args.out },
     measured: new MeasuredStore({
       path: measuredFilePath(args.home),
@@ -1207,10 +1272,68 @@ export async function runManualActuals(args: ManualActualsArgs): Promise<number>
 }
 
 /**
+ * Ask the human how the run ended, defaulting to OMISSION. The person who ran
+ * the task observed the ending, so their answer is the most direct observation
+ * this path has — and it is not model-supplied. All the honesty is in HOW it is
+ * asked:
+ *
+ *  - The four contract categories are offered in plain language PLUS an
+ *    explicit "not sure / prefer not to say", and an EMPTY answer selects that
+ *    one. Nothing is pre-selected among the four categories: a shrug must
+ *    never become `natural` (an unobserved ending recorded as a normal
+ *    completion is an affirmative false claim).
+ *  - Returns `undefined` — the field is OMITTED — for "not sure", for an empty
+ *    answer, and for input that stays uninterpretable after
+ *    {@link MAX_PROMPT_TRIES} tries. This is deliberately NOT
+ *    {@link promptNonNegInt}, whose optional mode returns `0` on an empty
+ *    answer and always sends the field: `undefined` here means the key is
+ *    absent from the request body, which is the only honest encoding of "the
+ *    ending was not observed". An unanswered question never fails the submit.
+ *  - The answer LINE is whitespace-trimmed, like every prompt in this file.
+ *    Within it, a numbered choice maps 1:1 onto its exact vocabulary literal,
+ *    and the exact literal typed out is accepted as itself. Nothing else is
+ *    accepted — no case folding, no aliasing, no prefix or fuzzy match.
+ */
+async function promptCensoring(
+  args: Pick<ManualActualsArgs, "prompt" | "out">,
+): Promise<CensoringCategory | undefined> {
+  args.out("How did the run end?");
+  args.out("  1. It ended on its own (no cap was reached)");
+  args.out("  2. A wall-clock watchdog in the calling harness killed it");
+  args.out("  3. A cap inside the agent host fired (max turns, context exhaustion, a token budget)");
+  args.out("  4. A human or an automation deliberately aborted it");
+  args.out("  5. Not sure / prefer not to say");
+  // A Map, not an object literal: a bare `byChoice[raw]` would resolve
+  // prototype keys, so a user typing `toString` would get a function back and
+  // this would return it as a "category" (the same masquerade the SDK pins for
+  // normalizeScenario). Map.get answers only for real members.
+  const byChoice = new Map<string, CensoringCategory>([
+    ["1", "natural"],
+    ["2", "harness_watchdog"],
+    ["3", "operative_cap"],
+    ["4", "kill_switch"],
+  ]);
+  for (let i = 0; i < MAX_PROMPT_TRIES; i++) {
+    const raw = (await args.prompt("Ending [1-5, Enter = 5]: ")).trim();
+    if (raw.length === 0 || raw === "5") return undefined;
+    const chosen = byChoice.get(raw) ?? censoringCategory(raw);
+    if (chosen !== undefined) return chosen;
+    if (i < MAX_PROMPT_TRIES - 1) {
+      args.out("Please answer 1-5 (or press Enter if not sure). Try again.");
+    }
+  }
+  args.out("Leaving how the run ended unrecorded.");
+  return undefined;
+}
+
+/**
  * Prompt for a non-negative whole number, accepting grouped input (`48,000`)
  * and re-prompting up to {@link MAX_PROMPT_TRIES} times on invalid input. An
  * `optional` field returns 0 on an empty answer; a required field that stays
- * invalid returns `null` (the caller aborts).
+ * invalid returns `null` (the caller aborts). ⚠️ "Optional" here still SENDS
+ * the field (as `0`) when the answer is empty — a field that must be OMITTED
+ * when unanswered needs its own helper (see {@link promptCensoring}); reusing
+ * this one would make absence readable as a value.
  */
 async function promptNonNegInt(
   args: Pick<ManualActualsArgs, "prompt" | "out">,
@@ -1259,11 +1382,23 @@ export interface RolloutActualsArgs {
   transcriptPath: string;
   /**
    * Whether the run completed its objective. The transcript carries real token
-   * counts but not a trustworthy success signal, so the human supplies it
-   * (default true; `--failed` sets it false). This is the ONLY caller-declared
-   * field — the token counts are always measured, never entered.
+   * counts but not a trustworthy success signal, so the caller supplies it
+   * (default true; `--failed` sets it false). Like {@link censoring}, it is a
+   * caller declaration — the token counts are always measured, never entered.
    */
   success: boolean;
+  /**
+   * The raw `--censoring <value>` declaration, when the invoking harness passed
+   * one. A harness that spawned the agent host is a measuring instrument: it
+   * owns its watchdog and reads the host's own result output, so this is the
+   * same kind of declaration about the same run as `--success`/`--failed`. The
+   * client is a wire, not a translator: the value is checked for an EXACT match
+   * against the four contract categories and forwarded verbatim; anything else
+   * (a typo, a case variant, a fifth word) is OMITTED from the body — never
+   * normalized, never defaulted, and never an error that fails the submit.
+   * Absent ⇒ the field is absent and the body is byte-identical to today's.
+   */
+  censoring?: string;
   env: NodeJS.ProcessEnv;
   home?: string;
   /** The session's working directory, hashed to bind the actual to its own project. */
@@ -1356,6 +1491,19 @@ export async function runRolloutActuals(
     );
   }
 
+  // Exact-match-or-omit, decided HERE so the foreground command can say what it
+  // did: a recognized category is forwarded verbatim; anything else is dropped
+  // with a note and the submit proceeds unchanged. Never an error — a harness
+  // typo must not cost the run's counts, and the server would drop the value to
+  // null anyway.
+  const censoring = censoringCategory(args.censoring);
+  if (args.censoring !== undefined && censoring === undefined) {
+    args.out(
+      `(--censoring ${JSON.stringify(args.censoring)} is not one of ` +
+        `${CENSORING_CATEGORIES.join(" | ")} — omitting it. Values match exactly; nothing is normalized.)`,
+    );
+  }
+
   // The submit reports its own outcome, so success is asserted from THIS call —
   // never inferred from the entry's absence (a concurrent close could make that
   // a lie) — and a non-retryable rejection is never dressed up as "try again".
@@ -1369,6 +1517,7 @@ export async function runRolloutActuals(
       success: args.success,
       durationMs: inferDurationMs({}, entry, now),
       ...(trace ? { trace } : {}),
+      ...(censoring !== undefined ? { censoring } : {}),
     },
     logger: { warn: args.out },
     measured: new MeasuredStore({

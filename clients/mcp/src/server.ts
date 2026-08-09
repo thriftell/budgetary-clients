@@ -232,6 +232,9 @@ function usageText(): string {
     "  npx @budgetary/mcp report-actual --estimate-id ID close a specific (already-billed) estimate for free",
     "  npx @budgetary/mcp on-session-end                 actuals from a session-end payload on stdin (host hook)",
     "  npx @budgetary/mcp on-session-end --transcript P  actuals from a rollout/transcript file P",
+    "                     [--failed] [--censoring C]     C: how the run ended, exactly one of",
+    "                                                    natural | harness_watchdog | operative_cap | kill_switch",
+    "                                                    (anything else is omitted, never an error)",
     "  npx @budgetary/mcp --version                      print the version and exit",
     "  npx @budgetary/mcp --help                         show this help and exit",
     "",
@@ -280,22 +283,41 @@ async function runReportActualCli(estimateId: string | null): Promise<number> {
 export interface OnSessionEndArgs {
   transcript: string | null;
   success: boolean;
+  /**
+   * The RAW `--censoring <value>` declaration, or null when the flag was
+   * absent. Syntactic only: the exact-match check against the four contract
+   * categories happens downstream (`runRolloutActuals`), where an unrecognized
+   * value is OMITTED from the body — never normalized, never an error. Consumed
+   * ONLY by the `--transcript` form; the stdin hook path never reads it.
+   */
+  censoring: string | null;
   /** A usage error (e.g. `--transcript` with no path), or null. */
   error: string | null;
 }
 
 /**
  * Parse `on-session-end` arguments: an optional rollout/transcript file path
- * (via `--transcript`/`--rollout` or a bare positional) and a success flag
- * (`--failed` / `--success`, default success). The counts are always measured
- * from the file; only success is caller-declared. A `--transcript`/`--rollout`
- * with no value (or a flag-shaped value like `--failed`) is a usage ERROR — it
- * must never be swallowed as the path, nor fall through to the stdin hook path
- * where the explicit request to submit a file would silently do nothing.
+ * (via `--transcript`/`--rollout` or a bare positional), a success flag
+ * (`--failed` / `--success`, default success), and an optional
+ * `--censoring <value>` run-termination declaration. The counts are always
+ * measured from the file; only success and censoring are caller-declared. A
+ * `--transcript`/`--rollout` with no value (or a flag-shaped value like
+ * `--failed`) is a usage ERROR — it must never be swallowed as the path, nor
+ * fall through to the stdin hook path where the explicit request to submit a
+ * file would silently do nothing.
+ *
+ * `--censoring` MUST be handled inside this loop: the loop silently ignores
+ * unrecognised flags, and its bare-positional branch claims the first non-flag
+ * token when no transcript is set yet — so an unhandled `--censoring natural`
+ * would swallow `natural` as the transcript path. Its value token is consumed
+ * even when it is not a valid category (validation is downstream and
+ * fail-closed to omission); a flag-shaped or missing value simply leaves the
+ * declaration null — an absent observation, never an error.
  */
 export function parseOnSessionEndArgs(rest: string[]): OnSessionEndArgs {
   let transcript: string | null = null;
   let success = true;
+  let censoring: string | null = null;
   let error: string | null = null;
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i]!;
@@ -307,6 +329,12 @@ export function parseOnSessionEndArgs(rest: string[]): OnSessionEndArgs {
         transcript = val;
         i++;
       }
+    } else if (a === "--censoring") {
+      const val = rest[i + 1];
+      if (val !== undefined && !val.startsWith("-")) {
+        censoring = val;
+        i++;
+      }
     } else if (a === "--failed") {
       success = false;
     } else if (a === "--success") {
@@ -315,7 +343,7 @@ export function parseOnSessionEndArgs(rest: string[]): OnSessionEndArgs {
       transcript = a;
     }
   }
-  return { transcript, success, error };
+  return { transcript, success, censoring, error };
 }
 
 /**
@@ -338,23 +366,29 @@ export async function runOnSessionEndCli(
 ): Promise<number> {
   const stderr = deps.stderr ?? process.stderr;
   const env = deps.env ?? process.env;
-  const { transcript, success, error } = parseOnSessionEndArgs(rest);
+  const { transcript, success, censoring, error } = parseOnSessionEndArgs(rest);
   // Fail loud on a malformed foreground request rather than silently entering
   // the stdin hook path (where it would hang on a TTY or no-op on empty stdin).
   if (error !== null) {
     stderr.write(
       `Budgetary: ${error}.\n` +
-        "  Usage: npx @budgetary/mcp on-session-end --transcript <path> [--failed]\n",
+        "  Usage: npx @budgetary/mcp on-session-end --transcript <path> [--failed] [--censoring <category>]\n",
     );
     return 2;
   }
   // Foreground form: an explicit rollout/transcript file path. Reads real counts
   // from the file and reports what it did — the working Codex actuals path.
+  // This is the ONLY form that consumes `--censoring`: the invoking harness is
+  // the measuring instrument here. The hook form below never reads it — its
+  // payload's `reason` describes how the SESSION ended, not how the run ended,
+  // and a declaration aimed at a transcript submit must not leak onto a path
+  // that observed nothing.
   if (transcript !== null) {
     try {
       return await runRolloutActuals({
         transcriptPath: transcript,
         success,
+        ...(censoring !== null ? { censoring } : {}),
         env,
         cwd: process.cwd(),
         out: (line) => process.stdout.write(`${line}\n`),
@@ -373,6 +407,18 @@ export async function runOnSessionEndCli(
     }
   }
 
+  // An explicit --censoring declaration only has meaning on the --transcript
+  // form. Reaching here with one almost always means a caller forgot
+  // --transcript — but this is also the path a (miswired) SessionEnd hook
+  // would take, and the hook's contract is to fail closed (exit 0), so a loud
+  // usage error is not available. Say where the declaration went — nowhere —
+  // rather than discarding it silently; the hook behavior is otherwise
+  // unchanged, and the value still influences nothing (see the doc above).
+  if (censoring !== null) {
+    stderr.write(
+      "Budgetary: --censoring only applies to the --transcript form; ignoring it here.\n",
+    );
+  }
   // Hook form: a host (e.g. Claude Code SessionEnd) pipes one JSON payload
   // envelope on stdin. Stays silent on success and fails closed (exit 0) so a
   // malformed payload never crashes the host. The accumulator is size-bounded so

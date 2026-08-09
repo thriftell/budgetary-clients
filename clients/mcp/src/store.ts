@@ -32,6 +32,16 @@ export interface PendingEntry {
   duration_ms?: number;
   /** Whether the original (failed) submit carried a trace; the retry sends totals only. */
   has_trace?: boolean;
+  /**
+   * The run-termination category the failed submit DECLARED (an outer harness's
+   * `--censoring`, or the human's `report-actual` answer), persisted so the
+   * retry — which IS the first submission that stores the row — resubmits it.
+   * Absent when nothing observed the ending, which is most entries and is the
+   * honest record. Re-validated at read time against the exact vocabulary
+   * (a corrupt value degrades to omitted, never normalized), so — like every
+   * optional field above — it needs no bump to the file `version`.
+   */
+  censoring?: string;
   // --- Additive (v1-compatible) FORECAST band captured at ESTIMATE time. The
   //     estimate response already carried it, so this is a LOCAL store field, not
   //     a wire change: it lets a later `pending`/`doctor`/submit surface print

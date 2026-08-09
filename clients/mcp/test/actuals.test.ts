@@ -2640,3 +2640,367 @@ describe("provenance: metadata.source", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// censoring — the run-termination category (0099a-1). The rule that decides
+// every case: a path that cannot verify a category sends NOTHING. Two of the
+// four submit paths send nothing permanently, by design — and both are pinned
+// here, because an absent key is only an invariant if something checks for it.
+// ---------------------------------------------------------------------------
+
+const SIX_SESSION_END_REASONS = [
+  "clear",
+  "resume",
+  "logout",
+  "prompt_input_exit",
+  "other",
+  "bypass_permissions_disabled",
+] as const;
+
+const FOUR_CATEGORIES = [
+  "natural",
+  "harness_watchdog",
+  "operative_cap",
+  "kill_switch",
+] as const;
+
+const CAP_KEYS = ["cap_ms", "capMs", "cap_tokens", "capTokens"] as const;
+
+function censoringEntry(id: string, over: Partial<PendingEntry> = {}): PendingEntry {
+  return {
+    estimate_id: id,
+    query: "q",
+    project_id: projectIdFromCwd(cwd, home),
+    created_at: RECENT,
+    attempts: 0,
+    ...over,
+  };
+}
+
+/** No body the client can build may carry a cap key, from any source (contract §4.2's cap fields have no client-side source). */
+function expectNoCapKeys(sent: Record<string, unknown>): void {
+  for (const k of CAP_KEYS) expect(k in sent).toBe(false);
+  expect(JSON.stringify(sent)).not.toMatch(/cap_ms|capMs|cap_tokens|capTokens/);
+}
+
+describe("censoring — rollout path forwards the harness declaration verbatim", () => {
+  it("forwards each of the four contract literals exactly as given", async () => {
+    for (const value of FOUR_CATEGORIES) {
+      writePending(home, { version: 1, entries: [censoringEntry(`est_${value}`)] });
+      const fake = makeFakeClient();
+      const code = await runRolloutActuals({
+        transcriptPath: "/tmp/r.jsonl",
+        success: true,
+        censoring: value,
+        env: ENV,
+        home,
+        cwd,
+        now: () => NOW,
+        out: () => {},
+        clientFactory: () => asClient(fake),
+        readUsage: () => ({ tokensIn: 100, tokensOut: 200, trace: [] }),
+      });
+      expect(code).toBe(0);
+      const sent = fake.submitActuals.mock.calls[0]![0] as Record<string, unknown>;
+      // Verbatim: the same literal, untransformed.
+      expect(sent.censoring).toBe(value);
+      expectNoCapKeys(sent);
+      expect(readPending(home).entries).toEqual([]);
+    }
+  });
+
+  it("★ omits every near-miss — never normalized, never defaulted, never an error", async () => {
+    // "Natural" is one keystroke from a valid category; folding it would be
+    // exactly the coercion that turns a typo into a confident wrong category.
+    for (const bad of ["Natural", "NATURAL", " natural", "natural ", "timeout", "harness-watchdog", ""]) {
+      writePending(home, { version: 1, entries: [censoringEntry("est_bad")] });
+      const fake = makeFakeClient();
+      const out: string[] = [];
+      const code = await runRolloutActuals({
+        transcriptPath: "/tmp/r.jsonl",
+        success: true,
+        censoring: bad,
+        env: ENV,
+        home,
+        cwd,
+        now: () => NOW,
+        out: (l) => out.push(l),
+        clientFactory: () => asClient(fake),
+        readUsage: () => ({ tokensIn: 100, tokensOut: 200, trace: [] }),
+      });
+      // The submit itself is unaffected: exit 0, entry closed, counts sent.
+      expect(code).toBe(0);
+      const sent = fake.submitActuals.mock.calls[0]![0] as Record<string, unknown>;
+      expect("censoring" in sent).toBe(false);
+      expect(sent.tokensIn).toBe(100);
+      expect(readPending(home).entries).toEqual([]);
+      // The foreground command says what it dropped (it is a human's terminal).
+      expect(out.join("\n")).toContain("omitting it");
+    }
+  });
+
+  it("★ absent flag ⇒ a body BYTE-IDENTICAL to today's — proven, not assumed", async () => {
+    writePending(home, { version: 1, entries: [censoringEntry("est_bytes")] });
+    const fake = makeFakeClient();
+    const code = await runRolloutActuals({
+      transcriptPath: "/tmp/r.jsonl",
+      success: true,
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      out: () => {},
+      clientFactory: () => asClient(fake),
+      readUsage: () => ({ tokensIn: 100, tokensOut: 200, trace: [] }),
+    });
+    expect(code).toBe(0);
+    const sent = fake.submitActuals.mock.calls[0]![0] as Record<string, unknown>;
+    // Exact serialized bytes of the six-key body — no seventh key, no
+    // reordering, nothing readable as a value where nothing was observed.
+    expect(JSON.stringify(sent)).toBe(
+      '{"estimateId":"est_bytes","tokensIn":100,"tokensOut":200,"success":true,' +
+        '"durationMs":840000,"metadata":{"source":"mcp_client"}}',
+    );
+  });
+});
+
+describe("censoring — ★★ the value survives the retry ladder (the retry IS the first stored submission)", () => {
+  it("persists the declaration on a failed submit and resubmits it from a LATER session's hook", async () => {
+    // 1) The harness declares kill_switch; the network eats the first submit.
+    //    (A killed run is exactly the run most likely to have a failed submit.)
+    writePending(home, { version: 1, entries: [censoringEntry("est_retry")] });
+    const failing = makeFakeClient(async () => {
+      throw new Error("network down");
+    });
+    const code = await runRolloutActuals({
+      transcriptPath: "/tmp/r.jsonl",
+      success: false,
+      censoring: "kill_switch",
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      out: () => {},
+      clientFactory: () => asClient(failing),
+      readUsage: () => ({ tokensIn: 100, tokensOut: 200, trace: [] }),
+    });
+    expect(code).toBe(1);
+    // Both halves of the round-trip: the declaration is PERSISTED beside the
+    // measured counts...
+    const kept = readPending(home).entries[0]!;
+    expect(kept.censoring).toBe("kill_switch");
+    expect(kept.tokens_in).toBe(100);
+
+    // 2) ...and a LATER session's hook retry — a different process that
+    //    observed nothing and re-reads no transcript — carries it to the
+    //    attempt that actually stores the row.
+    const succeeding = makeFakeClient();
+    const hookCode = await runAutoActuals({
+      payload: { reason: "other" },
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      stderr: { write: () => {} },
+      clientFactory: () => asClient(succeeding),
+    });
+    expect(hookCode).toBe(0);
+    const sent = succeeding.submitActuals.mock.calls[0]![0] as Record<string, unknown>;
+    expect(sent.censoring).toBe("kill_switch");
+    expect(sent.tokensIn).toBe(100);
+    expect(sent.success).toBe(false);
+    expectNoCapKeys(sent);
+    expect(readPending(home).entries).toEqual([]);
+  });
+
+  it("a corrupt persisted category degrades to OMITTED — the counts still resubmit", async () => {
+    // The store is re-validated at read time like every other persisted field:
+    // a hand-edited "Natural" must not reach the wire (and must not be folded).
+    writePending(home, {
+      version: 1,
+      entries: [
+        censoringEntry("est_corrupt", {
+          tokens_in: 5,
+          tokens_out: 6,
+          success: true,
+          duration_ms: 7,
+          censoring: "Natural",
+        }),
+      ],
+    });
+    const fake = makeFakeClient();
+    const code = await runAutoActuals({
+      payload: { reason: "other" },
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      stderr: { write: () => {} },
+      clientFactory: () => asClient(fake),
+    });
+    expect(code).toBe(0);
+    const sent = fake.submitActuals.mock.calls[0]![0] as Record<string, unknown>;
+    expect(sent.tokensIn).toBe(5);
+    expect("censoring" in sent).toBe(false);
+  });
+
+  it("a failed submit that declares NOTHING clears a stale persisted category", async () => {
+    // The persisted fields mirror THIS submission's declaration exactly — an
+    // old category must not pair with counts that no longer declare it.
+    writePending(home, {
+      version: 1,
+      entries: [censoringEntry("est_stale", { censoring: "kill_switch" })],
+    });
+    const failing = makeFakeClient(async () => {
+      throw new Error("network down");
+    });
+    await runRolloutActuals({
+      transcriptPath: "/tmp/r.jsonl",
+      success: true,
+      env: ENV,
+      home,
+      cwd,
+      now: () => NOW,
+      out: () => {},
+      clientFactory: () => asClient(failing),
+      readUsage: () => ({ tokensIn: 1, tokensOut: 2, trace: [] }),
+    });
+    const kept = readPending(home).entries[0]!;
+    expect(kept.tokens_in).toBe(1);
+    expect("censoring" in kept).toBe(false);
+  });
+});
+
+describe("censoring — ★★ the SessionEnd hook path sends NOTHING (reason is session-scoped)", () => {
+  it("emits no censoring key for ANY of the six reason values", async () => {
+    // `reason` says how the SESSION ended; `censoring` says how the RUN ended.
+    // A session holds many runs — a `/clear` after a task finished perfectly is
+    // a person tidying up, not a kill switch. No member maps; none may leak.
+    for (const reason of SIX_SESSION_END_REASONS) {
+      writePending(home, { version: 1, entries: [censoringEntry(`est_${reason}`)] });
+      const fake = makeFakeClient();
+      const code = await runAutoActuals({
+        payload: { reason, transcript_path: "/tmp/t.jsonl" },
+        env: ENV,
+        home,
+        cwd,
+        now: () => NOW,
+        stderr: { write: () => {} },
+        clientFactory: () => asClient(fake),
+        readUsage: () => ({ tokensIn: 10, tokensOut: 20, trace: [] }),
+      });
+      expect(code).toBe(0);
+      expect(fake.submitActuals).toHaveBeenCalledTimes(1);
+      const sent = fake.submitActuals.mock.calls[0]![0] as Record<string, unknown>;
+      expect("censoring" in sent).toBe(false);
+      expectNoCapKeys(sent);
+    }
+  });
+});
+
+describe("censoring — report-actual asks, and an unanswered question OMITS", () => {
+  async function runManualWith(answers: string[]) {
+    writePending(home, { version: 1, entries: [censoringEntry("est_manual_c")] });
+    const fake = makeFakeClient();
+    const out: string[] = [];
+    const questions: string[] = [];
+    let i = 0;
+    const code = await runManualActuals({
+      env: ENV,
+      home,
+      cwd,
+      out: (l) => out.push(l),
+      prompt: async (q) => {
+        questions.push(q);
+        return answers[i++] ?? "";
+      },
+      clientFactory: () => asClient(fake),
+    });
+    return { code, fake, out, questions };
+  }
+
+  it("an EMPTY answer selects 'not sure' and the key is ABSENT from the body", async () => {
+    const { code, fake } = await runManualWith(["100", "200", "y", "", ""]);
+    expect(code).toBe(0);
+    const sent = fake.submitActuals.mock.calls[0]![0] as Record<string, unknown>;
+    expect("censoring" in sent).toBe(false);
+    // The contrast that motivates the NEW helper: the optional duration is
+    // SENT as 0 when skipped; the ending is OMITTED when skipped. Reusing the
+    // numeric helper would have made absence readable as a value.
+    expect(sent.durationMs).toBe(0);
+    expectNoCapKeys(sent);
+  });
+
+  it("an explicit '5' (not sure) also omits; nothing is pre-selected", async () => {
+    const { code, fake } = await runManualWith(["100", "200", "y", "", "5"]);
+    expect(code).toBe(0);
+    const sent = fake.submitActuals.mock.calls[0]![0] as Record<string, unknown>;
+    expect("censoring" in sent).toBe(false);
+  });
+
+  it("a numbered choice maps 1:1 onto its exact vocabulary literal", async () => {
+    const byChoice: Array<[string, string]> = [
+      ["1", "natural"],
+      ["2", "harness_watchdog"],
+      ["3", "operative_cap"],
+      ["4", "kill_switch"],
+    ];
+    for (const [choice, literal] of byChoice) {
+      const { code, fake } = await runManualWith(["100", "200", "y", "", choice]);
+      expect(code).toBe(0);
+      const sent = fake.submitActuals.mock.calls[0]![0] as Record<string, unknown>;
+      expect(sent.censoring).toBe(literal);
+    }
+  });
+
+  it("the exact literal typed out is accepted as itself; a near-miss re-prompts and then omits", async () => {
+    const typed = await runManualWith(["100", "200", "y", "", "kill_switch"]);
+    expect(
+      (typed.fake.submitActuals.mock.calls[0]![0] as Record<string, unknown>).censoring,
+    ).toBe("kill_switch");
+
+    // The answer LINE is whitespace-trimmed like every prompt in this file;
+    // WITHIN it the literal must match exactly. (The --censoring flag path is
+    // stricter: argv arrives verbatim and is never trimmed.)
+    const padded = await runManualWith(["100", "200", "y", "", "  kill_switch  "]);
+    expect(
+      (padded.fake.submitActuals.mock.calls[0]![0] as Record<string, unknown>).censoring,
+    ).toBe("kill_switch");
+
+    // "Natural" is NOT folded; after MAX_PROMPT_TRIES the field is omitted and
+    // the submit still goes through — an unanswered question never fails it.
+    const missed = await runManualWith(["100", "200", "y", "", "Natural", "huh", "what"]);
+    expect(missed.code).toBe(0);
+    const sent = missed.fake.submitActuals.mock.calls[0]![0] as Record<string, unknown>;
+    expect("censoring" in sent).toBe(false);
+    expect(missed.out.join("\n")).toContain("Leaving how the run ended unrecorded.");
+  });
+
+  it("a prototype key is not a choice and not a category — re-prompts, then omits", async () => {
+    // The choice lookup must answer only for its four real members: an
+    // object-literal lookup would resolve `toString`/`constructor` from the
+    // prototype and hand back a function as the "category".
+    const { code, fake } = await runManualWith([
+      "100", "200", "y", "", "toString", "constructor", "__proto__",
+    ]);
+    expect(code).toBe(0);
+    const sent = fake.submitActuals.mock.calls[0]![0] as Record<string, unknown>;
+    expect("censoring" in sent).toBe(false);
+  });
+
+  it("asks with the four categories in plain language PLUS an explicit not-sure", async () => {
+    const { out, questions } = await runManualWith(["100", "200", "y", "", ""]);
+    const text = out.join("\n");
+    expect(text).toContain("How did the run end?");
+    expect(text).toContain("  1. It ended on its own (no cap was reached)");
+    expect(text).toContain("  2. A wall-clock watchdog in the calling harness killed it");
+    expect(text).toContain(
+      "  3. A cap inside the agent host fired (max turns, context exhaustion, a token budget)",
+    );
+    expect(text).toContain("  4. A human or an automation deliberately aborted it");
+    expect(text).toContain("  5. Not sure / prefer not to say");
+    // Never a yes/no with a default — a shrug must not become `natural`.
+    expect(questions).toContain("Ending [1-5, Enter = 5]: ");
+    expect(text).not.toMatch(/finish normally/i);
+  });
+});
