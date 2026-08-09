@@ -27,6 +27,7 @@ interface Manifest {
       isSecret?: boolean;
     }[];
   }[];
+  remotes?: { type: string; url: string }[];
 }
 
 const manifestPath = join(
@@ -73,6 +74,28 @@ describe("server.json — the registry manifest", () => {
     // may declare tags; it may never declare capabilities.
     expect(byName.has(SESSION_END_ENV)).toBe(false);
     expect(declared.map((v) => v.name)).not.toContain("BUDGETARY_SESSION_END");
+  });
+
+  it("NEVER advertises a remote", () => {
+    // ★ 0024f's withdrawal, held as an invariant so it cannot silently return.
+    //
+    // A `remotes` entry carries a URL and nothing else. The schema has no field
+    // for a credential input and no room for prose, so a client that configures
+    // the remote strictly from this manifest has nowhere to put the API key
+    // `tools/call` requires — the one-click path could not authenticate, and
+    // the install decision is the one place we could not explain that. Nor
+    // could it contribute: no local process on that path, no pending store, no
+    // transcript, and no route by which an estimate is ever closed out by an
+    // actual. It advertised the least-setup install as the one that can neither
+    // work nor count.
+    //
+    // The endpoint itself stays live, and the README documents by hand what it
+    // can and cannot do. What was withdrawn is the advertisement.
+    //
+    // Asserted on the KEY, not the value: `"remotes": []` would satisfy a
+    // truthiness check while re-opening the field for a one-line refill.
+    expect(Object.prototype.hasOwnProperty.call(manifest, "remotes")).toBe(false);
+    expect(manifest.remotes).toBeUndefined();
   });
 
   it("nothing it declares is a contribution signal", () => {

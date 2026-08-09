@@ -34,11 +34,5 @@
         }
       ]
     }
-  ],
-  "remotes": [
-    {
-      "type": "streamable-http",
-      "url": "https://api.budgetary.tools/mcp"
-    }
   ]
 }
