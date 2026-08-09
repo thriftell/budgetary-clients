@@ -22,6 +22,15 @@ describe("toSnakeCase — protocol snake-cased, metadata verbatim", () => {
       metadata: { toolCalls: 47, camelKey: "v", nested: { innerKey: 1 } },
     });
   });
+
+  it("passes `censoring` through untouched — the key is already wire-shaped and VALUES are never transformed", () => {
+    // The vocabulary members themselves contain underscores; a value transform
+    // would corrupt them into something the server exact-matches and drops.
+    expect(toSnakeCase({ estimateId: "e", censoring: "harness_watchdog" })).toEqual({
+      estimate_id: "e",
+      censoring: "harness_watchdog",
+    });
+  });
 });
 
 describe("toCamelCase — iterative, deep-nesting safe (P-C3)", () => {

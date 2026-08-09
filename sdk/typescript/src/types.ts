@@ -101,6 +101,33 @@ export interface ActualsMetadata {
 }
 
 /**
+ * The closed run-termination vocabulary for {@link ActualsRequest.censoring}
+ * (contract §4.2) — **how the run ended**, as a category:
+ *
+ * - `natural` — the run ended on its own; no cap was reached.
+ * - `harness_watchdog` — a wall-clock watchdog in the calling harness killed it.
+ * - `operative_cap` — a cap inside the agent host fired (max turns, context
+ *   exhaustion, a declared token budget).
+ * - `kill_switch` — a human or an automation deliberately aborted it.
+ *
+ * The server matches these **exactly** — no case folding, no trimming, no
+ * aliasing — and drops anything else to `null` (unknown) without failing the
+ * call. A caller does the same: forward a value from this set verbatim, or omit
+ * the field entirely. **Never default to `natural`** — an unobserved ending
+ * recorded as a normal completion is an affirmative false claim, and an absent
+ * field is the honest record that nothing observed how the run ended.
+ */
+export const CENSORING_CATEGORIES = [
+  "natural",
+  "harness_watchdog",
+  "operative_cap",
+  "kill_switch",
+] as const;
+
+/** A member of the closed {@link CENSORING_CATEGORIES} vocabulary. */
+export type CensoringCategory = (typeof CENSORING_CATEGORIES)[number];
+
+/**
  * One measured step of a run's execution trace. The `tokens` count is realized
  * usage on the same cache-read-excluded basis as {@link ActualsRequest.tokensIn}
  * / {@link ActualsRequest.tokensOut} — never model-supplied. `kind` is set to
@@ -156,6 +183,19 @@ export interface ActualsRequest {
    * and drops it (without failing the call) if it is over-cap or malformed.
    */
   trace?: ActualsTraceStep[];
+  /**
+   * Optional run-termination category (contract §4.2): how the run **ended**,
+   * from the closed four-member {@link CENSORING_CATEGORIES} vocabulary. It is
+   * measured harness- or client-side — a host's or harness's own termination
+   * fact, the same class of measurement as the token counts — and **never
+   * model-supplied**: a model's account of its own truncation is not a
+   * measurement. Omit rather than guess: an absent field stores `null`
+   * (unknown), which is the honest record when nothing observed the ending;
+   * `natural` is an affirmative claim, never a default. ⚠️ The server stores
+   * only the **first** submission's value for an `estimate_id` — a replay's
+   * `censoring` is silently discarded — so it must ride the first submit.
+   */
+  censoring?: CensoringCategory;
   metadata?: ActualsMetadata;
 }
 

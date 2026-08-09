@@ -17,7 +17,7 @@ export {
 } from "./errors.js";
 export type { BudgetaryNetworkErrorCode } from "./errors.js";
 
-export { normalizeScenario } from "./types.js";
+export { normalizeScenario, CENSORING_CATEGORIES } from "./types.js";
 export type {
   Scenario,
   Distribution,
@@ -28,6 +28,7 @@ export type {
   ActualsTraceStep,
   ActualsRequest,
   ActualsResponse,
+  CensoringCategory,
   PhaseSlice,
   Phases,
   AssessmentVerdict,

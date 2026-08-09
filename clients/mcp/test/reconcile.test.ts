@@ -896,3 +896,69 @@ describe("the estimate path is untouched", () => {
     expect(a?.attempts).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// censoring (0099a-1): the reconcile runs on the NEXT estimate, in a different
+// process, against a PREVIOUS session's entry and transcript. It observed
+// nothing about that run's ending, so it sends nothing — pinned here because
+// an absent key is only an invariant if something checks for it.
+// ---------------------------------------------------------------------------
+
+describe("censoring — the reconcile sends NOTHING it did not observe", () => {
+  it("★★ a fresh reconcile emits no censoring key and no cap key, ever", async () => {
+    const dir = transcriptDir();
+    writeTranscript(dir, SESSION_A, TOOL_USE_A, { input: 1200, output: 3400 });
+    const entry = entryA();
+    writePending([entry]);
+
+    const fake = makeFakeClient();
+    const outcome = await reconcileEntry({
+      entry,
+      apiKey: "bg_test_dummy",
+      baseUrl: "https://api.example.test",
+      env: {} as NodeJS.ProcessEnv,
+      home,
+      clientFactory: () => asClient(fake),
+    });
+
+    expect(outcome).toBe("submitted");
+    const body = fake.submitActuals.mock.calls[0]![0] as Record<string, unknown>;
+    expect("censoring" in body).toBe(false);
+    for (const k of ["cap_ms", "capMs", "cap_tokens", "capTokens"]) {
+      expect(k in body).toBe(false);
+    }
+    expect(JSON.stringify(body)).not.toMatch(/censoring|cap_ms|capMs|cap_tokens|capTokens/);
+  });
+
+  it("a declaration PERSISTED by an earlier failed submit still rides its retry here", async () => {
+    // Not a reconcile observation: the original declaring submit persisted the
+    // category beside its measured counts, and the reconcile — like every
+    // retry — resubmits exactly what was persisted, because the retry is the
+    // first submission that stores the row.
+    const dir = transcriptDir();
+    writeTranscript(dir, SESSION_A, TOOL_USE_A, { input: 1, output: 2 });
+    const entry = entryA({
+      tokens_in: 4242,
+      tokens_out: 8484,
+      success: false,
+      duration_ms: 1234,
+      censoring: "harness_watchdog",
+    });
+    writePending([entry]);
+
+    const fake = makeFakeClient();
+    const outcome = await reconcileEntry({
+      entry,
+      apiKey: "bg_test_dummy",
+      baseUrl: "https://api.example.test",
+      env: {} as NodeJS.ProcessEnv,
+      home,
+      clientFactory: () => asClient(fake),
+    });
+
+    expect(outcome).toBe("submitted");
+    const body = fake.submitActuals.mock.calls[0]![0] as Record<string, unknown>;
+    expect(body.censoring).toBe("harness_watchdog");
+    expect(body.tokensIn).toBe(4242);
+  });
+});

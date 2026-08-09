@@ -45,6 +45,7 @@ describe("parseOnSessionEndArgs", () => {
     expect(parseOnSessionEndArgs(["--transcript", "/tmp/r.jsonl"])).toEqual({
       transcript: "/tmp/r.jsonl",
       success: true,
+      censoring: null,
       error: null,
     });
   });
@@ -56,6 +57,7 @@ describe("parseOnSessionEndArgs", () => {
     expect(parseOnSessionEndArgs(["/tmp/r.jsonl"])).toEqual({
       transcript: "/tmp/r.jsonl",
       success: true,
+      censoring: null,
       error: null,
     });
   });
@@ -86,8 +88,118 @@ describe("parseOnSessionEndArgs", () => {
     expect(parseOnSessionEndArgs([])).toEqual({
       transcript: null,
       success: true,
+      censoring: null,
       error: null,
     });
+  });
+});
+
+describe("parseOnSessionEndArgs — --censoring (0099a-1)", () => {
+  it("parses --censoring <value> in every position relative to the transcript", () => {
+    for (const rest of [
+      ["--censoring", "natural", "--transcript", "/tmp/r.jsonl"],
+      ["--transcript", "/tmp/r.jsonl", "--censoring", "natural"],
+      ["--censoring", "natural", "/tmp/r.jsonl"],
+      ["/tmp/r.jsonl", "--censoring", "natural"],
+      ["--failed", "--censoring", "natural", "--transcript", "/tmp/r.jsonl"],
+    ]) {
+      const r = parseOnSessionEndArgs(rest);
+      expect(r.transcript).toBe("/tmp/r.jsonl");
+      expect(r.censoring).toBe("natural");
+      expect(r.error).toBeNull();
+    }
+  });
+
+  it("★ never claims the flag's value as the bare-positional transcript path", () => {
+    // The loop's bare-positional branch takes the first non-flag token when no
+    // transcript is set yet, and unrecognised flags are silently ignored — so a
+    // `--censoring` handled OUTSIDE the loop would have its value swallowed as
+    // the path. Pin the consumption: the value token is consumed in every
+    // order, and even when it is not a valid category (validation is
+    // downstream, fail-closed to omission — the syntax must still not leak it).
+    expect(parseOnSessionEndArgs(["--censoring", "natural"]).transcript).toBeNull();
+    expect(
+      parseOnSessionEndArgs(["--censoring", "natural", "/tmp/r.jsonl"]).transcript,
+    ).toBe("/tmp/r.jsonl");
+    expect(
+      parseOnSessionEndArgs(["--censoring", "Natural", "/tmp/r.jsonl"]).transcript,
+    ).toBe("/tmp/r.jsonl");
+    // Even a value that LOOKS like a path is the flag's value, not the transcript.
+    expect(
+      parseOnSessionEndArgs([
+        "--censoring",
+        "/tmp/decoy.jsonl",
+        "--transcript",
+        "/tmp/r.jsonl",
+      ]).transcript,
+    ).toBe("/tmp/r.jsonl");
+  });
+
+  it("passes the raw value through — exact-match-or-omit happens downstream, never here", () => {
+    // The parser is syntax only: a near-miss is NOT normalized into a category
+    // (and not errored); the submit path drops it from the body.
+    expect(
+      parseOnSessionEndArgs(["--censoring", "Natural", "/tmp/r.jsonl"]).censoring,
+    ).toBe("Natural");
+  });
+
+  it("a missing or flag-shaped value leaves the declaration null — not an error", () => {
+    const dangling = parseOnSessionEndArgs(["--transcript", "/tmp/r.jsonl", "--censoring"]);
+    expect(dangling.censoring).toBeNull();
+    expect(dangling.error).toBeNull();
+    const flagShaped = parseOnSessionEndArgs([
+      "--censoring",
+      "--failed",
+      "--transcript",
+      "/tmp/r.jsonl",
+    ]);
+    expect(flagShaped.censoring).toBeNull();
+    expect(flagShaped.success).toBe(false); // --failed still parsed as itself
+    expect(flagShaped.error).toBeNull();
+  });
+
+  it("★★ the stdin hook form IGNORES --censoring: nothing derived from it reaches the auto path", async () => {
+    // The hook path's payload `reason` is session-scoped; `--censoring` is a
+    // run-scoped declaration aimed at the --transcript form. The two share a
+    // subcommand and must not be conflated: the auto path's argument surface
+    // carries no censoring at all, so the flag cannot even be forwarded.
+    const calls: AutoActualsArgs[] = [];
+    const stderrLines: string[] = [];
+    const code = await runOnSessionEndCli(["--censoring", "kill_switch"], {
+      stdin: (async function* () {
+        yield JSON.stringify({ reason: "clear", transcript_path: "/tmp/t.jsonl" });
+      })(),
+      stderr: { write: (s) => stderrLines.push(s) },
+      env: {} as NodeJS.ProcessEnv,
+      runAuto: async (a) => {
+        calls.push(a);
+        return 0;
+      },
+    });
+    expect(code).toBe(0);
+    expect(calls).toHaveLength(1);
+    expect(JSON.stringify(firstCall(calls))).not.toContain("censoring");
+    // The declaration went nowhere, and that is SAID rather than silent: a
+    // caller that forgot --transcript would otherwise lose it with exit 0 and
+    // no signal anywhere. (Still a note, never an error — this is also the
+    // path a miswired hook takes, and the hook must fail closed.)
+    expect(stderrLines.join("")).toContain(
+      "--censoring only applies to the --transcript form; ignoring it here.",
+    );
+  });
+
+  it("no note when the hook form carries no --censoring (stderr stays silent)", async () => {
+    const stderrLines: string[] = [];
+    const code = await runOnSessionEndCli([], {
+      stdin: (async function* () {
+        yield JSON.stringify({ reason: "clear" });
+      })(),
+      stderr: { write: (s) => stderrLines.push(s) },
+      env: {} as NodeJS.ProcessEnv,
+      runAuto: async () => 0,
+    });
+    expect(code).toBe(0);
+    expect(stderrLines.join("")).not.toContain("--censoring");
   });
 });
 
